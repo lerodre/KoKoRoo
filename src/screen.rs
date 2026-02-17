@@ -801,9 +801,18 @@ fn capture_loop_webcam(
             }
         };
 
-        let rgb_data = frame.buffer();
-        let w = frame.resolution().width() as usize;
-        let h = frame.resolution().height() as usize;
+        // Decode frame to RGB regardless of camera's native format (YUYV, MJPEG, etc.)
+        let decoded = match frame.decode_image::<RgbFormat>() {
+            Ok(img) => img,
+            Err(e) => {
+                log_fmt!("[screen] webcam decode error: {}", e);
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+        };
+        let w = decoded.width() as usize;
+        let h = decoded.height() as usize;
+        let rgb_data = decoded.into_raw();
 
         // Convert RGB → BGRA
         let mut bgra = vec![0u8; w * h * 4];
