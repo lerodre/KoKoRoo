@@ -8,6 +8,7 @@ pub const PKT_HELLO: u8 = 0x01;    // key exchange: [0x01][32-byte ephemeral pub
 pub const PKT_VOICE: u8 = 0x02;    // encrypted voice: [0x02][4-byte counter][ciphertext+tag]
 pub const PKT_IDENTITY: u8 = 0x03; // identity exchange: [0x03][4-byte counter][encrypted identity pubkey]
 pub const PKT_CHAT: u8 = 0x04;     // chat message: [0x04][4-byte counter][encrypted text+timestamp]
+pub const PKT_HANGUP: u8 = 0x05;   // hangup signal: [0x05][4-byte counter][encrypted empty]
 
 /// Size of an X25519 public key.
 pub const PUBKEY_SIZE: usize = 32;
@@ -116,8 +117,9 @@ impl Session {
 
     /// Decrypt any packet. Returns (packet_type, plaintext).
     /// Returns None if decryption fails.
+    /// Minimum size: 1 (type) + 4 (counter) + 16 (auth tag) = 21 bytes (empty payload).
     pub fn decrypt_packet(&self, packet: &[u8]) -> Option<(u8, Vec<u8>)> {
-        if packet.len() < 1 + 4 + TAG_SIZE + 1 {
+        if packet.len() < 1 + 4 + TAG_SIZE {
             return None;
         }
         let pkt_type = packet[0];

@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::chat;
-use crate::crypto::{self, Session, PKT_CHAT, PKT_HELLO, PKT_IDENTITY, PKT_VOICE};
+use crate::crypto::{self, Session, PKT_CHAT, PKT_HANGUP, PKT_HELLO, PKT_IDENTITY, PKT_VOICE};
 use crate::firewall::{Action, Firewall};
 use crate::identity::{self, Identity};
 
@@ -31,8 +31,12 @@ pub fn call(peer_ip: &str, peer_port: &str, local_port: &str) {
         .expect("No speakers found");
 
     let identity = Identity::load_or_create();
+    let settings = identity::Settings::load();
     println!("=== hostelD Secure Voice Call ===");
     println!("Identity: {}", identity.fingerprint);
+    if !settings.nickname.is_empty() {
+        println!("Nickname: {}", settings.nickname);
+    }
     println!("Mic:      {}", input_device.name().unwrap_or_default());
     println!("Speakers: {}", output_device.name().unwrap_or_default());
     println!("Local:    [::]:{local_port}");
@@ -49,12 +53,22 @@ pub fn call(peer_ip: &str, peer_port: &str, local_port: &str) {
         &peer_addr, local_port,
         running.clone(), mic_active,
         &identity,
+        &settings.nickname,
     );
 
     match result {
         Ok(engine) => {
+            let peer_display = if engine.peer_nickname.is_empty() {
+                engine.peer_fingerprint.clone()
+            } else {
+                format!("{} #{}", engine.peer_nickname, engine.peer_fingerprint)
+            };
+            if let Some(ref warning) = engine.key_change_warning {
+                println!("\x1b[1;31m{warning}\x1b[0m");
+                println!();
+            }
             println!("Verification code: {}", engine.verification_code);
-            println!("Peer identity:     {}", engine.peer_fingerprint);
+            println!("Peer:              {peer_display}");
             println!();
             println!("Voice call active! (encrypted)");
             println!("Press Ctrl+C to hang up.");
@@ -63,7 +77,7 @@ pub fn call(peer_ip: &str, peer_port: &str, local_port: &str) {
                 // Print incoming chat messages in CLI mode
                 if let Some(rx) = &engine.chat_rx {
                     while let Ok(msg) = rx.try_recv() {
-                        println!("[chat] {}: {}", engine.peer_fingerprint, msg);
+                        println!("[chat] {}: {}", peer_display, msg);
                     }
                 }
                 thread::sleep(std::time::Duration::from_millis(100));
@@ -79,9 +93,13 @@ pub fn call(peer_ip: &str, peer_port: &str, local_port: &str) {
 /// Holds the active voice + chat call state.
 pub struct VoiceEngine {
     pub running: Arc<AtomicBool>,
+    pub local_hangup: Arc<AtomicBool>,
     pub verification_code: String,
     pub peer_fingerprint: String,
+    pub peer_nickname: String,
     pub contact_id: String,
+    /// TOFU warning if peer's key changed or nickname conflict detected
+    pub key_change_warning: Option<String>,
     /// Send chat text to the network thread
     pub chat_tx: Option<mpsc::Sender<String>>,
     /// Receive chat text from the network thread
@@ -144,22 +162,28 @@ fn handshake(
     Ok(session)
 }
 
-/// Exchange persistent identity keys over the encrypted session.
-/// Returns the peer's identity public key.
+/// Exchange persistent identity keys + nicknames over the encrypted session.
+/// Returns (peer_pubkey, peer_nickname).
 fn exchange_identity(
     socket: &UdpSocket,
     peer_addr: &str,
     session: &Arc<Mutex<Session>>,
     our_identity: &Identity,
-) -> Result<[u8; 32], String> {
-    // Send our identity pubkey encrypted
+    our_nickname: &str,
+) -> Result<([u8; 32], String), String> {
+    // Build payload: [32-byte pubkey][utf8 nickname bytes]
+    let mut payload = Vec::with_capacity(32 + our_nickname.len());
+    payload.extend_from_slice(&our_identity.pubkey);
+    payload.extend_from_slice(our_nickname.as_bytes());
+
     let identity_packet = {
         let mut sess = session.lock().unwrap();
-        sess.encrypt_packet(PKT_IDENTITY, &our_identity.pubkey)
+        sess.encrypt_packet(PKT_IDENTITY, &payload)
     };
 
     let mut buf = [0u8; 1024];
     let mut peer_identity = None;
+    let mut peer_nickname = String::new();
 
     // Send identity and wait for peer's
     for _attempt in 0..30 {
@@ -170,9 +194,10 @@ fn exchange_identity(
             Ok((n, _)) => {
                 let sess = session.lock().unwrap();
                 if let Some((pkt_type, plaintext)) = sess.decrypt_packet(&buf[..n]) {
-                    if pkt_type == PKT_IDENTITY && plaintext.len() == 32 {
+                    if pkt_type == PKT_IDENTITY && plaintext.len() >= 32 {
                         let mut pk = [0u8; 32];
-                        pk.copy_from_slice(&plaintext);
+                        pk.copy_from_slice(&plaintext[..32]);
+                        peer_nickname = String::from_utf8_lossy(&plaintext[32..]).to_string();
                         peer_identity = Some(pk);
                         break;
                     }
@@ -190,7 +215,9 @@ fn exchange_identity(
         thread::sleep(std::time::Duration::from_millis(100));
     }
 
-    peer_identity.ok_or_else(|| "Identity exchange timeout".to_string())
+    peer_identity
+        .map(|pk| (pk, peer_nickname))
+        .ok_or_else(|| "Identity exchange timeout".to_string())
 }
 
 /// Starts the secure voice + chat engine.
@@ -202,6 +229,7 @@ pub fn start_engine(
     running: Arc<AtomicBool>,
     mic_active: Arc<AtomicBool>,
     our_identity: &Identity,
+    our_nickname: &str,
 ) -> Result<VoiceEngine, String> {
     // Query each device's native channel count (Voicemeeter on Windows only supports stereo)
     let input_channels = input_device.default_input_config()
@@ -231,28 +259,99 @@ pub fn start_engine(
     let verification_code = session.verification_code.clone();
     let session = Arc::new(Mutex::new(session));
 
-    // ── Identity Exchange ──
-    let peer_identity_pubkey = exchange_identity(&socket, peer_addr, &session, our_identity)?;
+    // ── Identity Exchange (with nickname) ──
+    let (peer_identity_pubkey, peer_nickname) =
+        exchange_identity(&socket, peer_addr, &session, our_identity, our_nickname)?;
     let peer_fingerprint = crypto::fingerprint(&peer_identity_pubkey);
     let contact_id = identity::derive_contact_id(&our_identity.pubkey, &peer_identity_pubkey);
 
     println!("Peer identity: {peer_fingerprint}");
+    if !peer_nickname.is_empty() {
+        println!("Peer nickname: {peer_nickname}");
+    }
     println!("Contact ID:    {contact_id}");
 
-    // Save/update contact
-    let existing = identity::load_contact(&peer_fingerprint);
+    // Parse peer address to extract IP and port for contact storage
+    let (peer_ip_str, peer_port_str) = parse_peer_addr(peer_addr);
+
+    // ── TOFU: Trust On First Use ──
+    let existing = identity::load_contact(&peer_identity_pubkey);
+    let mut key_change_warning: Option<String> = None;
+
+    // Check 1: Does this nickname belong to a DIFFERENT key we already know?
+    if !peer_nickname.is_empty() {
+        let known = identity::find_contacts_by_nickname(&peer_nickname);
+        let impostor = known.iter().any(|c| c.pubkey != peer_identity_pubkey);
+        if impostor {
+            let warning = format!(
+                "WARNING: \"{}\" connected with a DIFFERENT key than previously known! Possible impersonation.",
+                peer_nickname
+            );
+            eprintln!("{warning}");
+            key_change_warning = Some(warning);
+        }
+    }
+
+    // Check 2: Did this pubkey previously have a different nickname?
+    if let Some(ref ex) = existing {
+        if !peer_nickname.is_empty() && !ex.nickname.is_empty() && ex.nickname != peer_nickname {
+            let note = format!(
+                "Note: Contact changed nickname from \"{}\" to \"{}\"",
+                ex.nickname, peer_nickname
+            );
+            println!("{note}");
+            if let Some(ref mut w) = key_change_warning {
+                w.push_str(&format!("\n{note}"));
+            }
+        }
+    }
+
+    // Check 3: Unknown pubkey connecting from an address we associate with a known contact?
+    // Catches impersonation when attacker doesn't send a nickname.
+    if existing.is_none() {
+        let all_contacts = identity::load_all_contacts();
+        let same_addr = all_contacts.iter().find(|c| {
+            c.pubkey != peer_identity_pubkey
+                && !c.last_address.is_empty()
+                && c.last_address == peer_ip_str
+                && c.last_port == peer_port_str
+        });
+        if let Some(old_contact) = same_addr {
+            let warning = format!(
+                "WARNING: New unknown key connecting from same address as known contact \"{}\"! Previous key was different.",
+                if old_contact.nickname.is_empty() { &old_contact.fingerprint } else { &old_contact.nickname }
+            );
+            eprintln!("{warning}");
+            key_change_warning = Some(warning);
+        }
+    }
+
+    // Save/update contact — never inherit nickname from a different pubkey
     let contact = identity::Contact {
         fingerprint: peer_fingerprint.clone(),
         pubkey: peer_identity_pubkey,
-        nickname: existing.as_ref().map(|c| c.nickname.clone()).unwrap_or_else(|| peer_fingerprint.clone()),
+        nickname: if !peer_nickname.is_empty() {
+            peer_nickname.clone()
+        } else if let Some(ref ex) = existing {
+            // Only reuse nickname if same pubkey (existing != None means same key)
+            ex.nickname.clone()
+        } else {
+            String::new()
+        },
         contact_id: contact_id.clone(),
         first_seen: existing.as_ref().map(|c| c.first_seen.clone()).unwrap_or_else(identity::now_timestamp),
         last_seen: identity::now_timestamp(),
+        last_address: peer_ip_str,
+        last_port: peer_port_str,
+        call_count: existing.as_ref().map(|c| c.call_count).unwrap_or(0) + 1,
     };
     identity::save_contact(&contact);
 
-    if existing.is_some() {
-        println!("Known contact: {}", contact.nickname);
+    if let Some(ref ex) = existing {
+        println!("Known contact: {} (call #{})", contact.nickname, contact.call_count);
+        if ex.call_count > 5 && key_change_warning.is_none() {
+            println!("Trusted contact ({} previous calls)", ex.call_count);
+        }
     } else {
         println!("New contact saved!");
     }
@@ -273,10 +372,14 @@ pub fn start_engine(
     let send_socket = socket.try_clone().unwrap();
     let peer_addr_owned = peer_addr.to_string();
 
+    // ── Local hangup flag ──
+    let local_hangup = Arc::new(AtomicBool::new(false));
+
     // ── Sender Thread: mic + chat → encrypt → UDP ──
     let running_s = running.clone();
     let mic_active_s = mic_active.clone();
     let session_s = session.clone();
+    let local_hangup_s = local_hangup.clone();
 
     let sender = thread::spawn(move || {
         let mut encoder = Encoder::new(
@@ -310,7 +413,7 @@ pub fn start_engine(
                     collected += 1;
                 } else {
                     thread::sleep(std::time::Duration::from_micros(200));
-                    if !running_s.load(Ordering::Relaxed) { return; }
+                    if !running_s.load(Ordering::Relaxed) { break; }
                     // Also check for chat while waiting for audio
                     while let Ok(text) = outgoing_rx.try_recv() {
                         let chat_bytes = chat::encode_chat_text(&text);
@@ -323,6 +426,8 @@ pub fn start_engine(
                 }
             }
 
+            if !running_s.load(Ordering::Relaxed) { break; }
+
             // Encode + encrypt + send voice
             let encoded_len = match encoder.encode_float(&pcm_frame, &mut opus_buf) {
                 Ok(n) => n,
@@ -333,6 +438,18 @@ pub fn start_engine(
                 sess.encrypt_voice(&opus_buf[..encoded_len])
             };
             let _ = send_socket.send_to(&packet, &peer_addr_owned);
+        }
+
+        // If this was a local hangup, send PKT_HANGUP to the peer
+        if local_hangup_s.load(Ordering::Relaxed) {
+            for _ in 0..3 {
+                let packet = {
+                    let mut sess = session_s.lock().unwrap();
+                    sess.encrypt_packet(PKT_HANGUP, &[])
+                };
+                let _ = send_socket.send_to(&packet, &peer_addr_owned);
+                thread::sleep(std::time::Duration::from_millis(50));
+            }
         }
     });
 
@@ -388,6 +505,11 @@ pub fn start_engine(
                             if let Some(text) = chat::decode_chat_text(&chat_data) {
                                 let _ = incoming_tx.send(text);
                             }
+                        }
+                        Some((PKT_HANGUP, _)) => {
+                            // Remote peer hung up
+                            running_r.store(false, Ordering::Relaxed);
+                            break;
                         }
                         Some(_) => {
                             // Unknown packet type, ignore
@@ -456,9 +578,12 @@ pub fn start_engine(
 
     Ok(VoiceEngine {
         running,
+        local_hangup,
         verification_code,
         peer_fingerprint,
+        peer_nickname,
         contact_id,
+        key_change_warning,
         chat_tx: Some(outgoing_tx),
         chat_rx: Some(incoming_rx),
         _input_stream: input_stream,
@@ -466,4 +591,20 @@ pub fn start_engine(
         _sender: sender,
         _receiver: receiver,
     })
+}
+
+/// Parse a peer address like `[::1]:9000` into (ip, port) strings.
+fn parse_peer_addr(peer_addr: &str) -> (String, String) {
+    // Format: [ip]:port
+    if let Some(bracket_end) = peer_addr.rfind(']') {
+        let ip = peer_addr[1..bracket_end].to_string();
+        let port = if bracket_end + 2 < peer_addr.len() {
+            peer_addr[bracket_end + 2..].to_string()
+        } else {
+            String::new()
+        };
+        (ip, port)
+    } else {
+        (peer_addr.to_string(), String::new())
+    }
 }

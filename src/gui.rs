@@ -5,7 +5,7 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 
 use crate::chat::ChatHistory;
-use crate::identity::Identity;
+use crate::identity::{self, Contact, Identity, Settings};
 
 // ── App State Machine ──
 
@@ -54,19 +54,32 @@ fn get_ipv6_addresses() -> Vec<(String, String)> {
     addrs
 }
 
+/// Format a contact/peer for display: "nickname #fingerprint" or just fingerprint.
+fn format_peer_display(nickname: &str, fingerprint: &str) -> String {
+    if nickname.is_empty() {
+        fingerprint.to_string()
+    } else {
+        format!("{nickname} #{fingerprint}")
+    }
+}
+
 // ── Connection result sent from background thread ──
 
 struct CallInfo {
     verification_code: String,
     peer_fingerprint: String,
+    peer_nickname: String,
     contact_id: String,
+    key_change_warning: Option<String>,
     chat_tx: mpsc::Sender<String>,
     chat_rx: mpsc::Receiver<String>,
+    local_hangup: Arc<AtomicBool>,
 }
 
 pub struct HostelApp {
     screen: Screen,
     identity: Identity,
+    settings: Settings,
 
     // Setup
     network_mode: usize,
@@ -79,12 +92,18 @@ pub struct HostelApp {
     devices: DeviceList,
     ipv6_addrs: Vec<(String, String)>,
 
+    // Contact list
+    contacts: Vec<Contact>,
+
     // Call state
     running: Arc<AtomicBool>,
     mic_active: Arc<AtomicBool>,
+    local_hangup: Option<Arc<AtomicBool>>,
     verification_code: String,
     peer_fingerprint: String,
+    peer_nickname: String,
     contact_id: String,
+    key_change_warning: Option<String>,
 
     // Chat
     chat_tx: Option<mpsc::Sender<String>>,
@@ -101,24 +120,48 @@ impl HostelApp {
         let devices = list_audio_devices();
         let ipv6_addrs = get_ipv6_addresses();
         let identity = Identity::load_or_create();
+        let settings = Settings::load();
+        let contacts = identity::load_all_contacts();
+
+        // Match saved device names to indices
+        let selected_input = if !settings.mic.is_empty() {
+            devices.input_names.iter().position(|n| n == &settings.mic).unwrap_or(0)
+        } else {
+            0
+        };
+        let selected_output = if !settings.speakers.is_empty() {
+            devices.output_names.iter().position(|n| n == &settings.speakers).unwrap_or(0)
+        } else {
+            0
+        };
+        let local_port = if settings.local_port.is_empty() {
+            "9000".to_string()
+        } else {
+            settings.local_port.clone()
+        };
 
         Self {
             screen: Screen::Setup,
             identity,
+            settings,
             network_mode: 0,
-            selected_input: 0,
-            selected_output: 0,
+            selected_input,
+            selected_output,
             selected_addr: 0,
-            local_port: "9000".to_string(),
+            local_port,
             peer_ip: "::1".to_string(),
             peer_port: "9000".to_string(),
             devices,
             ipv6_addrs,
+            contacts,
             running: Arc::new(AtomicBool::new(false)),
             mic_active: Arc::new(AtomicBool::new(true)),
+            local_hangup: None,
             verification_code: String::new(),
             peer_fingerprint: String::new(),
+            peer_nickname: String::new(),
             contact_id: String::new(),
+            key_change_warning: None,
             chat_tx: None,
             chat_rx: None,
             chat_input: String::new(),
@@ -128,6 +171,14 @@ impl HostelApp {
     }
 
     fn start_call(&mut self) {
+        // Save settings before starting the call
+        self.settings.mic = self.devices.input_names.get(self.selected_input)
+            .cloned().unwrap_or_default();
+        self.settings.speakers = self.devices.output_names.get(self.selected_output)
+            .cloned().unwrap_or_default();
+        self.settings.local_port = self.local_port.clone();
+        self.settings.save();
+
         self.screen = Screen::Connecting;
         self.running.store(true, Ordering::Relaxed);
         self.mic_active.store(true, Ordering::Relaxed);
@@ -144,6 +195,7 @@ impl HostelApp {
         let identity_secret = self.identity.secret;
         let identity_pubkey = self.identity.pubkey;
         let identity_fingerprint = self.identity.fingerprint.clone();
+        let our_nickname = self.settings.nickname.clone();
 
         thread::spawn(move || {
             let host = cpal::default_host();
@@ -168,14 +220,18 @@ impl HostelApp {
                 &input_device, &output_device,
                 &peer_addr, &local_port,
                 running.clone(), mic_active, &identity,
+                &our_nickname,
             ) {
                 Ok(mut engine) => {
                     let info = CallInfo {
                         verification_code: engine.verification_code.clone(),
                         peer_fingerprint: engine.peer_fingerprint.clone(),
+                        peer_nickname: engine.peer_nickname.clone(),
                         contact_id: engine.contact_id.clone(),
+                        key_change_warning: engine.key_change_warning.clone(),
                         chat_tx: engine.chat_tx.take().unwrap(),
                         chat_rx: engine.chat_rx.take().unwrap(),
+                        local_hangup: engine.local_hangup.clone(),
                     };
                     *result.lock().unwrap() = Some(Ok(info));
 
@@ -192,16 +248,38 @@ impl HostelApp {
         });
     }
 
+    /// User clicked Hang Up — signal peer then clean up.
     fn hang_up(&mut self) {
+        // Signal local hangup so sender thread sends PKT_HANGUP to peer
+        if let Some(ref lh) = self.local_hangup {
+            lh.store(true, Ordering::Relaxed);
+        }
         self.running.store(false, Ordering::Relaxed);
+        self.cleanup_call();
+    }
+
+    /// Remote peer hung up (or connection lost) — clean up without sending PKT_HANGUP.
+    fn on_remote_hangup(&mut self) {
+        // Don't set local_hangup — peer already knows the call is over
+        self.running.store(false, Ordering::Relaxed);
+        self.cleanup_call();
+    }
+
+    /// Shared cleanup for both local and remote hangup.
+    fn cleanup_call(&mut self) {
+        self.local_hangup = None;
         self.verification_code.clear();
         self.peer_fingerprint.clear();
+        self.peer_nickname.clear();
         self.contact_id.clear();
+        self.key_change_warning = None;
         self.chat_tx = None;
         self.chat_rx = None;
         self.chat_input.clear();
         self.chat_history = None;
         *self.connect_result.lock().unwrap() = None;
+        // Reload contacts (the call may have created/updated one)
+        self.contacts = identity::load_all_contacts();
         self.screen = Screen::Setup;
     }
 }
@@ -216,9 +294,12 @@ impl eframe::App for HostelApp {
                     Ok(info) => {
                         self.verification_code = info.verification_code;
                         self.peer_fingerprint = info.peer_fingerprint;
+                        self.peer_nickname = info.peer_nickname;
                         self.contact_id = info.contact_id.clone();
+                        self.key_change_warning = info.key_change_warning;
                         self.chat_tx = Some(info.chat_tx);
                         self.chat_rx = Some(info.chat_rx);
+                        self.local_hangup = Some(info.local_hangup);
                         // Load chat history
                         self.chat_history = Some(ChatHistory::load(
                             &info.contact_id,
@@ -236,7 +317,7 @@ impl eframe::App for HostelApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
 
-        // Poll incoming chat messages
+        // Poll incoming chat messages + detect remote hangup
         if matches!(self.screen, Screen::InCall) {
             if let Some(rx) = &self.chat_rx {
                 while let Ok(text) = rx.try_recv() {
@@ -244,6 +325,11 @@ impl eframe::App for HostelApp {
                         history.add_message(false, text);
                     }
                 }
+            }
+            // Detect remote hangup: running was set to false by receiver thread
+            if !self.running.load(Ordering::Relaxed) {
+                self.on_remote_hangup();
+                return;
             }
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
@@ -279,6 +365,19 @@ impl HostelApp {
 
         ui.separator();
 
+        // Nickname
+        ui.horizontal(|ui| {
+            ui.label("Nickname:");
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut self.settings.nickname)
+                    .desired_width(200.0)
+                    .hint_text("optional")
+            );
+            if resp.changed() {
+                self.settings.save();
+            }
+        });
+
         // Network mode
         ui.label("Network mode:");
         ui.horizontal(|ui| {
@@ -298,7 +397,17 @@ impl HostelApp {
             }).collect();
 
         if !filtered_addrs.is_empty() {
-            ui.label("Your IPv6:");
+            ui.horizontal(|ui| {
+                ui.label("Your IPv6:");
+                // Copy button for sharing your address
+                let selected_ip = filtered_addrs.iter()
+                    .find(|(i, _)| *i == self.selected_addr)
+                    .map(|(_, (ip, _))| ip.clone())
+                    .unwrap_or_else(|| filtered_addrs[0].1.0.clone());
+                if ui.small_button("Copy").clicked() {
+                    ui.ctx().copy_text(selected_ip);
+                }
+            });
             let selected_label = filtered_addrs.iter()
                 .find(|(i, _)| *i == self.selected_addr)
                 .map(|(_, (_, l))| l.clone())
@@ -351,6 +460,42 @@ impl HostelApp {
                 .fill(egui::Color32::from_rgb(40, 140, 60));
             if ui.add(btn).clicked() { self.start_call(); }
         });
+
+        // ── Contact List ──
+        if !self.contacts.is_empty() {
+            ui.add_space(8.0);
+            ui.separator();
+            ui.label(egui::RichText::new("Contacts").strong());
+
+            let max_height = ui.available_height().max(80.0);
+            egui::ScrollArea::vertical()
+                .max_height(max_height)
+                .id_salt("contacts_scroll")
+                .show(ui, |ui| {
+                    for contact in &self.contacts {
+                        let display = format_peer_display(&contact.nickname, &contact.fingerprint);
+                        let addr_info = if !contact.last_address.is_empty() {
+                            format!("  [{}]:{}", contact.last_address, contact.last_port)
+                        } else {
+                            String::new()
+                        };
+                        let label = format!("{display}{addr_info}");
+
+                        if ui.add(
+                            egui::Button::new(&label)
+                                .min_size(egui::vec2(ui.available_width(), 0.0))
+                                .frame(false)
+                        ).clicked() {
+                            if !contact.last_address.is_empty() {
+                                self.peer_ip = contact.last_address.clone();
+                            }
+                            if !contact.last_port.is_empty() {
+                                self.peer_port = contact.last_port.clone();
+                            }
+                        }
+                    }
+                });
+        }
     }
 
     fn draw_connecting(&self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -368,6 +513,7 @@ impl HostelApp {
 
     fn draw_call(&mut self, ui: &mut egui::Ui) {
         let mic_on = self.mic_active.load(Ordering::Relaxed);
+        let peer_display = format_peer_display(&self.peer_nickname, &self.peer_fingerprint);
 
         // ── Top bar: status ──
         ui.horizontal(|ui| {
@@ -375,10 +521,20 @@ impl HostelApp {
             ui.separator();
             ui.colored_label(egui::Color32::from_rgb(80, 200, 80), "ENCRYPTED");
             ui.separator();
-            ui.label(format!("Peer: {}", self.peer_fingerprint));
+            ui.label(format!("Peer: {peer_display}"));
         });
 
         ui.separator();
+
+        // ── TOFU warning ──
+        if let Some(ref warning) = self.key_change_warning {
+            ui.add_space(2.0);
+            ui.colored_label(
+                egui::Color32::from_rgb(255, 80, 80),
+                egui::RichText::new(format!("!! {warning}")).strong(),
+            );
+            ui.add_space(2.0);
+        }
 
         // ── Info row ──
         ui.horizontal(|ui| {
@@ -425,6 +581,11 @@ impl HostelApp {
 
         // Message history (scrollable)
         let available_height = ui.available_height() - 35.0; // leave room for input
+        let peer_label = if self.peer_nickname.is_empty() {
+            "Peer:".to_string()
+        } else {
+            format!("{}:", self.peer_nickname)
+        };
         egui::ScrollArea::vertical()
             .max_height(available_height)
             .stick_to_bottom(true)
@@ -444,7 +605,7 @@ impl HostelApp {
                         } else {
                             ui.horizontal(|ui| {
                                 ui.colored_label(egui::Color32::GRAY, &time);
-                                ui.colored_label(egui::Color32::from_rgb(180, 255, 100), "Peer:");
+                                ui.colored_label(egui::Color32::from_rgb(180, 255, 100), &peer_label);
                                 ui.label(&msg.text);
                             });
                         }
@@ -501,8 +662,8 @@ impl HostelApp {
 pub fn run() {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([450.0, 650.0])
-            .with_min_inner_size([400.0, 550.0])
+            .with_inner_size([450.0, 750.0])
+            .with_min_inner_size([400.0, 600.0])
             .with_title("hostelD — Secure P2P Voice + Chat"),
         ..Default::default()
     };

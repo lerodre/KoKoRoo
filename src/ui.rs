@@ -176,6 +176,7 @@ pub fn run() {
     println!("(waiting up to 30 seconds for peer)");
 
     let identity = crate::identity::Identity::load_or_create();
+    let settings = crate::identity::Settings::load();
     let running = Arc::new(AtomicBool::new(true));
     let mic_active = Arc::new(AtomicBool::new(true));
 
@@ -184,6 +185,7 @@ pub fn run() {
         &peer_addr, &local_port,
         running.clone(), mic_active.clone(),
         &identity,
+        &settings.nickname,
     ) {
         Ok(e) => e,
         Err(e) => {

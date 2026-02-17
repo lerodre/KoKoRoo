@@ -51,12 +51,13 @@ A call spawns 4 concurrent paths:
 
 ### Packet protocol (UDP)
 
-| Type byte | Name     | Payload                                    |
-|-----------|----------|--------------------------------------------|
-| `0x01`    | HELLO    | 32-byte ephemeral X25519 pubkey            |
-| `0x02`    | VOICE    | 4-byte counter + Opus ciphertext + 16B tag |
-| `0x03`    | IDENTITY | Persistent identity pubkey (encrypted)     |
-| `0x04`    | CHAT     | Text message (encrypted)                   |
+| Type byte | Name     | Payload                                          |
+|-----------|----------|--------------------------------------------------|
+| `0x01`    | HELLO    | 32-byte ephemeral X25519 pubkey                  |
+| `0x02`    | VOICE    | 4-byte counter + Opus ciphertext + 16B tag       |
+| `0x03`    | IDENTITY | Encrypted: 32-byte identity pubkey + nickname    |
+| `0x04`    | CHAT     | Encrypted: text message                          |
+| `0x05`    | HANGUP   | Encrypted: empty payload (mutual disconnect)     |
 
 ### Key exchange flow
 
@@ -71,11 +72,20 @@ A call spawns 4 concurrent paths:
 ```
 ~/.hostelD/
 ├── identity.key              # 64 bytes: 32 secret + 32 public (0600 perms on Unix)
-├── contacts/{fingerprint}.json
+├── settings.json             # Nickname, mic, speakers, port preferences
+├── contacts/{pubkey_hex}.json  # One file per peer (64-char hex = collision-proof)
 └── chats/{contact_id}.enc    # ChaCha20-Poly1305 encrypted JSON
 ```
 
-Contact IDs are deterministic: SHA-256(sorted(pubkey_A, pubkey_B)), so both peers derive the same ID.
+Contact files are keyed by full public key hex (not fingerprint) to avoid collisions. Contact IDs are deterministic: SHA-256(sorted(pubkey_A, pubkey_B)), so both peers derive the same ID.
+
+### Trust model (TOFU)
+
+- First connection: trust the peer's key + nickname, save contact
+- Subsequent connections: verify same key, increment `call_count`
+- Nickname claimed by different key → WARNING (possible impersonation)
+- Unknown key from same address as known contact → WARNING
+- Nicknames never inherited across different public keys
 
 ### Audio pipeline
 

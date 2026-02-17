@@ -78,6 +78,14 @@ pub struct Contact {
     pub contact_id: String,  // shared between both peers
     pub first_seen: String,
     pub last_seen: String,
+    #[serde(default)] pub last_address: String,
+    #[serde(default)] pub last_port: String,
+    #[serde(default)] pub call_count: u64,
+}
+
+/// Full hex representation of a public key (64 hex chars). Used as storage key.
+pub fn pubkey_hex(pubkey: &[u8; 32]) -> String {
+    pubkey.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 /// Derive a contact ID from two public keys.
@@ -100,24 +108,50 @@ pub fn derive_contact_id(pubkey_a: &[u8; 32], pubkey_b: &[u8; 32]) -> String {
         hash[4], hash[5], hash[6], hash[7])
 }
 
-/// Save a contact to disk.
+/// Save a contact to disk. Uses full pubkey hex as filename (collision-proof).
 pub fn save_contact(contact: &Contact) {
     let dir = data_dir().join("contacts");
     fs::create_dir_all(&dir).expect("Failed to create contacts dir");
 
-    let path = dir.join(format!("{}.json", contact.fingerprint));
+    let hex = pubkey_hex(&contact.pubkey);
+    let path = dir.join(format!("{hex}.json"));
+
+    // Remove old fingerprint-based file if it exists (migration)
+    let old_path = dir.join(format!("{}.json", contact.fingerprint));
+    if old_path.exists() && old_path != path {
+        fs::remove_file(&old_path).ok();
+    }
+
     let json = serde_json::to_string_pretty(contact).expect("Failed to serialize contact");
     fs::write(path, json).expect("Failed to write contact");
 }
 
-/// Load a contact by fingerprint. Returns None if not found.
-pub fn load_contact(fingerprint: &str) -> Option<Contact> {
-    let path = data_dir().join("contacts").join(format!("{fingerprint}.json"));
-    if !path.exists() {
-        return None;
+/// Load a contact by their public key. Returns None if not found.
+pub fn load_contact(pubkey: &[u8; 32]) -> Option<Contact> {
+    let hex = pubkey_hex(pubkey);
+    let path = data_dir().join("contacts").join(format!("{hex}.json"));
+    if path.exists() {
+        let json = fs::read_to_string(&path).ok()?;
+        return serde_json::from_str(&json).ok();
     }
-    let json = fs::read_to_string(path).ok()?;
-    serde_json::from_str(&json).ok()
+    // Fallback: try old fingerprint-based filename
+    let fp = crypto::fingerprint(pubkey);
+    let old_path = data_dir().join("contacts").join(format!("{fp}.json"));
+    if old_path.exists() {
+        let json = fs::read_to_string(&old_path).ok()?;
+        return serde_json::from_str(&json).ok();
+    }
+    None
+}
+
+/// Find all known contacts that use a given nickname (for TOFU checks).
+pub fn find_contacts_by_nickname(nickname: &str) -> Vec<Contact> {
+    if nickname.is_empty() {
+        return Vec::new();
+    }
+    load_all_contacts().into_iter()
+        .filter(|c| c.nickname == nickname)
+        .collect()
 }
 
 /// Get current timestamp as a string.
@@ -128,4 +162,62 @@ pub fn now_timestamp() -> String {
         .unwrap()
         .as_secs();
     format!("{secs}")
+}
+
+/// Persisted user settings (mic, speakers, port, nickname).
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct Settings {
+    #[serde(default)] pub nickname: String,
+    #[serde(default)] pub mic: String,
+    #[serde(default)] pub speakers: String,
+    #[serde(default)] pub local_port: String,
+}
+
+impl Settings {
+    /// Load settings from `~/.hostelD/settings.json`, returning defaults if missing.
+    pub fn load() -> Self {
+        let path = data_dir().join("settings.json");
+        if path.exists() {
+            if let Ok(json) = fs::read_to_string(&path) {
+                if let Ok(s) = serde_json::from_str(&json) {
+                    return s;
+                }
+            }
+        }
+        Settings::default()
+    }
+
+    /// Save settings to `~/.hostelD/settings.json`.
+    pub fn save(&self) {
+        let dir = data_dir();
+        fs::create_dir_all(&dir).ok();
+        let path = dir.join("settings.json");
+        if let Ok(json) = serde_json::to_string_pretty(self) {
+            fs::write(path, json).ok();
+        }
+    }
+}
+
+/// Load all contacts from `~/.hostelD/contacts/`, sorted by `last_seen` descending.
+pub fn load_all_contacts() -> Vec<Contact> {
+    let dir = data_dir().join("contacts");
+    if !dir.exists() {
+        return Vec::new();
+    }
+    let mut contacts: Vec<Contact> = Vec::new();
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                if let Ok(json) = fs::read_to_string(&path) {
+                    if let Ok(c) = serde_json::from_str::<Contact>(&json) {
+                        contacts.push(c);
+                    }
+                }
+            }
+        }
+    }
+    // Sort by last_seen descending (most recent first)
+    contacts.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+    contacts
 }
