@@ -570,6 +570,7 @@ pub fn start_engine(
         let mut firewall = Firewall::new();
         let mut recv_buf = [0u8; 4096]; // larger for screen chunks + chat
         let mut pcm_out = vec![0f32; FRAME_SIZE];
+        let mut screen_chunk_count: u64 = 0;
 
         while running_r.load(Ordering::Relaxed) {
             match socket.recv_from(&mut recv_buf) {
@@ -620,8 +621,18 @@ pub fn start_engine(
                             }
                         }
                         Some((PKT_SCREEN, screen_data)) => {
+                            screen_chunk_count += 1;
                             if let Ok(mut viewer) = screen_viewer_r.lock() {
+                                let had_frame_before = viewer.latest_frame.is_some();
                                 viewer.receive_chunk(&screen_data);
+                                let has_frame_now = viewer.latest_frame.is_some();
+                                if !had_frame_before && has_frame_now {
+                                    log_fmt!("[voice] screen: decoded frame! (after {} chunks)", screen_chunk_count);
+                                    screen_chunk_count = 0;
+                                }
+                            }
+                            if screen_chunk_count > 0 && screen_chunk_count % 100 == 0 {
+                                log_fmt!("[voice] screen: received {} chunks (no complete frame yet)", screen_chunk_count);
                             }
                         }
                         Some((PKT_HANGUP, _)) => {

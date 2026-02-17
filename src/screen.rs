@@ -628,11 +628,15 @@ pub fn capture_loop(
         // Fragment
         let chunks = ScreenEncoder::fragment(&encoded, frame_id, force_keyframe);
 
-        // Encrypt and send each chunk
+        // Encrypt and send each chunk (with pacing to avoid burst loss)
         let send_start = Instant::now();
-        for chunk in &chunks {
+        for (i, chunk) in chunks.iter().enumerate() {
             let packet = session.encrypt_packet(PKT_SCREEN, chunk);
             let _ = socket.send_to(&packet, peer_addr);
+            // Pace chunks: 200μs between packets prevents UDP burst loss
+            if i + 1 < chunks.len() {
+                std::thread::sleep(Duration::from_micros(200));
+            }
         }
         let send_ms = send_start.elapsed().as_millis();
 
