@@ -162,14 +162,25 @@ pub struct ScreenEncoder {
 impl ScreenEncoder {
     pub fn new(width: u32, height: u32, fps: u32, bitrate_kbps: u32) -> Self {
         log_fmt!("[screen] ScreenEncoder::new({}x{}, {}fps, {}kbps)", width, height, fps, bitrate_kbps);
-        unsafe {
-            let mut cfg: vpx_codec_enc_cfg_t = std::mem::zeroed();
-            let iface = vpx_codec_vp8_cx();
-            log_fmt!("[screen] vpx_codec_vp8_cx() OK");
 
+        // Set panic hook to log panics before process dies
+        std::panic::set_hook(Box::new(|info| {
+            crate::logger::log(&format!("[PANIC] {}", info));
+        }));
+
+        unsafe {
+            log_fmt!("[screen] calling vpx_codec_vp8_cx...");
+            let iface = vpx_codec_vp8_cx();
+            log_fmt!("[screen] vpx_codec_vp8_cx() returned (null={})", iface.is_null());
+
+            let mut cfg: vpx_codec_enc_cfg_t = std::mem::zeroed();
+            log_fmt!("[screen] calling vpx_codec_enc_config_default...");
             let ret = vpx_codec_enc_config_default(iface, &mut cfg, 0);
             log_fmt!("[screen] vpx_codec_enc_config_default -> {:?}", ret);
-            assert_eq!(ret, VPX_CODEC_OK, "Failed to get default VP8 config");
+            if ret != VPX_CODEC_OK {
+                log_fmt!("[screen] FATAL: enc_config_default failed: {:?}", ret);
+                panic!("Failed to get default VP8 config: {:?}", ret);
+            }
 
             cfg.g_w = width;
             cfg.g_h = height;
@@ -182,10 +193,11 @@ impl ScreenEncoder {
             cfg.g_threads = 2;
             cfg.kf_mode = VPX_KF_AUTO;
             cfg.kf_max_dist = KEYFRAME_INTERVAL;
+            log_fmt!("[screen] encoder config set, calling vpx_codec_enc_init_ver...");
 
             let mut ctx: vpx_codec_ctx_t = std::mem::zeroed();
             let enc_abi = vpx_sys::VPX_ENCODER_ABI_VERSION as std::os::raw::c_int;
-            log_fmt!("[screen] vpx_codec_enc_init_ver(ABI={})", enc_abi);
+            log_fmt!("[screen] enc_init ABI={}", enc_abi);
             let ret = vpx_codec_enc_init_ver(
                 &mut ctx,
                 iface,
@@ -194,13 +206,18 @@ impl ScreenEncoder {
                 enc_abi,
             );
             log_fmt!("[screen] encoder init -> {:?}", ret);
-            assert_eq!(ret, VPX_CODEC_OK, "Failed to init VP8 encoder");
+            if ret != VPX_CODEC_OK {
+                log_fmt!("[screen] FATAL: encoder init failed: {:?}", ret);
+                panic!("Failed to init VP8 encoder: {:?}", ret);
+            }
 
-            // Set realtime speed
+            log_fmt!("[screen] setting CPU speed...");
             vpx_codec_control_(&mut ctx, VP8E_SET_CPUUSED as i32, 8i32);
 
+            log_fmt!("[screen] allocating image...");
             let mut img: vpx_image_t = std::mem::zeroed();
             vpx_img_alloc(&mut img, VPX_IMG_FMT_I420, width, height, 1);
+            log_fmt!("[screen] ScreenEncoder ready!");
 
             ScreenEncoder {
                 ctx,
