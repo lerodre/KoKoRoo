@@ -451,6 +451,7 @@ impl eframe::App for HostelApp {
                 .default_width(280.0)
                 .resizable(true)
                 .min_width(200.0)
+                .max_width(400.0)
                 .show(ctx, |ui| {
                     self.draw_chat(ui);
                 });
@@ -846,13 +847,13 @@ impl HostelApp {
                     for msg in &history.messages {
                         let time = ChatHistory::format_time(msg.timestamp);
                         if msg.from_me {
-                            ui.horizontal(|ui| {
+                            ui.horizontal_wrapped(|ui| {
                                 ui.colored_label(egui::Color32::GRAY, &time);
                                 ui.colored_label(egui::Color32::from_rgb(100, 180, 255), "You:");
                                 ui.label(&msg.text);
                             });
                         } else {
-                            ui.horizontal(|ui| {
+                            ui.horizontal_wrapped(|ui| {
                                 ui.colored_label(egui::Color32::GRAY, &time);
                                 ui.colored_label(egui::Color32::from_rgb(180, 255, 100), &peer_label);
                                 ui.label(&msg.text);
