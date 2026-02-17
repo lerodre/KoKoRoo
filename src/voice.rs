@@ -160,7 +160,7 @@ impl Drop for VoiceEngine {
 impl VoiceEngine {
     /// Start sharing our screen to the peer at the given quality.
     /// `audio_device`: None = no system audio, Some("") = default device, Some(name) = specific device.
-    pub fn start_screen_share(&mut self, quality: ScreenQuality, audio_device: Option<String>) {
+    pub fn start_screen_share(&mut self, quality: ScreenQuality, audio_device: Option<String>, display_index: usize) {
         if self.screen_active.load(Ordering::Relaxed) {
             log_fmt!("[voice] start_screen_share: already active, ignoring");
             return;
@@ -197,7 +197,7 @@ impl VoiceEngine {
         let running = self.running.clone();
 
         self.screen_thread = Some(thread::spawn(move || {
-            crate::screen::capture_loop(socket, session, peer_addr, active, running, quality);
+            crate::screen::capture_loop(socket, session, peer_addr, active, running, quality, display_index);
             log_fmt!("[voice] screen capture thread exited");
         }));
     }
@@ -401,6 +401,14 @@ pub fn start_engine(
         println!("Peer nickname: {peer_nickname}");
     }
     println!("Contact ID:    {contact_id}");
+
+    // ── Blocked contact check ──
+    let peer_hex = identity::pubkey_hex(&peer_identity_pubkey);
+    let settings_check = identity::Settings::load();
+    if settings_check.is_blocked(&peer_hex) {
+        running.store(false, Ordering::Relaxed);
+        return Err("Contact is blocked".to_string());
+    }
 
     // Parse peer address to extract IP and port for contact storage
     let (peer_ip_str, peer_port_str) = parse_peer_addr(peer_addr);

@@ -126,6 +126,22 @@ pub fn save_contact(contact: &Contact) {
     fs::write(path, json).expect("Failed to write contact");
 }
 
+/// Delete a contact by their public key. Also removes old fingerprint-based file if present.
+pub fn delete_contact(pubkey: &[u8; 32]) {
+    let hex = pubkey_hex(pubkey);
+    let dir = data_dir().join("contacts");
+    let path = dir.join(format!("{hex}.json"));
+    if path.exists() {
+        std::fs::remove_file(&path).ok();
+    }
+    // Also remove old fingerprint-based file
+    let fp = crate::crypto::fingerprint(pubkey);
+    let old_path = dir.join(format!("{fp}.json"));
+    if old_path.exists() {
+        std::fs::remove_file(&old_path).ok();
+    }
+}
+
 /// Load a contact by their public key. Returns None if not found.
 pub fn load_contact(pubkey: &[u8; 32]) -> Option<Contact> {
     let hex = pubkey_hex(pubkey);
@@ -171,6 +187,8 @@ pub struct Settings {
     #[serde(default)] pub mic: String,
     #[serde(default)] pub speakers: String,
     #[serde(default)] pub local_port: String,
+    #[serde(default)] pub network_mode: usize,
+    #[serde(default)] pub blocked: Vec<String>,
 }
 
 impl Settings {
@@ -195,6 +213,26 @@ impl Settings {
         if let Ok(json) = serde_json::to_string_pretty(self) {
             fs::write(path, json).ok();
         }
+    }
+
+    /// Check if a public key (hex) is blocked.
+    pub fn is_blocked(&self, pubkey_hex: &str) -> bool {
+        self.blocked.iter().any(|b| b == pubkey_hex)
+    }
+
+    /// Block a contact by hex pubkey and save.
+    pub fn block_contact(&mut self, pubkey_hex: &str) {
+        let hex = pubkey_hex.to_string();
+        if !self.blocked.contains(&hex) {
+            self.blocked.push(hex);
+            self.save();
+        }
+    }
+
+    /// Unblock a contact by hex pubkey and save.
+    pub fn unblock_contact(&mut self, pubkey_hex: &str) {
+        self.blocked.retain(|b| b != pubkey_hex);
+        self.save();
     }
 }
 

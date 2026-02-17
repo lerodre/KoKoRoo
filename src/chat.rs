@@ -98,6 +98,14 @@ impl ChatHistory {
     }
 }
 
+/// Delete chat history for a contact.
+pub fn delete_chat_history(contact_id: &str) {
+    let path = chats_dir().join(format!("{contact_id}.enc"));
+    if path.exists() {
+        std::fs::remove_file(&path).ok();
+    }
+}
+
 /// Encode a chat message for sending over UDP.
 /// The text is serialized as UTF-8 bytes, then encrypted by the Session.
 pub fn encode_chat_text(text: &str) -> Vec<u8> {

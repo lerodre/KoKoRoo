@@ -76,8 +76,16 @@ impl ScreenQuality {
 /// `audio_device`: None = no system audio, Some("") = default device, Some(name) = specific device.
 #[derive(Debug, Clone)]
 pub enum ScreenCommand {
-    Start { quality: ScreenQuality, audio_device: Option<String> },
+    Start { quality: ScreenQuality, audio_device: Option<String>, display_index: usize },
     Stop,
+}
+
+/// List available displays with labels like "Display 1 (1920x1080)".
+pub fn list_displays() -> Vec<String> {
+    let displays = scrap::Display::all().unwrap_or_default();
+    displays.iter().enumerate().map(|(i, d)| {
+        format!("Display {} ({}x{})", i + 1, d.width(), d.height())
+    }).collect()
 }
 
 // ── Constants ──
@@ -597,18 +605,13 @@ pub fn capture_loop(
     active: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     quality: ScreenQuality,
+    display_index: usize,
 ) {
-    let enc_w = quality.width();
-    let enc_h = quality.height();
-    let enc_fps = quality.fps();
-    let enc_bps = quality.bitrate_kbps();
-    log_fmt!("[screen] capture_loop started, peer={}, quality={:?} ({}x{} {}fps {}kbps)",
-        peer_addr, quality, enc_w, enc_h, enc_fps, enc_bps);
-
-    // Get primary display
     let displays = scrap::Display::all().unwrap_or_default();
-    log_fmt!("[screen] found {} displays", displays.len());
-    let display = match displays.into_iter().next() {
+    log_fmt!("[screen] found {} displays, requested index {}", displays.len(), display_index);
+    let display = match displays.into_iter().nth(display_index)
+        .or_else(|| scrap::Display::all().ok().and_then(|d| d.into_iter().next()))
+    {
         Some(d) => d,
         None => {
             log_fmt!("[screen] ERROR: no display found");
@@ -619,7 +622,15 @@ pub fn capture_loop(
 
     let native_w = display.width();
     let native_h = display.height();
-    log_fmt!("[screen] display: {}x{}", native_w, native_h);
+    log_fmt!("[screen] display {}: {}x{}", display_index, native_w, native_h);
+
+    // Cap encoder resolution to native — avoid upscaling small screens
+    let enc_w = quality.width().min(native_w as u32);
+    let enc_h = quality.height().min(native_h as u32);
+    let enc_fps = quality.fps();
+    let enc_bps = quality.bitrate_kbps();
+    log_fmt!("[screen] capture_loop started, peer={}, quality={:?} ({}x{} {}fps {}kbps, native {}x{})",
+        peer_addr, quality, enc_w, enc_h, enc_fps, enc_bps, native_w, native_h);
 
     let mut capturer = match scrap::Capturer::new(display) {
         Ok(c) => {
