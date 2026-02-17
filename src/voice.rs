@@ -242,6 +242,9 @@ fn handshake(
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
             Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
+            // Windows WSAECONNRESET (10054): ICMP Port Unreachable from peer not yet listening.
+            // Normal during startup — just retry.
+            Err(ref e) if e.kind() == std::io::ErrorKind::ConnectionReset => continue,
             Err(e) => return Err(format!("Socket error during handshake: {e}")),
         }
     }
@@ -310,6 +313,7 @@ fn exchange_identity(
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
             Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
+            Err(ref e) if e.kind() == std::io::ErrorKind::ConnectionReset => continue,
             Err(e) => return Err(format!("Socket error during identity exchange: {e}")),
         }
     }
