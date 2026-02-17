@@ -198,6 +198,7 @@ pub struct HostelApp {
     pub(crate) screen_cmd_tx: Option<mpsc::Sender<ScreenCommand>>,
     pub(crate) selected_screen_quality: usize,
     pub(crate) show_screen_popup: bool,
+    pub(crate) show_hangup_confirm: bool,
     pub(crate) selected_audio_device: usize,
     pub(crate) loopback_devices: Vec<String>,
     pub(crate) selected_display: usize,
@@ -271,6 +272,7 @@ impl HostelApp {
             screen_cmd_tx: None,
             selected_screen_quality: 0,
             show_screen_popup: false,
+            show_hangup_confirm: false,
             selected_audio_device: 0,
             loopback_devices: Vec::new(),
             selected_display: 0,
@@ -426,6 +428,7 @@ impl HostelApp {
         self.chat_history = None;
         self.screen_sharing = false;
         self.show_screen_popup = false;
+        self.show_hangup_confirm = false;
         self.selected_audio_device = 0;
         self.loopback_devices.clear();
         self.selected_display = 0;

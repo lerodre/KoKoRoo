@@ -276,13 +276,7 @@ impl HostelApp {
                 egui::RichText::new("Hang Up").size(16.0).color(egui::Color32::WHITE)
             ).min_size(egui::vec2(100.0, 35.0)).fill(egui::Color32::from_rgb(180, 40, 40));
             if ui.add(hangup_btn).clicked() {
-                if self.is_fullscreen || self.video_fullscreen {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
-                    self.is_fullscreen = false;
-                    self.video_fullscreen = false;
-                }
-                self.hang_up();
-                return;
+                self.show_hangup_confirm = true;
             }
 
             if has_video {
@@ -388,6 +382,44 @@ impl HostelApp {
                 });
             if !open {
                 self.show_screen_popup = false;
+            }
+        }
+
+        // ── Hang up confirmation ──
+        if self.show_hangup_confirm {
+            let mut open = true;
+            egui::Window::new("Hang Up")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .open(&mut open)
+                .show(ui.ctx(), |ui| {
+                    ui.add_space(4.0);
+                    ui.label("Are you sure you want to disconnect?");
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        let yes_btn = egui::Button::new(
+                            egui::RichText::new("Yes").size(15.0).color(egui::Color32::WHITE)
+                        ).min_size(egui::vec2(80.0, 32.0)).fill(egui::Color32::from_rgb(180, 40, 40));
+                        if ui.add(yes_btn).clicked() {
+                            self.show_hangup_confirm = false;
+                            if self.is_fullscreen || self.video_fullscreen {
+                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                                self.is_fullscreen = false;
+                                self.video_fullscreen = false;
+                            }
+                            self.hang_up();
+                        }
+                        let no_btn = egui::Button::new(
+                            egui::RichText::new("Cancel").size(15.0)
+                        ).min_size(egui::vec2(80.0, 32.0));
+                        if ui.add(no_btn).clicked() {
+                            self.show_hangup_confirm = false;
+                        }
+                    });
+                });
+            if !open {
+                self.show_hangup_confirm = false;
             }
         }
 
