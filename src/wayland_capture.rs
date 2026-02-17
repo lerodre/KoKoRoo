@@ -77,65 +77,77 @@ pub fn request_screencast() -> Option<PortalSession> {
 /// Uses the object!/property! macros from libspa for correct pod construction.
 fn build_video_format_params(width: u32, height: u32) -> Vec<Vec<u8>> {
     use libspa::pod::serialize::PodSerializer;
-    use libspa::pod::{object, property, Value};
+    use libspa::pod::{ChoiceValue, Object, Property, PropertyFlags, Value};
+    use libspa::utils::{
+        Choice, ChoiceEnum, ChoiceFlags, Fraction, Id, Rectangle,
+    };
 
-    // SPA video format constants (from spa/param/video/format.h)
-    // BGRx = 8, RGBx = 5
+    // SPA video format constants (from spa/param/video/raw.h enum)
+    const SPA_VIDEO_FORMAT_RGBX: u32 = 7;
     const SPA_VIDEO_FORMAT_BGRX: u32 = 8;
-    const SPA_VIDEO_FORMAT_RGBX: u32 = 5;
+    const SPA_VIDEO_FORMAT_RGBA: u32 = 11;
+    const SPA_VIDEO_FORMAT_BGRA: u32 = 12;
 
-    // Use raw Id values for formats since they're not enums in the spa bindings
-    #[derive(Clone, Copy)]
-    struct RawId(u32);
-    impl RawId {
-        fn as_raw(self) -> u32 {
-            self.0
-        }
-    }
-
-    let obj = Value::Object(object! {
-        libspa::utils::SpaTypes::ObjectParamFormat,
-        libspa::param::ParamType::EnumFormat,
-        property!(
-            FormatProperties::MediaType,
-            Id,
-            MediaType::Video
-        ),
-        property!(
-            FormatProperties::MediaSubtype,
-            Id,
-            MediaSubtype::Raw
-        ),
-        // Video format: BGRx preferred, RGBx as alternative
-        property!(
-            FormatProperties::VideoFormat,
-            Choice,
-            Enum,
-            Id,
-            RawId(SPA_VIDEO_FORMAT_BGRX),
-            RawId(SPA_VIDEO_FORMAT_BGRX),
-            RawId(SPA_VIDEO_FORMAT_RGBX)
-        ),
-        // Size: range from 1x1 to 7680x4320 with default at source size
-        property!(
-            FormatProperties::VideoSize,
-            Choice,
-            Range,
-            Rectangle,
-            libspa::utils::Rectangle { width, height },
-            libspa::utils::Rectangle { width: 1, height: 1 },
-            libspa::utils::Rectangle { width: 7680, height: 4320 }
-        ),
-        // Framerate: range from 1/1 to 120/1 with default 30/1
-        property!(
-            FormatProperties::VideoFramerate,
-            Choice,
-            Range,
-            Fraction,
-            libspa::utils::Fraction { num: 30, denom: 1 },
-            libspa::utils::Fraction { num: 1, denom: 1 },
-            libspa::utils::Fraction { num: 120, denom: 1 }
-        ),
+    let obj = Value::Object(Object {
+        type_: libspa::utils::SpaTypes::ObjectParamFormat.as_raw(),
+        id: libspa::param::ParamType::EnumFormat.as_raw(),
+        properties: vec![
+            // media.type = video
+            Property {
+                key: FormatProperties::MediaType.as_raw(),
+                flags: PropertyFlags::empty(),
+                value: Value::Id(Id(MediaType::Video.as_raw())),
+            },
+            // media.subtype = raw
+            Property {
+                key: FormatProperties::MediaSubtype.as_raw(),
+                flags: PropertyFlags::empty(),
+                value: Value::Id(Id(MediaSubtype::Raw.as_raw())),
+            },
+            // format = BGRx preferred, with BGRA, RGBx, RGBA as alternatives
+            Property {
+                key: FormatProperties::VideoFormat.as_raw(),
+                flags: PropertyFlags::empty(),
+                value: Value::Choice(ChoiceValue::Id(Choice(
+                    ChoiceFlags::empty(),
+                    ChoiceEnum::Enum {
+                        default: Id(SPA_VIDEO_FORMAT_BGRX),
+                        alternatives: vec![
+                            Id(SPA_VIDEO_FORMAT_BGRX),
+                            Id(SPA_VIDEO_FORMAT_BGRA),
+                            Id(SPA_VIDEO_FORMAT_RGBX),
+                            Id(SPA_VIDEO_FORMAT_RGBA),
+                        ],
+                    },
+                ))),
+            },
+            // size = width x height (with range)
+            Property {
+                key: FormatProperties::VideoSize.as_raw(),
+                flags: PropertyFlags::empty(),
+                value: Value::Choice(ChoiceValue::Rectangle(Choice(
+                    ChoiceFlags::empty(),
+                    ChoiceEnum::Range {
+                        default: Rectangle { width, height },
+                        min: Rectangle { width: 1, height: 1 },
+                        max: Rectangle { width: 7680, height: 4320 },
+                    },
+                ))),
+            },
+            // framerate = 30/1 (with range 1-120)
+            Property {
+                key: FormatProperties::VideoFramerate.as_raw(),
+                flags: PropertyFlags::empty(),
+                value: Value::Choice(ChoiceValue::Fraction(Choice(
+                    ChoiceFlags::empty(),
+                    ChoiceEnum::Range {
+                        default: Fraction { num: 30, denom: 1 },
+                        min: Fraction { num: 1, denom: 1 },
+                        max: Fraction { num: 120, denom: 1 },
+                    },
+                ))),
+            },
+        ],
     });
 
     // Serialize to bytes
@@ -211,10 +223,16 @@ pub fn run_pipewire_capture(
         Some(Duration::from_millis(100)),
     );
 
-    // Track negotiated video dimensions
-    let dims: Rc<Cell<(u32, u32)>> = Rc::new(Cell::new((portal.width, portal.height)));
+    // Track negotiated video dimensions and format
+    // (w, h, format_id, stride)
+    let dims: Rc<Cell<(u32, u32, u32, u32)>> = Rc::new(Cell::new((portal.width, portal.height, 0, 0)));
     let dims_changed = dims.clone();
     let frame_buf_process = frame_buf.clone();
+
+    const SPA_VIDEO_FORMAT_RGBX: u32 = 7;
+    const SPA_VIDEO_FORMAT_BGRX: u32 = 8;
+    const SPA_VIDEO_FORMAT_RGBA: u32 = 11;
+    const SPA_VIDEO_FORMAT_BGRA: u32 = 12;
 
     let _listener = stream
         .add_local_listener::<()>()
@@ -230,20 +248,25 @@ pub fn run_pipewire_capture(
                     libspa::pod::deserialize::PodDeserializer::deserialize_any_from(pod.as_bytes())
                 {
                     if let libspa::pod::Value::Object(obj) = value {
+                        let (mut w, mut h, mut fmt, stride) = dims_changed.get();
                         for prop in &obj.properties {
-                            if prop.key
-                                == FormatProperties::VideoSize.as_raw()
-                            {
+                            if prop.key == FormatProperties::VideoSize.as_raw() {
                                 if let libspa::pod::Value::Rectangle(rect) = &prop.value {
-                                    log_fmt!(
-                                        "[wayland] negotiated size: {}x{}",
-                                        rect.width,
-                                        rect.height
-                                    );
-                                    dims_changed.set((rect.width, rect.height));
+                                    w = rect.width;
+                                    h = rect.height;
+                                }
+                            }
+                            if prop.key == FormatProperties::VideoFormat.as_raw() {
+                                if let libspa::pod::Value::Id(id) = &prop.value {
+                                    fmt = id.0;
                                 }
                             }
                         }
+                        log_fmt!(
+                            "[wayland] negotiated: {}x{}, format={}",
+                            w, h, fmt
+                        );
+                        dims_changed.set((w, h, fmt, stride));
                     }
                 }
             }
@@ -255,18 +278,41 @@ pub fn run_pipewire_capture(
                     return;
                 }
                 let data = &mut datas[0];
-                let (w, h) = dims.get();
+                let (w, h, fmt, _) = dims.get();
+                if w == 0 || h == 0 {
+                    return;
+                }
 
-                // Use chunk size for actual data length, data() returns maxsize
+                // Get actual stride from chunk metadata
+                let stride = data.chunk().stride() as u32;
                 let chunk_size = data.chunk().size() as usize;
+
                 if let Some(slice) = data.data() {
-                    let expected = (w * h * 4) as usize;
                     let available = chunk_size.min(slice.len());
-                    if available >= expected {
-                        let bgra = slice[..expected].to_vec();
-                        if let Ok(mut buf) = frame_buf_process.lock() {
-                            *buf = Some((bgra, w, h));
+                    let row_bytes = (w * 4) as usize;
+                    let actual_stride = if stride > 0 { stride as usize } else { row_bytes };
+                    let needed = actual_stride * (h as usize);
+
+                    if available < needed {
+                        return;
+                    }
+
+                    // Copy pixel data, handling stride (row padding)
+                    let mut bgra = Vec::with_capacity(row_bytes * h as usize);
+                    for row in 0..h as usize {
+                        let start = row * actual_stride;
+                        bgra.extend_from_slice(&slice[start..start + row_bytes]);
+                    }
+
+                    // Convert RGBx/RGBA to BGRx/BGRA by swapping R and B channels
+                    if fmt == SPA_VIDEO_FORMAT_RGBX || fmt == SPA_VIDEO_FORMAT_RGBA {
+                        for pixel in bgra.chunks_exact_mut(4) {
+                            pixel.swap(0, 2); // R <-> B
                         }
+                    }
+
+                    if let Ok(mut buf) = frame_buf_process.lock() {
+                        *buf = Some((bgra, w, h));
                     }
                 }
             }
