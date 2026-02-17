@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use vpx_sys::*;
@@ -13,6 +13,19 @@ use vpx_sys::vpx_img_fmt::VPX_IMG_FMT_I420;
 use vpx_sys::vpx_codec_cx_pkt_kind::VPX_CODEC_CX_FRAME_PKT;
 
 use crate::crypto::{Session, PKT_SCREEN};
+
+// ── Capture Source ──
+
+/// How frames are captured. Determined at runtime.
+pub enum CaptureSource {
+    /// scrap crate (X11 on Linux, DXGI on Windows)
+    Scrap { display_index: usize },
+    /// Wayland XDG Desktop Portal + PipeWire (Linux only)
+    #[cfg(target_os = "linux")]
+    PipeWire {
+        portal: crate::wayland_capture::PortalSession,
+    },
+}
 
 // ── Quality Presets ──
 
@@ -82,6 +95,12 @@ pub enum ScreenCommand {
 
 /// List available displays with labels like "Display 1 (1920x1080)".
 pub fn list_displays() -> Vec<String> {
+    #[cfg(target_os = "linux")]
+    {
+        if crate::wayland_capture::is_wayland() {
+            return vec!["Screen (system dialog)".to_string()];
+        }
+    }
     let displays = scrap::Display::all().unwrap_or_default();
     displays.iter().enumerate().map(|(i, d)| {
         format!("Display {} ({}x{})", i + 1, d.width(), d.height())
@@ -599,6 +618,99 @@ impl ScreenViewer {
 // ── Capture Loop (thread function) ──
 
 pub fn capture_loop(
+    socket: UdpSocket,
+    session: Session,
+    peer_addr: SocketAddr,
+    active: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
+    quality: ScreenQuality,
+    source: CaptureSource,
+) {
+    match source {
+        CaptureSource::Scrap { display_index } => {
+            capture_loop_scrap(socket, session, peer_addr, active, running, quality, display_index);
+        }
+        #[cfg(target_os = "linux")]
+        CaptureSource::PipeWire { portal } => {
+            capture_loop_pipewire(socket, session, peer_addr, active, running, quality, portal);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn capture_loop_pipewire(
+    socket: UdpSocket,
+    session: Session,
+    peer_addr: SocketAddr,
+    active: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
+    quality: ScreenQuality,
+    portal: crate::wayland_capture::PortalSession,
+) {
+    use std::thread;
+
+    log_fmt!("[screen] capture_loop_pipewire: starting, peer={}, quality={:?}", peer_addr, quality);
+
+    let frame_buf: Arc<Mutex<Option<(Vec<u8>, u32, u32)>>> = Arc::new(Mutex::new(None));
+
+    // Spawn PipeWire thread (MainLoop must run on its own thread, objects are !Send)
+    let pw_handle = {
+        let fb = frame_buf.clone();
+        let a = active.clone();
+        let r = running.clone();
+        thread::spawn(move || {
+            crate::wayland_capture::run_pipewire_capture(portal, fb, a, r);
+        })
+    };
+
+    let enc_w = quality.width();
+    let enc_h = quality.height();
+    let enc_fps = quality.fps();
+    let mut encoder = ScreenEncoder::new(enc_w, enc_h, enc_fps, quality.bitrate_kbps());
+    let frame_duration = Duration::from_secs_f64(1.0 / enc_fps as f64);
+    let mut frame_id: u16 = 0;
+    let mut frame_count: u32 = 0;
+
+    while active.load(Ordering::Relaxed) && running.load(Ordering::Relaxed) {
+        let frame_start = Instant::now();
+
+        let frame = { frame_buf.lock().unwrap().take() };
+
+        if let Some((bgra, w, h)) = frame {
+            let scaled = scale_bgra(&bgra, w as usize, h as usize, enc_w as usize, enc_h as usize);
+            let force_kf = frame_count % KEYFRAME_INTERVAL == 0;
+            let encoded = encoder.encode(&scaled, force_kf);
+
+            if !encoded.is_empty() {
+                let chunks = ScreenEncoder::fragment(&encoded, frame_id, force_kf);
+                for (i, chunk) in chunks.iter().enumerate() {
+                    let packet = session.encrypt_packet(PKT_SCREEN, chunk);
+                    let _ = socket.send_to(&packet, peer_addr);
+                    if i + 1 < chunks.len() {
+                        std::thread::sleep(Duration::from_micros(200));
+                    }
+                }
+                if frame_count % 30 == 0 || frame_count < 5 {
+                    log_fmt!("[screen] pw frame #{} sent ({} bytes, {} chunks, kf={})",
+                        frame_count, encoded.len(), chunks.len(), force_kf);
+                }
+                frame_id = frame_id.wrapping_add(1);
+            }
+            frame_count += 1;
+        }
+
+        let elapsed = frame_start.elapsed();
+        if elapsed < frame_duration {
+            std::thread::sleep(frame_duration - elapsed);
+        }
+    }
+
+    active.store(false, Ordering::Relaxed);
+    let _ = pw_handle.join();
+    log_fmt!("[screen] capture_loop_pipewire exited");
+}
+
+fn capture_loop_scrap(
     socket: UdpSocket,
     session: Session,
     peer_addr: SocketAddr,

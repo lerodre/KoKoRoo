@@ -329,6 +329,14 @@ impl HostelApp {
                             }
                         });
 
+                    #[cfg(target_os = "linux")]
+                    if crate::wayland_capture::is_wayland() {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(180, 180, 255),
+                            "Display will be selected via system dialog",
+                        );
+                    }
+
                     ui.add_space(4.0);
                     ui.label("Quality:");
                     let current_label = ScreenQuality::ALL[self.selected_screen_quality].label();

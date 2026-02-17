@@ -196,8 +196,29 @@ impl VoiceEngine {
         let active = self.screen_active.clone();
         let running = self.running.clone();
 
+        // Determine capture source: Wayland PipeWire or scrap (X11/Windows)
+        #[cfg(target_os = "linux")]
+        let source = if crate::wayland_capture::is_wayland() {
+            log_fmt!("[voice] Wayland detected, requesting screencast via portal...");
+            match crate::wayland_capture::request_screencast() {
+                Some(portal) => {
+                    log_fmt!("[voice] Portal granted: node_id={}, {}x{}", portal.node_id, portal.width, portal.height);
+                    crate::screen::CaptureSource::PipeWire { portal }
+                }
+                None => {
+                    log_fmt!("[voice] Wayland portal: user cancelled or unavailable, falling back to scrap");
+                    crate::screen::CaptureSource::Scrap { display_index }
+                }
+            }
+        } else {
+            crate::screen::CaptureSource::Scrap { display_index }
+        };
+
+        #[cfg(not(target_os = "linux"))]
+        let source = crate::screen::CaptureSource::Scrap { display_index };
+
         self.screen_thread = Some(thread::spawn(move || {
-            crate::screen::capture_loop(socket, session, peer_addr, active, running, quality, display_index);
+            crate::screen::capture_loop(socket, session, peer_addr, active, running, quality, source);
             log_fmt!("[voice] screen capture thread exited");
         }));
     }

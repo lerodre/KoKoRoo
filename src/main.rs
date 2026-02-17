@@ -14,6 +14,8 @@ mod sysaudio;
 mod sysfirewall;
 mod voice;
 mod ui;
+#[cfg(target_os = "linux")]
+mod wayland_capture;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
