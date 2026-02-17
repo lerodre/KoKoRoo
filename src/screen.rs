@@ -25,6 +25,8 @@ pub enum CaptureSource {
     PipeWire {
         capture: crate::wayland_capture::PortalCapture,
     },
+    /// Webcam via nokhwa (V4L2 on Linux, MediaFoundation on Windows)
+    Webcam { device_index: usize },
 }
 
 // ── Quality Presets ──
@@ -85,11 +87,12 @@ impl ScreenQuality {
     }
 }
 
-/// Command from GUI to engine thread to start/stop screen sharing.
+/// Command from GUI to engine thread to start/stop screen/webcam sharing.
 /// `audio_device`: None = no system audio, Some("") = default device, Some(name) = specific device.
 #[derive(Debug, Clone)]
 pub enum ScreenCommand {
-    Start { quality: ScreenQuality, audio_device: Option<String>, display_index: usize },
+    StartScreen { quality: ScreenQuality, audio_device: Option<String>, display_index: usize },
+    StartWebcam { quality: ScreenQuality, device_index: usize },
     Stop,
 }
 
@@ -105,6 +108,20 @@ pub fn list_displays() -> Vec<String> {
     displays.iter().enumerate().map(|(i, d)| {
         format!("Display {} ({}x{})", i + 1, d.width(), d.height())
     }).collect()
+}
+
+/// List available webcam devices.
+pub fn list_cameras() -> Vec<String> {
+    use nokhwa::utils::ApiBackend;
+    match nokhwa::query(ApiBackend::Auto) {
+        Ok(devices) => devices.iter().enumerate().map(|(i, d)| {
+            format!("Camera {} ({})", i, d.human_name())
+        }).collect(),
+        Err(e) => {
+            log_fmt!("[screen] list_cameras error: {}", e);
+            Vec::new()
+        }
+    }
 }
 
 // ── Constants ──
@@ -634,6 +651,9 @@ pub fn capture_loop(
         CaptureSource::PipeWire { capture } => {
             capture_loop_pipewire(socket, session, peer_addr, active, running, quality, capture);
         }
+        CaptureSource::Webcam { device_index } => {
+            capture_loop_webcam(socket, session, peer_addr, active, running, quality, device_index);
+        }
     }
 }
 
@@ -715,6 +735,114 @@ fn capture_loop_pipewire(
     active.store(false, Ordering::Relaxed);
     let _ = pw_handle.join();
     log_fmt!("[screen] capture_loop_pipewire exited");
+}
+
+fn capture_loop_webcam(
+    socket: UdpSocket,
+    session: Session,
+    peer_addr: SocketAddr,
+    active: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
+    quality: ScreenQuality,
+    device_index: usize,
+) {
+    use nokhwa::pixel_format::RgbFormat;
+    use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
+    use nokhwa::Camera;
+
+    log_fmt!("[screen] capture_loop_webcam: starting, device_index={}, peer={}, quality={:?}",
+        device_index, peer_addr, quality);
+
+    let index = CameraIndex::Index(device_index as u32);
+    let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
+
+    let mut camera = match Camera::new(index, requested) {
+        Ok(c) => c,
+        Err(e) => {
+            log_fmt!("[screen] ERROR: failed to open camera {}: {}", device_index, e);
+            active.store(false, Ordering::Relaxed);
+            return;
+        }
+    };
+
+    if let Err(e) = camera.open_stream() {
+        log_fmt!("[screen] ERROR: failed to open camera stream: {}", e);
+        active.store(false, Ordering::Relaxed);
+        return;
+    }
+
+    let res = camera.resolution();
+    let native_w = res.width() as u32;
+    let native_h = res.height() as u32;
+    log_fmt!("[screen] camera resolution: {}x{}", native_w, native_h);
+
+    // Cap encoder resolution to camera native resolution
+    let enc_w = quality.width().min(native_w);
+    let enc_h = quality.height().min(native_h);
+    let enc_fps = quality.fps();
+    let enc_bps = quality.bitrate_kbps();
+    log_fmt!("[screen] webcam encoder: {}x{} {}fps {}kbps (native {}x{})",
+        enc_w, enc_h, enc_fps, enc_bps, native_w, native_h);
+
+    let mut encoder = ScreenEncoder::new(enc_w, enc_h, enc_fps, enc_bps);
+    let frame_duration = Duration::from_secs_f64(1.0 / enc_fps as f64);
+    let mut frame_id: u16 = 0;
+    let mut frame_count: u32 = 0;
+
+    while active.load(Ordering::Relaxed) && running.load(Ordering::Relaxed) {
+        let frame_start = Instant::now();
+
+        let frame = match camera.frame() {
+            Ok(f) => f,
+            Err(e) => {
+                log_fmt!("[screen] webcam frame error: {}", e);
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+        };
+
+        let rgb_data = frame.buffer();
+        let w = frame.resolution().width() as usize;
+        let h = frame.resolution().height() as usize;
+
+        // Convert RGB → BGRA
+        let mut bgra = vec![0u8; w * h * 4];
+        for i in 0..(w * h) {
+            bgra[i * 4] = rgb_data[i * 3 + 2];     // B
+            bgra[i * 4 + 1] = rgb_data[i * 3 + 1]; // G
+            bgra[i * 4 + 2] = rgb_data[i * 3];      // R
+            bgra[i * 4 + 3] = 255;                   // A
+        }
+
+        let scaled = scale_bgra(&bgra, w, h, enc_w as usize, enc_h as usize);
+        let force_kf = frame_count % KEYFRAME_INTERVAL == 0;
+        let encoded = encoder.encode(&scaled, force_kf);
+
+        if !encoded.is_empty() {
+            let chunks = ScreenEncoder::fragment(&encoded, frame_id, force_kf);
+            for (i, chunk) in chunks.iter().enumerate() {
+                let packet = session.encrypt_packet(PKT_SCREEN, chunk);
+                let _ = socket.send_to(&packet, peer_addr);
+                if i + 1 < chunks.len() {
+                    std::thread::sleep(Duration::from_micros(200));
+                }
+            }
+            if frame_count % 30 == 0 || frame_count < 5 {
+                log_fmt!("[screen] webcam frame #{} sent ({} bytes, {} chunks, kf={})",
+                    frame_count, encoded.len(), chunks.len(), force_kf);
+            }
+            frame_id = frame_id.wrapping_add(1);
+        }
+        frame_count += 1;
+
+        let elapsed = frame_start.elapsed();
+        if elapsed < frame_duration {
+            std::thread::sleep(frame_duration - elapsed);
+        }
+    }
+
+    active.store(false, Ordering::Relaxed);
+    log_fmt!("[screen] capture_loop_webcam exited");
 }
 
 fn capture_loop_scrap(

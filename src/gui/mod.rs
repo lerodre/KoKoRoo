@@ -203,6 +203,12 @@ pub struct HostelApp {
     pub(crate) loopback_devices: Vec<String>,
     pub(crate) selected_display: usize,
     pub(crate) display_names: Vec<String>,
+    // Webcam sharing
+    pub(crate) show_webcam_popup: bool,
+    pub(crate) webcam_sharing: bool,
+    pub(crate) selected_camera: usize,
+    pub(crate) camera_names: Vec<String>,
+
     pub(crate) video_fullscreen: bool,
     pub(crate) last_mouse_move: Instant,
     pub(crate) last_frame_time: Option<Instant>,
@@ -277,6 +283,10 @@ impl HostelApp {
             loopback_devices: Vec::new(),
             selected_display: 0,
             display_names: Vec::new(),
+            show_webcam_popup: false,
+            webcam_sharing: false,
+            selected_camera: 0,
+            camera_names: Vec::new(),
             video_fullscreen: false,
             last_mouse_move: Instant::now(),
             last_frame_time: None,
@@ -374,7 +384,8 @@ impl HostelApp {
                         while running.load(Ordering::Relaxed) {
                             while let Ok(cmd) = screen_cmd_rx.try_recv() {
                                 match cmd {
-                                    ScreenCommand::Start { quality, audio_device, display_index } => engine.start_screen_share(quality, audio_device, display_index),
+                                    ScreenCommand::StartScreen { quality, audio_device, display_index } => engine.start_screen_share(quality, audio_device, display_index),
+                                    ScreenCommand::StartWebcam { quality, device_index } => engine.start_webcam_share(quality, device_index),
                                     ScreenCommand::Stop => engine.stop_screen_share(),
                                 }
                             }
@@ -428,6 +439,10 @@ impl HostelApp {
         self.chat_history = None;
         self.screen_sharing = false;
         self.show_screen_popup = false;
+        self.webcam_sharing = false;
+        self.show_webcam_popup = false;
+        self.selected_camera = 0;
+        self.camera_names.clear();
         self.show_hangup_confirm = false;
         self.selected_audio_device = 0;
         self.loopback_devices.clear();

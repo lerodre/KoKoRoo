@@ -231,6 +231,33 @@ impl VoiceEngine {
         }));
     }
 
+    /// Start sharing our webcam to the peer at the given quality.
+    pub fn start_webcam_share(&mut self, quality: ScreenQuality, device_index: usize) {
+        if self.screen_active.load(Ordering::Relaxed) {
+            log_fmt!("[voice] start_webcam_share: already active, stopping first");
+            self.stop_screen_share();
+        }
+        log_fmt!("[voice] start_webcam_share: launching capture thread, peer={}, quality={:?}, device={}",
+            self.peer_addr, quality, device_index);
+        self.screen_active.store(true, Ordering::Relaxed);
+
+        let socket = self.send_socket.try_clone().unwrap();
+        let session = {
+            let sess = self.session.lock().unwrap();
+            sess.clone_for_sending()
+        };
+        let peer_addr: std::net::SocketAddr = self.peer_addr.parse().unwrap();
+        let active = self.screen_active.clone();
+        let running = self.running.clone();
+
+        let source = crate::screen::CaptureSource::Webcam { device_index };
+
+        self.screen_thread = Some(thread::spawn(move || {
+            crate::screen::capture_loop(socket, session, peer_addr, active, running, quality, source);
+            log_fmt!("[voice] webcam capture thread exited");
+        }));
+    }
+
     /// Confirm and save the pending contact (used after user accepts a TOFU warning).
     pub fn confirm_contact(&mut self) {
         if let Some(contact) = self.pending_contact.take() {

@@ -264,11 +264,45 @@ impl HostelApp {
                         let _ = tx.send(ScreenCommand::Stop);
                     }
                 } else {
+                    // Mutual exclusion: stop webcam if active
+                    if self.webcam_sharing {
+                        self.webcam_sharing = false;
+                        if let Some(tx) = &self.screen_cmd_tx {
+                            let _ = tx.send(ScreenCommand::Stop);
+                        }
+                    }
                     if self.loopback_devices.is_empty() {
                         self.loopback_devices = crate::sysaudio::list_loopback_devices();
                     }
                     self.display_names = crate::screen::list_displays();
                     self.show_screen_popup = true;
+                }
+            }
+
+            let (cam_text, cam_color) = if self.webcam_sharing {
+                ("Cam: ON", egui::Color32::from_rgb(40, 160, 100))
+            } else {
+                ("Cam: OFF", egui::Color32::from_rgb(100, 100, 100))
+            };
+            let cam_btn = egui::Button::new(
+                egui::RichText::new(cam_text).size(16.0).color(egui::Color32::WHITE)
+            ).min_size(egui::vec2(110.0, 35.0)).fill(cam_color);
+            if ui.add(cam_btn).clicked() {
+                if self.webcam_sharing {
+                    self.webcam_sharing = false;
+                    if let Some(tx) = &self.screen_cmd_tx {
+                        let _ = tx.send(ScreenCommand::Stop);
+                    }
+                } else {
+                    // Mutual exclusion: stop screen share if active
+                    if self.screen_sharing {
+                        self.screen_sharing = false;
+                        if let Some(tx) = &self.screen_cmd_tx {
+                            let _ = tx.send(ScreenCommand::Stop);
+                        }
+                    }
+                    self.camera_names = crate::screen::list_cameras();
+                    self.show_webcam_popup = true;
                 }
             }
 
@@ -374,7 +408,7 @@ impl HostelApp {
                             n => self.loopback_devices.get(n - 2).cloned(),
                         };
                         if let Some(tx) = &self.screen_cmd_tx {
-                            let _ = tx.send(ScreenCommand::Start { quality, audio_device, display_index: self.selected_display });
+                            let _ = tx.send(ScreenCommand::StartScreen { quality, audio_device, display_index: self.selected_display });
                         }
                         self.screen_sharing = true;
                         self.show_screen_popup = false;
@@ -382,6 +416,65 @@ impl HostelApp {
                 });
             if !open {
                 self.show_screen_popup = false;
+            }
+        }
+
+        // ── Webcam config popup ──
+        if self.show_webcam_popup {
+            let mut open = true;
+            egui::Window::new("Webcam")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .open(&mut open)
+                .show(ui.ctx(), |ui| {
+                    ui.label("Camera:");
+                    if self.camera_names.is_empty() {
+                        ui.colored_label(egui::Color32::from_rgb(255, 100, 100), "No cameras found");
+                    } else {
+                        let cam_label = self.camera_names.get(self.selected_camera)
+                            .cloned().unwrap_or_else(|| "Camera 0".to_string());
+                        egui::ComboBox::from_id_salt("popup_camera")
+                            .width(240.0)
+                            .selected_text(&cam_label)
+                            .show_ui(ui, |ui| {
+                                for (i, name) in self.camera_names.iter().enumerate() {
+                                    ui.selectable_value(&mut self.selected_camera, i, name.as_str());
+                                }
+                            });
+                    }
+
+                    ui.add_space(4.0);
+                    ui.label("Quality:");
+                    let current_label = ScreenQuality::ALL[self.selected_screen_quality].label();
+                    egui::ComboBox::from_id_salt("popup_cam_quality")
+                        .width(160.0)
+                        .selected_text(current_label)
+                        .show_ui(ui, |ui| {
+                            for (i, q) in ScreenQuality::ALL.iter().enumerate() {
+                                ui.selectable_value(&mut self.selected_screen_quality, i, q.label());
+                            }
+                        });
+
+                    ui.add_space(8.0);
+                    let can_start = !self.camera_names.is_empty();
+                    let start_btn = egui::Button::new(
+                        egui::RichText::new("Start Camera").size(16.0).color(egui::Color32::WHITE)
+                    ).min_size(egui::vec2(160.0, 35.0)).fill(
+                        if can_start { egui::Color32::from_rgb(40, 160, 100) }
+                        else { egui::Color32::from_rgb(80, 80, 80) }
+                    );
+                    if ui.add_enabled(can_start, start_btn).clicked() {
+                        let quality = ScreenQuality::ALL[self.selected_screen_quality];
+                        if let Some(tx) = &self.screen_cmd_tx {
+                            let _ = tx.send(ScreenCommand::StartWebcam { quality, device_index: self.selected_camera });
+                        }
+                        self.webcam_sharing = true;
+                        self.show_webcam_popup = false;
+                    }
+                });
+            if !open {
+                self.show_webcam_popup = false;
             }
         }
 
