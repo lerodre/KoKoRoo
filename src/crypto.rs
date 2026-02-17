@@ -1,6 +1,8 @@
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use x25519_dalek::{EphemeralSecret, PublicKey, SharedSecret};
 
 /// Packet type markers (first byte of every UDP packet).
@@ -9,6 +11,7 @@ pub const PKT_VOICE: u8 = 0x02;    // encrypted voice: [0x02][4-byte counter][ci
 pub const PKT_IDENTITY: u8 = 0x03; // identity exchange: [0x03][4-byte counter][encrypted identity pubkey]
 pub const PKT_CHAT: u8 = 0x04;     // chat message: [0x04][4-byte counter][encrypted text+timestamp]
 pub const PKT_HANGUP: u8 = 0x05;   // hangup signal: [0x05][4-byte counter][encrypted empty]
+pub const PKT_SCREEN: u8 = 0x06;   // screen share: [0x06][4-byte counter][encrypted VP8 chunk]
 
 /// Size of an X25519 public key.
 pub const PUBKEY_SIZE: usize = 32;
@@ -29,7 +32,7 @@ pub const ENCRYPT_OVERHEAD: usize = 1 + 4 + TAG_SIZE;
 /// Holds the cryptographic state for one session.
 pub struct Session {
     cipher: ChaCha20Poly1305,
-    send_counter: u32,
+    send_counter: Arc<AtomicU32>,
     pub verification_code: String,
 }
 
@@ -89,7 +92,7 @@ pub fn complete_handshake(our_secret: EphemeralSecret, peer_pubkey: &[u8; 32]) -
 
     Session {
         cipher,
-        send_counter: 0,
+        send_counter: Arc::new(AtomicU32::new(0)),
         verification_code: code,
     }
 }
@@ -97,9 +100,8 @@ pub fn complete_handshake(our_secret: EphemeralSecret, peer_pubkey: &[u8; 32]) -
 impl Session {
     /// Encrypt any payload with a given packet type marker.
     /// Returns: [type][4-byte counter][ciphertext + 16-byte auth tag]
-    pub fn encrypt_packet(&mut self, pkt_type: u8, plaintext: &[u8]) -> Vec<u8> {
-        let counter = self.send_counter;
-        self.send_counter = self.send_counter.wrapping_add(1);
+    pub fn encrypt_packet(&self, pkt_type: u8, plaintext: &[u8]) -> Vec<u8> {
+        let counter = self.send_counter.fetch_add(1, Ordering::Relaxed);
 
         let mut nonce_bytes = [0u8; NONCE_SIZE];
         nonce_bytes[..4].copy_from_slice(&counter.to_le_bytes());
@@ -138,10 +140,9 @@ impl Session {
 
     /// Encrypt a voice frame. Returns the full packet ready to send:
     /// [0x02][4-byte counter][ciphertext + 16-byte auth tag]
-    pub fn encrypt_voice(&mut self, plaintext: &[u8]) -> Vec<u8> {
+    pub fn encrypt_voice(&self, plaintext: &[u8]) -> Vec<u8> {
         // Build nonce from counter (12 bytes, first 4 are counter, rest zero)
-        let counter = self.send_counter;
-        self.send_counter = self.send_counter.wrapping_add(1);
+        let counter = self.send_counter.fetch_add(1, Ordering::Relaxed);
 
         let mut nonce_bytes = [0u8; NONCE_SIZE];
         nonce_bytes[..4].copy_from_slice(&counter.to_le_bytes());
@@ -180,6 +181,17 @@ impl Session {
         let ciphertext = &packet[5..];
 
         self.cipher.decrypt(&nonce, ciphertext).ok()
+    }
+
+    /// Create a clone that shares the same cipher key and atomic send counter.
+    /// Used so the screen capture thread can encrypt packets concurrently
+    /// with unique nonces (no mutex needed for sending).
+    pub fn clone_for_sending(&self) -> Session {
+        Session {
+            cipher: self.cipher.clone(),
+            send_counter: self.send_counter.clone(),
+            verification_code: self.verification_code.clone(),
+        }
     }
 }
 

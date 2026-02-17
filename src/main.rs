@@ -7,6 +7,7 @@ mod crypto;
 mod firewall;
 mod gui;
 mod identity;
+mod screen;
 mod voice;
 mod ui;
 

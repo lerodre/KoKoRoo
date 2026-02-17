@@ -1,11 +1,12 @@
 use cpal::traits::{DeviceTrait, HostTrait};
 use eframe::egui;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
 use crate::chat::ChatHistory;
 use crate::identity::{self, Contact, Identity, Settings};
+use crate::screen::ScreenViewer;
 
 // ── App State Machine ──
 
@@ -80,6 +81,10 @@ struct CallInfo {
     chat_tx: mpsc::Sender<String>,
     chat_rx: mpsc::Receiver<String>,
     local_hangup: Arc<AtomicBool>,
+    screen_viewer: Arc<Mutex<ScreenViewer>>,
+    screen_active: Arc<AtomicBool>,
+    /// Channel to tell the engine thread to start/stop screen sharing
+    screen_cmd_tx: mpsc::Sender<bool>,
 }
 
 pub struct HostelApp {
@@ -117,6 +122,13 @@ pub struct HostelApp {
     chat_rx: Option<mpsc::Receiver<String>>,
     chat_input: String,
     chat_history: Option<ChatHistory>,
+
+    // Screen sharing
+    screen_sharing: bool,
+    screen_texture: Option<egui::TextureHandle>,
+    screen_viewer: Option<Arc<Mutex<ScreenViewer>>>,
+    screen_active: Option<Arc<AtomicBool>>,
+    screen_cmd_tx: Option<mpsc::Sender<bool>>,
 
     // Async connection result
     connect_result: Arc<std::sync::Mutex<Option<Result<CallInfo, String>>>>,
@@ -174,6 +186,11 @@ impl HostelApp {
             chat_rx: None,
             chat_input: String::new(),
             chat_history: None,
+            screen_sharing: false,
+            screen_texture: None,
+            screen_viewer: None,
+            screen_active: None,
+            screen_cmd_tx: None,
             connect_result: Arc::new(std::sync::Mutex::new(None)),
         }
     }
@@ -224,6 +241,9 @@ impl HostelApp {
                 fingerprint: identity_fingerprint,
             };
 
+            // Channel for GUI to signal start/stop screen sharing
+            let (screen_cmd_tx, screen_cmd_rx) = mpsc::channel::<bool>();
+
             match crate::voice::start_engine(
                 &input_device, &output_device,
                 &peer_addr, &local_port,
@@ -240,11 +260,22 @@ impl HostelApp {
                         chat_tx: engine.chat_tx.take().unwrap(),
                         chat_rx: engine.chat_rx.take().unwrap(),
                         local_hangup: engine.local_hangup.clone(),
+                        screen_viewer: engine.screen_viewer.clone(),
+                        screen_active: engine.screen_active.clone(),
+                        screen_cmd_tx,
                     };
                     *result.lock().unwrap() = Some(Ok(info));
 
-                    // Keep engine alive until call ends
+                    // Keep engine alive until call ends, also process screen commands
                     while running.load(Ordering::Relaxed) {
+                        // Check for screen share start/stop commands from GUI
+                        while let Ok(start) = screen_cmd_rx.try_recv() {
+                            if start {
+                                engine.start_screen_share();
+                            } else {
+                                engine.stop_screen_share();
+                            }
+                        }
                         thread::sleep(std::time::Duration::from_millis(100));
                     }
                     drop(engine);
@@ -285,6 +316,11 @@ impl HostelApp {
         self.chat_rx = None;
         self.chat_input.clear();
         self.chat_history = None;
+        self.screen_sharing = false;
+        self.screen_texture = None;
+        self.screen_viewer = None;
+        self.screen_active = None;
+        self.screen_cmd_tx = None;
         *self.connect_result.lock().unwrap() = None;
         // Reload contacts (the call may have created/updated one)
         self.contacts = identity::load_all_contacts();
@@ -308,6 +344,9 @@ impl eframe::App for HostelApp {
                         self.chat_tx = Some(info.chat_tx);
                         self.chat_rx = Some(info.chat_rx);
                         self.local_hangup = Some(info.local_hangup);
+                        self.screen_viewer = Some(info.screen_viewer);
+                        self.screen_active = Some(info.screen_active);
+                        self.screen_cmd_tx = Some(info.screen_cmd_tx);
                         // Load chat history
                         self.chat_history = Some(ChatHistory::load(
                             &info.contact_id,
@@ -339,7 +378,9 @@ impl eframe::App for HostelApp {
                 self.on_remote_hangup();
                 return;
             }
-            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+            // Repaint faster when screen sharing is active (for smooth video)
+            let repaint_ms = if self.screen_texture.is_some() { 33 } else { 200 };
+            ctx.request_repaint_after(std::time::Duration::from_millis(repaint_ms));
         }
 
         // Style
@@ -574,7 +615,7 @@ impl HostelApp {
 
         ui.add_space(4.0);
 
-        // ── Controls row: mic + hang up ──
+        // ── Controls row: mic + screen share + hang up ──
         ui.horizontal(|ui| {
             let (btn_text, btn_color) = if mic_on {
                 ("Mic: ON", egui::Color32::from_rgb(40, 140, 60))
@@ -588,6 +629,22 @@ impl HostelApp {
                 self.mic_active.store(!mic_on, Ordering::Relaxed);
             }
 
+            // Screen share toggle
+            let (scr_text, scr_color) = if self.screen_sharing {
+                ("Screen: ON", egui::Color32::from_rgb(40, 100, 180))
+            } else {
+                ("Screen: OFF", egui::Color32::from_rgb(100, 100, 100))
+            };
+            let scr_btn = egui::Button::new(
+                egui::RichText::new(scr_text).size(16.0).color(egui::Color32::WHITE)
+            ).min_size(egui::vec2(130.0, 35.0)).fill(scr_color);
+            if ui.add(scr_btn).clicked() {
+                self.screen_sharing = !self.screen_sharing;
+                if let Some(tx) = &self.screen_cmd_tx {
+                    let _ = tx.send(self.screen_sharing);
+                }
+            }
+
             let hangup_btn = egui::Button::new(
                 egui::RichText::new("Hang Up").size(16.0).color(egui::Color32::WHITE)
             ).min_size(egui::vec2(100.0, 35.0)).fill(egui::Color32::from_rgb(180, 40, 40));
@@ -596,6 +653,31 @@ impl HostelApp {
                 return;
             }
         });
+
+        // ── Screen viewer (incoming screen from peer) ──
+        if let Some(viewer) = &self.screen_viewer {
+            if let Ok(mut v) = viewer.lock() {
+                if let Some(rgba_frame) = v.take_frame() {
+                    let image = egui::ColorImage::from_rgba_unmultiplied(
+                        [v.frame_width as usize, v.frame_height as usize],
+                        &rgba_frame,
+                    );
+                    self.screen_texture = Some(
+                        ui.ctx().load_texture("screen_share", image, Default::default())
+                    );
+                }
+            }
+            if let Some(tex) = &self.screen_texture {
+                ui.separator();
+                let available_width = ui.available_width();
+                let aspect = 720.0 / 1280.0;
+                let display_height = available_width * aspect;
+                ui.image(egui::load::SizedTexture::new(
+                    tex.id(),
+                    egui::vec2(available_width, display_height),
+                ));
+            }
+        }
 
         ui.separator();
 
@@ -685,9 +767,9 @@ impl HostelApp {
 pub fn run() {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([450.0, 750.0])
+            .with_inner_size([800.0, 750.0])
             .with_min_inner_size([400.0, 600.0])
-            .with_title("hostelD — Secure P2P Voice + Chat"),
+            .with_title("hostelD — Secure P2P Voice + Chat + Screen"),
         ..Default::default()
     };
     eframe::run_native(

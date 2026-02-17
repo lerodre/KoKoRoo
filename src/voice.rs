@@ -13,9 +13,10 @@ use std::thread;
 use nnnoiseless::DenoiseState;
 
 use crate::chat;
-use crate::crypto::{self, Session, PKT_CHAT, PKT_HANGUP, PKT_HELLO, PKT_IDENTITY, PKT_VOICE};
+use crate::crypto::{self, Session, PKT_CHAT, PKT_HANGUP, PKT_HELLO, PKT_IDENTITY, PKT_SCREEN, PKT_VOICE};
 use crate::firewall::{Action, Firewall};
 use crate::identity::{self, Identity};
+use crate::screen::ScreenViewer;
 
 /// Opus frame size: 960 samples @ 48kHz = 20ms.
 const FRAME_SIZE: usize = 960;
@@ -110,6 +111,18 @@ pub struct VoiceEngine {
     pub chat_tx: Option<mpsc::Sender<String>>,
     /// Receive chat text from the network thread
     pub chat_rx: Option<mpsc::Receiver<String>>,
+    /// Screen viewer: assembles + decodes incoming screen frames
+    pub screen_viewer: Arc<Mutex<ScreenViewer>>,
+    /// Flag: is screen sharing active (we are sharing)?
+    pub screen_active: Arc<AtomicBool>,
+    /// Screen capture thread handle
+    screen_thread: Option<thread::JoinHandle<()>>,
+    /// Cloned session for screen capture thread to encrypt independently
+    session: Arc<Mutex<Session>>,
+    /// Socket clone for screen sharing
+    send_socket: UdpSocket,
+    /// Peer address for screen sharing
+    peer_addr: String,
     _input_stream: cpal::Stream,
     _output_stream: cpal::Stream,
     _sender: thread::JoinHandle<()>,
@@ -118,7 +131,42 @@ pub struct VoiceEngine {
 
 impl Drop for VoiceEngine {
     fn drop(&mut self) {
+        self.screen_active.store(false, Ordering::Relaxed);
+        if let Some(t) = self.screen_thread.take() {
+            let _ = t.join();
+        }
         self.running.store(false, Ordering::Relaxed);
+    }
+}
+
+impl VoiceEngine {
+    /// Start sharing our screen to the peer.
+    pub fn start_screen_share(&mut self) {
+        if self.screen_active.load(Ordering::Relaxed) {
+            return; // already sharing
+        }
+        self.screen_active.store(true, Ordering::Relaxed);
+
+        let socket = self.send_socket.try_clone().unwrap();
+        let session = {
+            let sess = self.session.lock().unwrap();
+            sess.clone_for_sending()
+        };
+        let peer_addr: std::net::SocketAddr = self.peer_addr.parse().unwrap();
+        let active = self.screen_active.clone();
+        let running = self.running.clone();
+
+        self.screen_thread = Some(thread::spawn(move || {
+            crate::screen::capture_loop(socket, session, peer_addr, active, running);
+        }));
+    }
+
+    /// Stop sharing our screen.
+    pub fn stop_screen_share(&mut self) {
+        self.screen_active.store(false, Ordering::Relaxed);
+        if let Some(t) = self.screen_thread.take() {
+            let _ = t.join();
+        }
     }
 }
 
@@ -183,7 +231,7 @@ fn exchange_identity(
     payload.extend_from_slice(our_nickname.as_bytes());
 
     let identity_packet = {
-        let mut sess = session.lock().unwrap();
+        let sess = session.lock().unwrap();
         sess.encrypt_packet(PKT_IDENTITY, &payload)
     };
 
@@ -376,6 +424,7 @@ pub fn start_engine(
     let (mut spk_producer, mut spk_consumer) = spk_ring.split();
 
     let send_socket = socket.try_clone().unwrap();
+    let screen_socket = socket.try_clone().unwrap();
     let peer_addr_owned = peer_addr.to_string();
 
     // ── Local hangup flag ──
@@ -406,7 +455,7 @@ pub fn start_engine(
             while let Ok(text) = outgoing_rx.try_recv() {
                 let chat_bytes = chat::encode_chat_text(&text);
                 let packet = {
-                    let mut sess = session_s.lock().unwrap();
+                    let sess = session_s.lock().unwrap();
                     sess.encrypt_packet(PKT_CHAT, &chat_bytes)
                 };
                 let _ = send_socket.send_to(&packet, &peer_addr_owned);
@@ -429,7 +478,7 @@ pub fn start_engine(
                     while let Ok(text) = outgoing_rx.try_recv() {
                         let chat_bytes = chat::encode_chat_text(&text);
                         let packet = {
-                            let mut sess = session_s.lock().unwrap();
+                            let sess = session_s.lock().unwrap();
                             sess.encrypt_packet(PKT_CHAT, &chat_bytes)
                         };
                         let _ = send_socket.send_to(&packet, &peer_addr_owned);
@@ -458,7 +507,7 @@ pub fn start_engine(
                 Err(_) => continue,
             };
             let packet = {
-                let mut sess = session_s.lock().unwrap();
+                let sess = session_s.lock().unwrap();
                 sess.encrypt_voice(&opus_buf[..encoded_len])
             };
             let _ = send_socket.send_to(&packet, &peer_addr_owned);
@@ -468,7 +517,7 @@ pub fn start_engine(
         if local_hangup_s.load(Ordering::Relaxed) {
             for _ in 0..3 {
                 let packet = {
-                    let mut sess = session_s.lock().unwrap();
+                    let sess = session_s.lock().unwrap();
                     sess.encrypt_packet(PKT_HANGUP, &[])
                 };
                 let _ = send_socket.send_to(&packet, &peer_addr_owned);
@@ -477,16 +526,21 @@ pub fn start_engine(
         }
     });
 
-    // ── Receiver Thread: UDP → decrypt → voice/chat dispatch ──
+    // ── Screen Viewer (shared with GUI) ──
+    let screen_viewer = Arc::new(Mutex::new(ScreenViewer::new()));
+    let screen_active = Arc::new(AtomicBool::new(false));
+
+    // ── Receiver Thread: UDP → decrypt → voice/chat/screen dispatch ──
     let running_r = running.clone();
     let session_r = session.clone();
+    let screen_viewer_r = screen_viewer.clone();
     socket.set_read_timeout(Some(std::time::Duration::from_millis(100))).unwrap();
 
     let receiver = thread::spawn(move || {
         let mut decoder = Decoder::new(SampleRate::Hz48000, Channels::Mono)
             .expect("Failed to create Opus decoder");
         let mut firewall = Firewall::new();
-        let mut recv_buf = [0u8; 2048]; // larger for chat messages
+        let mut recv_buf = [0u8; 4096]; // larger for screen chunks + chat
         let mut pcm_out = vec![0f32; FRAME_SIZE];
 
         while running_r.load(Ordering::Relaxed) {
@@ -528,6 +582,11 @@ pub fn start_engine(
                         Some((PKT_CHAT, chat_data)) => {
                             if let Some(text) = chat::decode_chat_text(&chat_data) {
                                 let _ = incoming_tx.send(text);
+                            }
+                        }
+                        Some((PKT_SCREEN, screen_data)) => {
+                            if let Ok(mut viewer) = screen_viewer_r.lock() {
+                                viewer.receive_chunk(&screen_data);
                             }
                         }
                         Some((PKT_HANGUP, _)) => {
@@ -610,6 +669,12 @@ pub fn start_engine(
         key_change_warning,
         chat_tx: Some(outgoing_tx),
         chat_rx: Some(incoming_rx),
+        screen_viewer,
+        screen_active,
+        screen_thread: None,
+        session,
+        send_socket: screen_socket,
+        peer_addr: peer_addr.to_string(),
         _input_stream: input_stream,
         _output_stream: output_stream,
         _sender: sender,

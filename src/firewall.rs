@@ -6,7 +6,8 @@ use std::time::Instant;
 const MAX_STRIKES: u32 = 5;
 
 /// Max packets per second from a single IP before it counts as a strike.
-const RATE_LIMIT: u32 = 200;
+/// Raised to 1000 to accommodate screen sharing (~200-400 chunks/s + ~50 audio pkt/s).
+const RATE_LIMIT: u32 = 1000;
 
 /// Tracks per-IP state for rate limiting and blacklisting.
 struct IpState {
