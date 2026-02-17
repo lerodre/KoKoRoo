@@ -1,4 +1,5 @@
 use eframe::egui;
+use crate::identity;
 use super::{HostelApp, list_audio_devices};
 
 impl HostelApp {
@@ -80,6 +81,89 @@ impl HostelApp {
             } else {
                 0
             };
+        }
+
+        // ── Blocked Contacts ──
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("Blocked Contacts").strong());
+
+        if self.settings.blocked.is_empty() {
+            ui.colored_label(egui::Color32::GRAY, "No blocked contacts.");
+        } else {
+            let contacts = identity::load_all_contacts();
+            let mut unblock_hex: Option<String> = None;
+            let mut unblock_ip: Option<String> = None;
+
+            for hex in &self.settings.blocked {
+                let (display, ip) = if let Some(c) = contacts.iter().find(|c| identity::pubkey_hex(&c.pubkey) == *hex) {
+                    let name = if c.nickname.is_empty() {
+                        c.fingerprint.clone()
+                    } else {
+                        format!("{} #{}", c.nickname, c.fingerprint)
+                    };
+                    (name, c.last_address.clone())
+                } else {
+                    // Contact file deleted but hex still in blocked list
+                    let short = if hex.len() > 16 { &hex[..16] } else { hex.as_str() };
+                    (format!("{}...", short), String::new())
+                };
+
+                ui.horizontal(|ui| {
+                    ui.label(&display);
+                    if ui.small_button("Unblock").clicked() {
+                        unblock_hex = Some(hex.clone());
+                        if !ip.is_empty() {
+                            unblock_ip = Some(ip.clone());
+                        }
+                    }
+                });
+            }
+
+            if let Some(hex) = unblock_hex {
+                self.settings.unblock_contact(&hex);
+                if let Some(ip) = unblock_ip {
+                    self.settings.unban_ip(&ip);
+                }
+            }
+        }
+
+        // ── Banned IPs ──
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("Banned IPs").strong());
+
+        // Merge persisted bans with runtime auto-bans
+        let mut all_ips = self.settings.banned_ips.clone();
+        if let Some(ref auto_ips) = self.auto_banned_ips {
+            if let Ok(runtime) = auto_ips.lock() {
+                for ip in runtime.iter() {
+                    if !all_ips.contains(ip) {
+                        // Persist newly auto-banned IPs
+                        self.settings.ban_ip(ip);
+                        all_ips.push(ip.clone());
+                    }
+                }
+            }
+        }
+
+        if all_ips.is_empty() {
+            ui.colored_label(egui::Color32::GRAY, "No banned IPs.");
+        } else {
+            let mut unban_ip: Option<String> = None;
+            for ip in &all_ips {
+                ui.horizontal(|ui| {
+                    ui.monospace(ip);
+                    if ui.small_button("Unban").clicked() {
+                        unban_ip = Some(ip.clone());
+                    }
+                });
+            }
+            if let Some(ip) = unban_ip {
+                self.settings.unban_ip(&ip);
+            }
         }
     }
 }

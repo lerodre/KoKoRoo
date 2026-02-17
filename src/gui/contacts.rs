@@ -94,11 +94,18 @@ impl HostelApp {
             self.viewing_contact = Some(contact);
         }
         if let Some(i) = block_contact {
-            let hex = identity::pubkey_hex(&self.contacts[i].pubkey);
+            let contact = &self.contacts[i];
+            let hex = identity::pubkey_hex(&contact.pubkey);
             if self.settings.is_blocked(&hex) {
                 self.settings.unblock_contact(&hex);
+                if !contact.last_address.is_empty() {
+                    self.settings.unban_ip(&contact.last_address);
+                }
             } else {
                 self.settings.block_contact(&hex);
+                if !contact.last_address.is_empty() {
+                    self.settings.ban_ip(&contact.last_address);
+                }
             }
         }
         if let Some(i) = delete_contact {

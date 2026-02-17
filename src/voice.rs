@@ -136,6 +136,8 @@ pub struct VoiceEngine {
     /// Wayland portal session (kept alive for the entire call)
     #[cfg(target_os = "linux")]
     wayland_portal: Option<crate::wayland_capture::WaylandPortal>,
+    /// Auto-banned IPs reported by the firewall during this call
+    pub auto_banned_ips: Arc<Mutex<Vec<String>>>,
     /// Cloned session for screen capture thread to encrypt independently
     session: Arc<Mutex<Session>>,
     /// Socket clone for screen sharing
@@ -690,6 +692,9 @@ pub fn start_engine(
         }
     });
 
+    // ── Auto-banned IPs sink (shared with GUI for display + persistence) ──
+    let auto_banned_ips: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
     // ── Screen Viewer (shared with GUI) ──
     let screen_viewer = Arc::new(Mutex::new(ScreenViewer::new()));
     let screen_active = Arc::new(AtomicBool::new(false));
@@ -706,10 +711,12 @@ pub fn start_engine(
     let peer_ip = peer_addr.parse::<std::net::SocketAddr>()
         .map(|sa| sa.ip())
         .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+    let auto_banned_ips_r = auto_banned_ips.clone();
+    let banned_ips_seed = settings_check.banned_ips.clone();
     let receiver = thread::spawn(move || {
         let mut decoder = Decoder::new(SampleRate::Hz48000, Channels::Mono)
             .expect("Failed to create Opus decoder");
-        let mut firewall = Firewall::new();
+        let mut firewall = Firewall::new_with_bans(&banned_ips_seed, auto_banned_ips_r);
         let mut recv_buf = [0u8; 4096]; // larger for screen chunks + chat
         let mut pcm_out = vec![0f32; FRAME_SIZE];
         let mut screen_chunk_count: u64 = 0;
@@ -885,6 +892,7 @@ pub fn start_engine(
         sys_audio_active,
         sys_audio_stream: None,
         sys_audio_producer,
+        auto_banned_ips,
         session,
         send_socket: screen_socket,
         peer_addr: peer_addr.to_string(),

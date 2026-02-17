@@ -148,6 +148,7 @@ pub(crate) struct CallInfo {
     pub(crate) screen_viewer: Arc<Mutex<ScreenViewer>>,
     pub(crate) screen_active: Arc<AtomicBool>,
     pub(crate) screen_cmd_tx: mpsc::Sender<ScreenCommand>,
+    pub(crate) auto_banned_ips: Arc<Mutex<Vec<String>>>,
 }
 
 pub struct HostelApp {
@@ -208,6 +209,8 @@ pub struct HostelApp {
     pub(crate) webcam_sharing: bool,
     pub(crate) selected_camera: usize,
     pub(crate) camera_names: Vec<String>,
+
+    pub(crate) auto_banned_ips: Option<Arc<Mutex<Vec<String>>>>,
 
     pub(crate) video_fullscreen: bool,
     pub(crate) last_mouse_move: Instant,
@@ -287,6 +290,7 @@ impl HostelApp {
             webcam_sharing: false,
             selected_camera: 0,
             camera_names: Vec::new(),
+            auto_banned_ips: None,
             video_fullscreen: false,
             last_mouse_move: Instant::now(),
             last_frame_time: None,
@@ -378,6 +382,7 @@ impl HostelApp {
                             screen_viewer: engine.screen_viewer.clone(),
                             screen_active: engine.screen_active.clone(),
                             screen_cmd_tx,
+                            auto_banned_ips: engine.auto_banned_ips.clone(),
                         };
                         *result.lock().unwrap() = Some(Ok(info));
 
@@ -452,6 +457,7 @@ impl HostelApp {
         self.screen_viewer = None;
         self.screen_active = None;
         self.screen_cmd_tx = None;
+        self.auto_banned_ips = None;
         self.video_fullscreen = false;
         self.last_frame_time = None;
         self.is_fullscreen = false;
@@ -483,6 +489,7 @@ impl eframe::App for HostelApp {
                         self.screen_viewer = Some(info.screen_viewer);
                         self.screen_active = Some(info.screen_active);
                         self.screen_cmd_tx = Some(info.screen_cmd_tx);
+                        self.auto_banned_ips = Some(info.auto_banned_ips);
                         self.chat_history = Some(ChatHistory::load(
                             &info.contact_id,
                             &self.identity.secret,

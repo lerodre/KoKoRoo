@@ -189,6 +189,7 @@ pub struct Settings {
     #[serde(default)] pub local_port: String,
     #[serde(default)] pub network_mode: usize,
     #[serde(default)] pub blocked: Vec<String>,
+    #[serde(default)] pub banned_ips: Vec<String>,
 }
 
 impl Settings {
@@ -233,6 +234,26 @@ impl Settings {
     pub fn unblock_contact(&mut self, pubkey_hex: &str) {
         self.blocked.retain(|b| b != pubkey_hex);
         self.save();
+    }
+
+    /// Ban an IP address and save.
+    pub fn ban_ip(&mut self, ip: &str) {
+        let ip = ip.to_string();
+        if !ip.is_empty() && !self.banned_ips.contains(&ip) {
+            self.banned_ips.push(ip);
+            self.save();
+        }
+    }
+
+    /// Unban an IP address and save.
+    pub fn unban_ip(&mut self, ip: &str) {
+        self.banned_ips.retain(|b| b != ip);
+        self.save();
+    }
+
+    /// Check if an IP is banned.
+    pub fn is_ip_banned(&self, ip: &str) -> bool {
+        self.banned_ips.iter().any(|b| b == ip)
     }
 }
 

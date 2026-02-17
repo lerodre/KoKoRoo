@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 /// Max strikes before an IP gets blacklisted.
@@ -26,6 +27,7 @@ struct IpState {
 pub struct Firewall {
     ips: HashMap<IpAddr, IpState>,
     blacklist: Vec<IpAddr>,
+    auto_ban_sink: Option<Arc<Mutex<Vec<String>>>>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -39,6 +41,23 @@ impl Firewall {
         Self {
             ips: HashMap::new(),
             blacklist: Vec::new(),
+            auto_ban_sink: None,
+        }
+    }
+
+    /// Create a firewall pre-populated with banned IPs and an auto-ban sink.
+    /// The sink receives IP strings whenever the firewall auto-blacklists someone.
+    pub fn new_with_bans(banned: &[String], sink: Arc<Mutex<Vec<String>>>) -> Self {
+        let mut blacklist = Vec::new();
+        for ip_str in banned {
+            if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                blacklist.push(ip);
+            }
+        }
+        Self {
+            ips: HashMap::new(),
+            blacklist,
+            auto_ban_sink: Some(sink),
         }
     }
 
@@ -71,6 +90,11 @@ impl Firewall {
             state.strikes += 1;
             if state.strikes >= MAX_STRIKES {
                 self.blacklist.push(ip);
+                if let Some(ref sink) = self.auto_ban_sink {
+                    if let Ok(mut v) = sink.lock() {
+                        v.push(ip.to_string());
+                    }
+                }
                 eprintln!("[firewall] BLACKLISTED {ip} (rate limit exceeded)");
                 return Action::Deny;
             }
@@ -97,6 +121,11 @@ impl Firewall {
 
         if state.strikes >= MAX_STRIKES {
             self.blacklist.push(ip);
+            if let Some(ref sink) = self.auto_ban_sink {
+                if let Ok(mut v) = sink.lock() {
+                    v.push(ip.to_string());
+                }
+            }
             eprintln!("[firewall] BLACKLISTED {ip} (auth failures: {})", state.strikes);
         } else {
             eprintln!(
