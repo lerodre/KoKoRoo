@@ -6,6 +6,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use vpx_sys::*;
+use vpx_sys::vpx_rc_mode::VPX_CBR;
+use vpx_sys::vpx_kf_mode::VPX_KF_AUTO;
+use vpx_sys::vp8e_enc_control_id::VP8E_SET_CPUUSED;
+use vpx_sys::vpx_img_fmt::VPX_IMG_FMT_I420;
+use vpx_sys::vpx_codec_cx_pkt_kind::VPX_CODEC_CX_FRAME_PKT;
 
 use crate::crypto::{Session, PKT_SCREEN};
 
@@ -270,10 +275,10 @@ impl ScreenEncoder {
                     break;
                 }
                 if (*pkt).kind == VPX_CODEC_CX_FRAME_PKT {
-                    let frame = (*pkt).data.frame_ref();
+                    let frame = &(*pkt).data.frame;
                     let data = std::slice::from_raw_parts(
-                        (*frame).buf as *const u8,
-                        (*frame).sz as usize,
+                        frame.buf as *const u8,
+                        frame.sz as usize,
                     );
                     encoded.extend_from_slice(data);
                 }
