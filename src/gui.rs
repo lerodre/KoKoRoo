@@ -249,66 +249,81 @@ impl HostelApp {
         let our_nickname = self.settings.nickname.clone();
 
         thread::spawn(move || {
-            let host = cpal::default_host();
-            let input_device = host.input_devices().ok().and_then(|mut d| d.nth(input_idx));
-            let output_device = host.output_devices().ok().and_then(|mut d| d.nth(output_idx));
+            // Wrap everything in catch_unwind so panics show in GUI instead of silently dying
+            let result2 = result.clone();
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let host = cpal::default_host();
+                let input_device = host.input_devices().ok().and_then(|mut d| d.nth(input_idx));
+                let output_device = host.output_devices().ok().and_then(|mut d| d.nth(output_idx));
 
-            let (input_device, output_device) = match (input_device, output_device) {
-                (Some(i), Some(o)) => (i, o),
-                _ => {
-                    *result.lock().unwrap() = Some(Err("Audio device not found".into()));
-                    return;
-                }
-            };
-
-            let identity = Identity {
-                secret: identity_secret,
-                pubkey: identity_pubkey,
-                fingerprint: identity_fingerprint,
-            };
-
-            // Channel for GUI to signal start/stop screen sharing
-            let (screen_cmd_tx, screen_cmd_rx) = mpsc::channel::<bool>();
-
-            match crate::voice::start_engine(
-                &input_device, &output_device,
-                &peer_addr, &local_port,
-                running.clone(), mic_active, &identity,
-                &our_nickname,
-            ) {
-                Ok(mut engine) => {
-                    let info = CallInfo {
-                        verification_code: engine.verification_code.clone(),
-                        peer_fingerprint: engine.peer_fingerprint.clone(),
-                        peer_nickname: engine.peer_nickname.clone(),
-                        contact_id: engine.contact_id.clone(),
-                        key_change_warning: engine.key_change_warning.clone(),
-                        chat_tx: engine.chat_tx.take().unwrap(),
-                        chat_rx: engine.chat_rx.take().unwrap(),
-                        local_hangup: engine.local_hangup.clone(),
-                        screen_viewer: engine.screen_viewer.clone(),
-                        screen_active: engine.screen_active.clone(),
-                        screen_cmd_tx,
-                    };
-                    *result.lock().unwrap() = Some(Ok(info));
-
-                    // Keep engine alive until call ends, also process screen commands
-                    while running.load(Ordering::Relaxed) {
-                        // Check for screen share start/stop commands from GUI
-                        while let Ok(start) = screen_cmd_rx.try_recv() {
-                            if start {
-                                engine.start_screen_share();
-                            } else {
-                                engine.stop_screen_share();
-                            }
-                        }
-                        thread::sleep(std::time::Duration::from_millis(100));
+                let (input_device, output_device) = match (input_device, output_device) {
+                    (Some(i), Some(o)) => (i, o),
+                    _ => {
+                        *result.lock().unwrap() = Some(Err("Audio device not found".into()));
+                        return;
                     }
-                    drop(engine);
+                };
+
+                let identity = Identity {
+                    secret: identity_secret,
+                    pubkey: identity_pubkey,
+                    fingerprint: identity_fingerprint,
+                };
+
+                // Channel for GUI to signal start/stop screen sharing
+                let (screen_cmd_tx, screen_cmd_rx) = mpsc::channel::<bool>();
+
+                match crate::voice::start_engine(
+                    &input_device, &output_device,
+                    &peer_addr, &local_port,
+                    running.clone(), mic_active, &identity,
+                    &our_nickname,
+                ) {
+                    Ok(mut engine) => {
+                        let info = CallInfo {
+                            verification_code: engine.verification_code.clone(),
+                            peer_fingerprint: engine.peer_fingerprint.clone(),
+                            peer_nickname: engine.peer_nickname.clone(),
+                            contact_id: engine.contact_id.clone(),
+                            key_change_warning: engine.key_change_warning.clone(),
+                            chat_tx: engine.chat_tx.take().unwrap(),
+                            chat_rx: engine.chat_rx.take().unwrap(),
+                            local_hangup: engine.local_hangup.clone(),
+                            screen_viewer: engine.screen_viewer.clone(),
+                            screen_active: engine.screen_active.clone(),
+                            screen_cmd_tx,
+                        };
+                        *result.lock().unwrap() = Some(Ok(info));
+
+                        // Keep engine alive until call ends, also process screen commands
+                        while running.load(Ordering::Relaxed) {
+                            while let Ok(start) = screen_cmd_rx.try_recv() {
+                                if start {
+                                    engine.start_screen_share();
+                                } else {
+                                    engine.stop_screen_share();
+                                }
+                            }
+                            thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                        drop(engine);
+                    }
+                    Err(e) => {
+                        *result.lock().unwrap() = Some(Err(e));
+                    }
                 }
-                Err(e) => {
-                    *result.lock().unwrap() = Some(Err(e));
-                }
+            }));
+
+            // If the thread panicked, show the panic message in the GUI
+            if let Err(panic) = outcome {
+                let msg = if let Some(s) = panic.downcast_ref::<&str>() {
+                    format!("Internal error (panic): {s}")
+                } else if let Some(s) = panic.downcast_ref::<String>() {
+                    format!("Internal error (panic): {s}")
+                } else {
+                    "Internal error (panic): unknown".to_string()
+                };
+                *result2.lock().unwrap() = Some(Err(msg));
             }
         });
     }
