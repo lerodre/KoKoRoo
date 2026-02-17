@@ -203,10 +203,21 @@ pub fn start_engine(
     mic_active: Arc<AtomicBool>,
     our_identity: &Identity,
 ) -> Result<VoiceEngine, String> {
-    let config = cpal::StreamConfig {
-        channels: 1,
+    // Query each device's native channel count (Voicemeeter on Windows only supports stereo)
+    let input_channels = input_device.default_input_config()
+        .map(|c| c.channels()).unwrap_or(1);
+    let output_channels = output_device.default_output_config()
+        .map(|c| c.channels()).unwrap_or(1);
+
+    let input_config = cpal::StreamConfig {
+        channels: input_channels,
         sample_rate: cpal::SampleRate(48000),
-        buffer_size: cpal::BufferSize::Default,
+        buffer_size: cpal::BufferSize::Fixed(FRAME_SIZE as u32),
+    };
+    let output_config = cpal::StreamConfig {
+        channels: output_channels,
+        sample_rate: cpal::SampleRate(48000),
+        buffer_size: cpal::BufferSize::Fixed(FRAME_SIZE as u32),
     };
 
     // ── UDP Socket ──
@@ -394,24 +405,46 @@ pub fn start_engine(
     });
 
     // ── Audio Streams ──
+    // If the device is stereo, convert to/from mono at the stream boundary.
+    // Opus always works with mono internally.
+    let in_ch = input_channels;
     let running_in = running.clone();
     let input_stream = input_device.build_input_stream(
-        &config,
+        &input_config,
         move |data: &[f32], _: &cpal::InputCallbackInfo| {
-            for &sample in data {
-                let _ = mic_producer.try_push(sample);
+            if in_ch == 1 {
+                for &sample in data {
+                    let _ = mic_producer.try_push(sample);
+                }
+            } else {
+                // Stereo → mono: average each pair of samples
+                for frame in data.chunks(in_ch as usize) {
+                    let mono: f32 = frame.iter().sum::<f32>() / in_ch as f32;
+                    let _ = mic_producer.try_push(mono);
+                }
             }
         },
         move |err| { eprintln!("Mic error: {err}"); running_in.store(false, Ordering::Relaxed); },
         None,
     ).map_err(|e| format!("Failed to build mic stream: {e}"))?;
 
+    let out_ch = output_channels;
     let running_out = running.clone();
     let output_stream = output_device.build_output_stream(
-        &config,
+        &output_config,
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            for sample in data.iter_mut() {
-                *sample = spk_consumer.try_pop().unwrap_or(0.0);
+            if out_ch == 1 {
+                for sample in data.iter_mut() {
+                    *sample = spk_consumer.try_pop().unwrap_or(0.0);
+                }
+            } else {
+                // Mono → stereo: duplicate each sample to all channels
+                for frame in data.chunks_mut(out_ch as usize) {
+                    let mono = spk_consumer.try_pop().unwrap_or(0.0);
+                    for ch in frame.iter_mut() {
+                        *ch = mono;
+                    }
+                }
             }
         },
         move |err| { eprintln!("Spk error: {err}"); running_out.store(false, Ordering::Relaxed); },
