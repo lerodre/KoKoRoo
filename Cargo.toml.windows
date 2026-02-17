@@ -17,12 +17,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 nnnoiseless = "0.5"
 scrap = "0.5"
-env-libvpx-sys = "5.1"
+env-libvpx-sys = { version = "5.1", features = ["generate"] }
 
-# Windows deps: Visual Studio Build Tools + CMake + vcpkg install libvpx:x64-windows
+# Windows deps: Visual Studio Build Tools + CMake + LLVM + vcpkg install libvpx:x64-windows
 # Build env vars (set before cargo build):
+#   LIBCLANG_PATH=C:/Program Files/LLVM/bin
 #   VPX_LIB_DIR=C:/vcpkg/installed/x64-windows/lib
 #   VPX_INCLUDE_DIR=C:/vcpkg/installed/x64-windows/include
-#   VPX_VERSION=1.13.0
+#   VPX_VERSION=1.15.0
 #   VPX_STATIC=1
 #   CMAKE_POLICY_VERSION_MINIMUM=3.5

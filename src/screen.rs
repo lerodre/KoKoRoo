@@ -29,11 +29,7 @@ const FLAG_KEYFRAME: u8 = 0x01;
 // VPX encoder deadline for realtime encoding
 const VPX_DL_REALTIME: std::os::raw::c_ulong = 1;
 
-// VPX ABI version (needed for init) — must match installed libvpx
-// libvpx 1.15.x: IMAGE=5, CODEC=9, DECODER=12, TPL=4, RATECTRL=10, ENCODER=37
-// libvpx 1.13.x: IMAGE=4, CODEC=8, DECODER=11, ENCODER=27
-const VPX_ENCODER_ABI_VERSION: std::os::raw::c_int = 37;
-const VPX_DECODER_ABI_VERSION: std::os::raw::c_int = 12;
+// Use ABI versions from the bindings (matches the installed libvpx)
 
 // Flag to force keyframe
 const VPX_EFLAG_FORCE_KF: vpx_enc_frame_flags_t = 1;
@@ -188,13 +184,14 @@ impl ScreenEncoder {
             cfg.kf_max_dist = KEYFRAME_INTERVAL;
 
             let mut ctx: vpx_codec_ctx_t = std::mem::zeroed();
-            log_fmt!("[screen] vpx_codec_enc_init_ver(ABI={})", VPX_ENCODER_ABI_VERSION);
+            let enc_abi = vpx_sys::VPX_ENCODER_ABI_VERSION as std::os::raw::c_int;
+            log_fmt!("[screen] vpx_codec_enc_init_ver(ABI={})", enc_abi);
             let ret = vpx_codec_enc_init_ver(
                 &mut ctx,
                 iface,
                 &cfg,
                 0,
-                VPX_ENCODER_ABI_VERSION,
+                enc_abi,
             );
             log_fmt!("[screen] encoder init -> {:?}", ret);
             assert_eq!(ret, VPX_CODEC_OK, "Failed to init VP8 encoder");
@@ -330,7 +327,8 @@ pub struct ScreenDecoder {
 
 impl ScreenDecoder {
     pub fn new() -> Self {
-        log_fmt!("[screen] ScreenDecoder::new(ABI={})", VPX_DECODER_ABI_VERSION);
+        let dec_abi = vpx_sys::VPX_DECODER_ABI_VERSION as std::os::raw::c_int;
+        log_fmt!("[screen] ScreenDecoder::new(ABI={})", dec_abi);
         unsafe {
             let mut ctx: vpx_codec_ctx_t = std::mem::zeroed();
             let iface = vpx_codec_vp8_dx();
@@ -339,7 +337,7 @@ impl ScreenDecoder {
                 iface,
                 ptr::null(),
                 0,
-                VPX_DECODER_ABI_VERSION,
+                dec_abi,
             );
             log_fmt!("[screen] decoder init -> {:?}", ret);
             assert_eq!(ret, VPX_CODEC_OK, "Failed to init VP8 decoder");
