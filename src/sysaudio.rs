@@ -119,11 +119,10 @@ fn capture_linux_monitor(
 ) -> Option<cpal::Stream> {
     let host = cpal::default_host();
 
-    // Try to find an input device with "Monitor" in its name
-    if let Ok(devices) = host.input_devices() {
+    // Find a monitor device (don't consume producer yet)
+    let monitor_device = host.input_devices().ok().and_then(|devices| {
         for dev in devices {
             let name = dev.name().unwrap_or_default();
-            // If a specific device was requested, only match that one
             if let Some(req) = device_name {
                 if !req.is_empty() && name != req {
                     continue;
@@ -131,18 +130,24 @@ fn capture_linux_monitor(
             }
             if name.to_lowercase().contains("monitor") {
                 log_fmt!("[sysaudio] found monitor device: {}", name);
-                if let Ok(config) = dev.default_input_config() {
-                    let channels = config.channels() as usize;
-                    let stream_config = cpal::StreamConfig {
-                        channels: channels as u16,
-                        sample_rate: cpal::SampleRate(config.sample_rate().0),
-                        buffer_size: cpal::BufferSize::Default,
-                    };
-                    if let Some(stream) = build_capture_stream(&dev, &stream_config, channels, producer, active) {
-                        return Some(stream);
-                    }
-                }
+                return Some(dev);
             }
+        }
+        None
+    });
+
+    if let Some(dev) = monitor_device {
+        if let Ok(config) = dev.default_input_config() {
+            let channels = config.channels() as usize;
+            let stream_config = cpal::StreamConfig {
+                channels: channels as u16,
+                sample_rate: cpal::SampleRate(config.sample_rate().0),
+                buffer_size: cpal::BufferSize::Default,
+            };
+            if let Some(stream) = build_capture_stream(&dev, &stream_config, channels, producer, active) {
+                return Some(stream);
+            }
+            return None; // producer consumed
         }
     }
 
