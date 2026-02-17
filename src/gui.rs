@@ -486,14 +486,6 @@ impl eframe::App for HostelApp {
                 }
             }
 
-            // Frozen frame detection: if no new frame for >2s, clear texture
-            if let Some(t) = self.last_frame_time {
-                if t.elapsed().as_secs_f32() > 2.0 {
-                    self.screen_texture = None;
-                    self.last_frame_time = None;
-                }
-            }
-
             // Track mouse movement for fullscreen overlay auto-hide
             let mouse_delta = ctx.input(|i| i.pointer.delta());
             if mouse_delta != egui::Vec2::ZERO {
@@ -890,12 +882,19 @@ impl HostelApp {
                 return;
             }
 
-            // Right-aligned fullscreen button (only when receiving video)
+            // Right-aligned buttons (only when receiving video)
             if has_video {
                 // Push to the right
-                let remaining = ui.available_width() - 120.0;
+                let remaining = ui.available_width() - 250.0;
                 if remaining > 0.0 {
                     ui.add_space(remaining);
+                }
+                let end_btn = egui::Button::new(
+                    egui::RichText::new("End Viewing").size(14.0).color(egui::Color32::WHITE)
+                ).min_size(egui::vec2(110.0, 35.0)).fill(egui::Color32::from_rgb(140, 80, 40));
+                if ui.add(end_btn).clicked() {
+                    self.screen_texture = None;
+                    self.last_frame_time = None;
                 }
                 let fs_btn = egui::Button::new(
                     egui::RichText::new("Fullscreen").size(14.0).color(egui::Color32::WHITE)
