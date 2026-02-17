@@ -14,11 +14,66 @@ use vpx_sys::vpx_codec_cx_pkt_kind::VPX_CODEC_CX_FRAME_PKT;
 
 use crate::crypto::{Session, PKT_SCREEN};
 
+// ── Quality Presets ──
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenQuality {
+    Hd720p30,
+    Hd1080p30,
+    Hd1080p30Premium,
+}
+
+impl ScreenQuality {
+    pub const ALL: [ScreenQuality; 3] = [
+        ScreenQuality::Hd720p30,
+        ScreenQuality::Hd1080p30,
+        ScreenQuality::Hd1080p30Premium,
+    ];
+
+    pub fn width(self) -> u32 {
+        match self {
+            ScreenQuality::Hd720p30 => 1280,
+            ScreenQuality::Hd1080p30 | ScreenQuality::Hd1080p30Premium => 1920,
+        }
+    }
+
+    pub fn height(self) -> u32 {
+        match self {
+            ScreenQuality::Hd720p30 => 720,
+            ScreenQuality::Hd1080p30 | ScreenQuality::Hd1080p30Premium => 1080,
+        }
+    }
+
+    pub fn fps(self) -> u32 {
+        30
+    }
+
+    pub fn bitrate_kbps(self) -> u32 {
+        match self {
+            ScreenQuality::Hd720p30 => 2000,
+            ScreenQuality::Hd1080p30 => 4000,
+            ScreenQuality::Hd1080p30Premium => 6000,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ScreenQuality::Hd720p30 => "720p 2Mbps",
+            ScreenQuality::Hd1080p30 => "1080p 4Mbps",
+            ScreenQuality::Hd1080p30Premium => "1080p 6Mbps",
+        }
+    }
+}
+
+/// Command from GUI to engine thread to start/stop screen sharing.
+#[derive(Debug, Clone)]
+pub enum ScreenCommand {
+    Start(ScreenQuality),
+    Stop,
+}
+
 // ── Constants ──
 
-const SCREEN_WIDTH: u32 = 1280;
-const SCREEN_HEIGHT: u32 = 720;
-const SCREEN_FPS: u32 = 30;
 const CHUNK_MAX_PAYLOAD: usize = 1300; // fits in UDP MTU with encryption overhead
 const KEYFRAME_INTERVAL: u32 = 90; // keyframe every 3 seconds
 
@@ -362,8 +417,9 @@ impl ScreenDecoder {
         }
     }
 
-    /// Decode VP8 data -> RGBA pixels.
-    pub fn decode(&mut self, encoded: &[u8]) -> Option<Vec<u8>> {
+    /// Decode VP8 data -> (RGBA pixels, width, height).
+    /// Width/height are read from the VP8 bitstream so the receiver auto-detects resolution.
+    pub fn decode(&mut self, encoded: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
         unsafe {
             let ret = vpx_codec_decode(
                 &mut self.ctx,
@@ -382,7 +438,9 @@ impl ScreenDecoder {
                 return None;
             }
 
-            Some(vpx_image_to_rgba(&*img))
+            let w = (*img).d_w;
+            let h = (*img).d_h;
+            Some((vpx_image_to_rgba(&*img), w, h))
         }
     }
 }
@@ -485,8 +543,8 @@ impl ScreenViewer {
             assembler: FrameAssembler::new(),
             decoder: ScreenDecoder::new(),
             latest_frame: None,
-            frame_width: SCREEN_WIDTH,
-            frame_height: SCREEN_HEIGHT,
+            frame_width: 1280,
+            frame_height: 720,
         }
     }
 
@@ -508,7 +566,9 @@ impl ScreenViewer {
             flags,
             data,
         ) {
-            if let Some(rgba) = self.decoder.decode(&encoded) {
+            if let Some((rgba, w, h)) = self.decoder.decode(&encoded) {
+                self.frame_width = w;
+                self.frame_height = h;
                 self.latest_frame = Some(rgba);
             }
         }
@@ -528,8 +588,14 @@ pub fn capture_loop(
     peer_addr: SocketAddr,
     active: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
+    quality: ScreenQuality,
 ) {
-    log_fmt!("[screen] capture_loop started, peer={}", peer_addr);
+    let enc_w = quality.width();
+    let enc_h = quality.height();
+    let enc_fps = quality.fps();
+    let enc_bps = quality.bitrate_kbps();
+    log_fmt!("[screen] capture_loop started, peer={}, quality={:?} ({}x{} {}fps {}kbps)",
+        peer_addr, quality, enc_w, enc_h, enc_fps, enc_bps);
 
     // Get primary display
     let displays = scrap::Display::all().unwrap_or_default();
@@ -559,9 +625,9 @@ pub fn capture_loop(
         }
     };
 
-    let mut encoder = ScreenEncoder::new(SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_FPS, 2000);
+    let mut encoder = ScreenEncoder::new(enc_w, enc_h, enc_fps, enc_bps);
     log_fmt!("[screen] encoder created, starting capture loop");
-    let frame_duration = Duration::from_secs_f64(1.0 / SCREEN_FPS as f64);
+    let frame_duration = Duration::from_secs_f64(1.0 / enc_fps as f64);
     let mut frame_id: u16 = 0;
     let mut frame_count: u32 = 0;
 
@@ -604,13 +670,13 @@ pub fn capture_loop(
             }
         };
 
-        // Scale to 720p if needed
+        // Scale to target resolution if needed
         let scaled = scale_bgra(
             &bgra_frame,
             native_w,
             native_h,
-            SCREEN_WIDTH as usize,
-            SCREEN_HEIGHT as usize,
+            enc_w as usize,
+            enc_h as usize,
         );
 
         // Encode

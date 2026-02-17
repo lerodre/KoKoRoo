@@ -16,7 +16,7 @@ use crate::chat;
 use crate::crypto::{self, Session, PKT_CHAT, PKT_HANGUP, PKT_HELLO, PKT_IDENTITY, PKT_SCREEN, PKT_VOICE};
 use crate::firewall::{Action, Firewall};
 use crate::identity::{self, Identity};
-use crate::screen::ScreenViewer;
+use crate::screen::{ScreenQuality, ScreenViewer};
 
 /// Opus frame size: 960 samples @ 48kHz = 20ms.
 const FRAME_SIZE: usize = 960;
@@ -140,13 +140,13 @@ impl Drop for VoiceEngine {
 }
 
 impl VoiceEngine {
-    /// Start sharing our screen to the peer.
-    pub fn start_screen_share(&mut self) {
+    /// Start sharing our screen to the peer at the given quality.
+    pub fn start_screen_share(&mut self, quality: ScreenQuality) {
         if self.screen_active.load(Ordering::Relaxed) {
             log_fmt!("[voice] start_screen_share: already active, ignoring");
             return;
         }
-        log_fmt!("[voice] start_screen_share: launching capture thread, peer={}", self.peer_addr);
+        log_fmt!("[voice] start_screen_share: launching capture thread, peer={}, quality={:?}", self.peer_addr, quality);
         self.screen_active.store(true, Ordering::Relaxed);
 
         let socket = self.send_socket.try_clone().unwrap();
@@ -159,7 +159,7 @@ impl VoiceEngine {
         let running = self.running.clone();
 
         self.screen_thread = Some(thread::spawn(move || {
-            crate::screen::capture_loop(socket, session, peer_addr, active, running);
+            crate::screen::capture_loop(socket, session, peer_addr, active, running, quality);
             log_fmt!("[voice] screen capture thread exited");
         }));
     }

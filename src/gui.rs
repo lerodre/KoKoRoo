@@ -6,7 +6,7 @@ use std::thread;
 
 use crate::chat::ChatHistory;
 use crate::identity::{self, Contact, Identity, Settings};
-use crate::screen::ScreenViewer;
+use crate::screen::{ScreenCommand, ScreenQuality, ScreenViewer};
 
 // ── App State Machine ──
 
@@ -110,7 +110,7 @@ struct CallInfo {
     screen_viewer: Arc<Mutex<ScreenViewer>>,
     screen_active: Arc<AtomicBool>,
     /// Channel to tell the engine thread to start/stop screen sharing
-    screen_cmd_tx: mpsc::Sender<bool>,
+    screen_cmd_tx: mpsc::Sender<ScreenCommand>,
 }
 
 pub struct HostelApp {
@@ -154,7 +154,9 @@ pub struct HostelApp {
     screen_texture: Option<egui::TextureHandle>,
     screen_viewer: Option<Arc<Mutex<ScreenViewer>>>,
     screen_active: Option<Arc<AtomicBool>>,
-    screen_cmd_tx: Option<mpsc::Sender<bool>>,
+    screen_cmd_tx: Option<mpsc::Sender<ScreenCommand>>,
+    selected_screen_quality: usize,
+    is_fullscreen: bool,
 
     // Async connection result
     connect_result: Arc<std::sync::Mutex<Option<Result<CallInfo, String>>>>,
@@ -217,6 +219,8 @@ impl HostelApp {
             screen_viewer: None,
             screen_active: None,
             screen_cmd_tx: None,
+            selected_screen_quality: 0,
+            is_fullscreen: false,
             connect_result: Arc::new(std::sync::Mutex::new(None)),
         }
     }
@@ -271,7 +275,7 @@ impl HostelApp {
                 };
 
                 // Channel for GUI to signal start/stop screen sharing
-                let (screen_cmd_tx, screen_cmd_rx) = mpsc::channel::<bool>();
+                let (screen_cmd_tx, screen_cmd_rx) = mpsc::channel::<ScreenCommand>();
 
                 match crate::voice::start_engine(
                     &input_device, &output_device,
@@ -297,11 +301,10 @@ impl HostelApp {
 
                         // Keep engine alive until call ends, also process screen commands
                         while running.load(Ordering::Relaxed) {
-                            while let Ok(start) = screen_cmd_rx.try_recv() {
-                                if start {
-                                    engine.start_screen_share();
-                                } else {
-                                    engine.stop_screen_share();
+                            while let Ok(cmd) = screen_cmd_rx.try_recv() {
+                                match cmd {
+                                    ScreenCommand::Start(quality) => engine.start_screen_share(quality),
+                                    ScreenCommand::Stop => engine.stop_screen_share(),
                                 }
                             }
                             thread::sleep(std::time::Duration::from_millis(100));
@@ -362,6 +365,7 @@ impl HostelApp {
         self.screen_viewer = None;
         self.screen_active = None;
         self.screen_cmd_tx = None;
+        self.is_fullscreen = false;
         *self.connect_result.lock().unwrap() = None;
         // Reload contacts (the call may have created/updated one)
         self.contacts = identity::load_all_contacts();
@@ -421,7 +425,13 @@ impl eframe::App for HostelApp {
             // Detect remote hangup: running was set to false by receiver thread
             if !self.running.load(Ordering::Relaxed) {
                 self.on_remote_hangup();
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
                 return;
+            }
+            // ESC exits fullscreen
+            if self.is_fullscreen && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.is_fullscreen = false;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
             }
             // Repaint faster when screen sharing is active (for smooth video)
             let repaint_ms = if self.screen_texture.is_some() { 33 } else { 200 };
@@ -433,6 +443,18 @@ impl eframe::App for HostelApp {
         style.spacing.item_spacing = egui::vec2(8.0, 6.0);
         style.spacing.button_padding = egui::vec2(14.0, 6.0);
         ctx.set_style(style);
+
+        // Side panel for chat when video is active during a call
+        let video_active = matches!(self.screen, Screen::InCall) && self.screen_texture.is_some();
+        if video_active {
+            egui::SidePanel::right("chat_panel")
+                .default_width(280.0)
+                .resizable(true)
+                .min_width(200.0)
+                .show(ctx, |ui| {
+                    self.draw_chat(ui);
+                });
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             match &self.screen {
@@ -631,6 +653,7 @@ impl HostelApp {
     fn draw_call(&mut self, ui: &mut egui::Ui) {
         let mic_on = self.mic_active.load(Ordering::Relaxed);
         let peer_display = format_peer_display(&self.peer_nickname, &self.peer_fingerprint);
+        let has_video = self.screen_texture.is_some();
 
         // ── Top bar: status ──
         ui.horizontal(|ui| {
@@ -668,8 +691,21 @@ impl HostelApp {
 
         ui.add_space(4.0);
 
-        // ── Controls row: mic + screen share + hang up ──
+        // ── Controls row: quality + mic + screen share + fullscreen + hang up ──
         ui.horizontal(|ui| {
+            // Quality selector (disabled while sharing)
+            ui.add_enabled_ui(!self.screen_sharing, |ui| {
+                let current_label = ScreenQuality::ALL[self.selected_screen_quality].label();
+                egui::ComboBox::from_id_salt("screen_quality")
+                    .width(120.0)
+                    .selected_text(current_label)
+                    .show_ui(ui, |ui| {
+                        for (i, q) in ScreenQuality::ALL.iter().enumerate() {
+                            ui.selectable_value(&mut self.selected_screen_quality, i, q.label());
+                        }
+                    });
+            });
+
             let (btn_text, btn_color) = if mic_on {
                 ("Mic: ON", egui::Color32::from_rgb(40, 140, 60))
             } else {
@@ -694,7 +730,24 @@ impl HostelApp {
             if ui.add(scr_btn).clicked() {
                 self.screen_sharing = !self.screen_sharing;
                 if let Some(tx) = &self.screen_cmd_tx {
-                    let _ = tx.send(self.screen_sharing);
+                    if self.screen_sharing {
+                        let quality = ScreenQuality::ALL[self.selected_screen_quality];
+                        let _ = tx.send(ScreenCommand::Start(quality));
+                    } else {
+                        let _ = tx.send(ScreenCommand::Stop);
+                    }
+                }
+            }
+
+            // Fullscreen toggle (only shown when receiving video)
+            if has_video {
+                let fs_text = if self.is_fullscreen { "Exit Fullscreen" } else { "Fullscreen" };
+                let fs_btn = egui::Button::new(
+                    egui::RichText::new(fs_text).size(14.0).color(egui::Color32::WHITE)
+                ).min_size(egui::vec2(110.0, 35.0)).fill(egui::Color32::from_rgb(80, 80, 120));
+                if ui.add(fs_btn).clicked() {
+                    self.is_fullscreen = !self.is_fullscreen;
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.is_fullscreen));
                 }
             }
 
@@ -702,17 +755,26 @@ impl HostelApp {
                 egui::RichText::new("Hang Up").size(16.0).color(egui::Color32::WHITE)
             ).min_size(egui::vec2(100.0, 35.0)).fill(egui::Color32::from_rgb(180, 40, 40));
             if ui.add(hangup_btn).clicked() {
+                if self.is_fullscreen {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                    self.is_fullscreen = false;
+                }
                 self.hang_up();
                 return;
             }
         });
 
         // ── Screen viewer (incoming screen from peer) ──
+        // Read decoded frame dimensions from the viewer
+        let mut video_w: u32 = 1280;
+        let mut video_h: u32 = 720;
         if let Some(viewer) = &self.screen_viewer {
             if let Ok(mut v) = viewer.lock() {
+                video_w = v.frame_width;
+                video_h = v.frame_height;
                 if let Some(rgba_frame) = v.take_frame() {
                     let image = egui::ColorImage::from_rgba_unmultiplied(
-                        [v.frame_width as usize, v.frame_height as usize],
+                        [video_w as usize, video_h as usize],
                         &rgba_frame,
                     );
                     self.screen_texture = Some(
@@ -720,21 +782,49 @@ impl HostelApp {
                     );
                 }
             }
-            if let Some(tex) = &self.screen_texture {
-                ui.separator();
-                let available_width = ui.available_width();
-                let aspect = 720.0 / 1280.0;
-                let display_height = available_width * aspect;
+        }
+        if let Some(tex) = &self.screen_texture {
+            ui.separator();
+            // Aspect-fit: fit video to both available width AND height
+            let available_width = ui.available_width();
+            let available_height = if has_video {
+                // When video is active, chat is in side panel — use all remaining height
+                ui.available_height()
+            } else {
+                ui.available_height() * 0.6
+            };
+            let aspect = video_w as f32 / video_h as f32;
+            let (display_w, display_h) = {
+                let w_from_width = available_width;
+                let h_from_width = available_width / aspect;
+                let h_from_height = available_height;
+                let w_from_height = available_height * aspect;
+                if h_from_width <= available_height {
+                    (w_from_width, h_from_width)
+                } else {
+                    (w_from_height, h_from_height)
+                }
+            };
+            // Center video horizontally
+            let pad_x = (available_width - display_w).max(0.0) / 2.0;
+            ui.horizontal(|ui| {
+                ui.add_space(pad_x);
                 ui.image(egui::load::SizedTexture::new(
                     tex.id(),
-                    egui::vec2(available_width, display_height),
+                    egui::vec2(display_w, display_h),
                 ));
-            }
+            });
         }
 
-        ui.separator();
+        // ── Chat area (only when no video — otherwise chat is in the side panel) ──
+        if !has_video {
+            ui.separator();
+            self.draw_chat(ui);
+        }
+    }
 
-        // ── Chat area ──
+    /// Render chat messages + input. Used both in the main panel and the side panel.
+    fn draw_chat(&mut self, ui: &mut egui::Ui) {
         ui.label(egui::RichText::new("Chat").strong());
 
         // Message history (scrollable)
@@ -747,6 +837,7 @@ impl HostelApp {
         egui::ScrollArea::vertical()
             .max_height(available_height)
             .stick_to_bottom(true)
+            .id_salt("chat_scroll")
             .show(ui, |ui| {
                 if let Some(history) = &self.chat_history {
                     if history.messages.is_empty() {
