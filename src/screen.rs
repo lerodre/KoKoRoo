@@ -173,7 +173,7 @@ impl ScreenEncoder {
             let iface = vpx_codec_vp8_cx();
             log_fmt!("[screen] vpx_codec_vp8_cx() returned (null={})", iface.is_null());
 
-            let mut cfg: vpx_codec_enc_cfg_t = std::mem::zeroed();
+            let mut cfg: vpx_codec_enc_cfg_t = std::mem::MaybeUninit::zeroed().assume_init();
             log_fmt!("[screen] calling vpx_codec_enc_config_default...");
             let ret = vpx_codec_enc_config_default(iface, &mut cfg, 0);
             log_fmt!("[screen] vpx_codec_enc_config_default -> {:?}", ret);
@@ -195,7 +195,7 @@ impl ScreenEncoder {
             cfg.kf_max_dist = KEYFRAME_INTERVAL;
             log_fmt!("[screen] encoder config set, calling vpx_codec_enc_init_ver...");
 
-            let mut ctx: vpx_codec_ctx_t = std::mem::zeroed();
+            let mut ctx: vpx_codec_ctx_t = std::mem::MaybeUninit::zeroed().assume_init();
             let enc_abi = vpx_sys::VPX_ENCODER_ABI_VERSION as std::os::raw::c_int;
             log_fmt!("[screen] enc_init ABI={}", enc_abi);
             let ret = vpx_codec_enc_init_ver(
@@ -215,7 +215,7 @@ impl ScreenEncoder {
             vpx_codec_control_(&mut ctx, VP8E_SET_CPUUSED as i32, 8i32);
 
             log_fmt!("[screen] allocating image...");
-            let mut img: vpx_image_t = std::mem::zeroed();
+            let mut img: vpx_image_t = std::mem::MaybeUninit::zeroed().assume_init();
             vpx_img_alloc(&mut img, VPX_IMG_FMT_I420, width, height, 1);
             log_fmt!("[screen] ScreenEncoder ready!");
 
@@ -347,7 +347,7 @@ impl ScreenDecoder {
         let dec_abi = vpx_sys::VPX_DECODER_ABI_VERSION as std::os::raw::c_int;
         log_fmt!("[screen] ScreenDecoder::new(ABI={})", dec_abi);
         unsafe {
-            let mut ctx: vpx_codec_ctx_t = std::mem::zeroed();
+            let mut ctx: vpx_codec_ctx_t = std::mem::MaybeUninit::zeroed().assume_init();
             let iface = vpx_codec_vp8_dx();
             let ret = vpx_codec_dec_init_ver(
                 &mut ctx,
