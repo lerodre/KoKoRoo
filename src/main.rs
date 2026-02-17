@@ -1,6 +1,8 @@
 use std::env;
 use std::net::UdpSocket;
 
+#[macro_use]
+mod logger;
 mod audio;
 mod chat;
 mod crypto;

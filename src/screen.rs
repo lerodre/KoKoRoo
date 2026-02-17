@@ -29,9 +29,11 @@ const FLAG_KEYFRAME: u8 = 0x01;
 // VPX encoder deadline for realtime encoding
 const VPX_DL_REALTIME: std::os::raw::c_ulong = 1;
 
-// VPX ABI version (needed for init)
-const VPX_ENCODER_ABI_VERSION: std::os::raw::c_int = 12;
-const VPX_DECODER_ABI_VERSION: std::os::raw::c_int = 4;
+// VPX ABI version (needed for init) — must match installed libvpx
+// libvpx 1.15.x: IMAGE=5, CODEC=9, DECODER=12, TPL=4, RATECTRL=10, ENCODER=37
+// libvpx 1.13.x: IMAGE=4, CODEC=8, DECODER=11, ENCODER=27
+const VPX_ENCODER_ABI_VERSION: std::os::raw::c_int = 37;
+const VPX_DECODER_ABI_VERSION: std::os::raw::c_int = 12;
 
 // Flag to force keyframe
 const VPX_EFLAG_FORCE_KF: vpx_enc_frame_flags_t = 1;
@@ -163,11 +165,14 @@ pub struct ScreenEncoder {
 
 impl ScreenEncoder {
     pub fn new(width: u32, height: u32, fps: u32, bitrate_kbps: u32) -> Self {
+        log_fmt!("[screen] ScreenEncoder::new({}x{}, {}fps, {}kbps)", width, height, fps, bitrate_kbps);
         unsafe {
             let mut cfg: vpx_codec_enc_cfg_t = std::mem::zeroed();
             let iface = vpx_codec_vp8_cx();
+            log_fmt!("[screen] vpx_codec_vp8_cx() OK");
 
             let ret = vpx_codec_enc_config_default(iface, &mut cfg, 0);
+            log_fmt!("[screen] vpx_codec_enc_config_default -> {:?}", ret);
             assert_eq!(ret, VPX_CODEC_OK, "Failed to get default VP8 config");
 
             cfg.g_w = width;
@@ -183,6 +188,7 @@ impl ScreenEncoder {
             cfg.kf_max_dist = KEYFRAME_INTERVAL;
 
             let mut ctx: vpx_codec_ctx_t = std::mem::zeroed();
+            log_fmt!("[screen] vpx_codec_enc_init_ver(ABI={})", VPX_ENCODER_ABI_VERSION);
             let ret = vpx_codec_enc_init_ver(
                 &mut ctx,
                 iface,
@@ -190,6 +196,7 @@ impl ScreenEncoder {
                 0,
                 VPX_ENCODER_ABI_VERSION,
             );
+            log_fmt!("[screen] encoder init -> {:?}", ret);
             assert_eq!(ret, VPX_CODEC_OK, "Failed to init VP8 encoder");
 
             // Set realtime speed
@@ -323,6 +330,7 @@ pub struct ScreenDecoder {
 
 impl ScreenDecoder {
     pub fn new() -> Self {
+        log_fmt!("[screen] ScreenDecoder::new(ABI={})", VPX_DECODER_ABI_VERSION);
         unsafe {
             let mut ctx: vpx_codec_ctx_t = std::mem::zeroed();
             let iface = vpx_codec_vp8_dx();
@@ -333,6 +341,7 @@ impl ScreenDecoder {
                 0,
                 VPX_DECODER_ABI_VERSION,
             );
+            log_fmt!("[screen] decoder init -> {:?}", ret);
             assert_eq!(ret, VPX_CODEC_OK, "Failed to init VP8 decoder");
             ScreenDecoder { ctx }
         }
@@ -505,12 +514,15 @@ pub fn capture_loop(
     active: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
 ) {
+    log_fmt!("[screen] capture_loop started, peer={}", peer_addr);
+
     // Get primary display
     let displays = scrap::Display::all().unwrap_or_default();
+    log_fmt!("[screen] found {} displays", displays.len());
     let display = match displays.into_iter().next() {
         Some(d) => d,
         None => {
-            eprintln!("Screen share: no display found");
+            log_fmt!("[screen] ERROR: no display found");
             active.store(false, Ordering::Relaxed);
             return;
         }
@@ -518,17 +530,22 @@ pub fn capture_loop(
 
     let native_w = display.width();
     let native_h = display.height();
+    log_fmt!("[screen] display: {}x{}", native_w, native_h);
 
     let mut capturer = match scrap::Capturer::new(display) {
-        Ok(c) => c,
+        Ok(c) => {
+            log_fmt!("[screen] capturer created OK");
+            c
+        }
         Err(e) => {
-            eprintln!("Screen share: failed to create capturer: {e}");
+            log_fmt!("[screen] ERROR: failed to create capturer: {e}");
             active.store(false, Ordering::Relaxed);
             return;
         }
     };
 
     let mut encoder = ScreenEncoder::new(SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_FPS, 2000);
+    log_fmt!("[screen] encoder created, starting capture loop");
     let frame_duration = Duration::from_secs_f64(1.0 / SCREEN_FPS as f64);
     let mut frame_id: u16 = 0;
     let mut frame_count: u32 = 0;
@@ -555,7 +572,8 @@ pub fn capture_loop(
                 std::thread::sleep(Duration::from_millis(1));
                 continue;
             }
-            Err(_) => {
+            Err(e) => {
+                log_fmt!("[screen] capture error: {e}");
                 std::thread::sleep(Duration::from_millis(10));
                 continue;
             }
@@ -583,9 +601,14 @@ pub fn capture_loop(
         let chunks = ScreenEncoder::fragment(&encoded, frame_id, force_keyframe);
 
         // Encrypt and send each chunk
-        for chunk in chunks {
-            let packet = session.encrypt_packet(PKT_SCREEN, &chunk);
+        for chunk in &chunks {
+            let packet = session.encrypt_packet(PKT_SCREEN, chunk);
             let _ = socket.send_to(&packet, peer_addr);
+        }
+
+        if frame_count % 30 == 0 {
+            log_fmt!("[screen] frame #{} sent ({} bytes, {} chunks, kf={})",
+                frame_count, encoded.len(), chunks.len(), force_keyframe);
         }
 
         frame_id = frame_id.wrapping_add(1);

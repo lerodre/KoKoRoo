@@ -143,8 +143,10 @@ impl VoiceEngine {
     /// Start sharing our screen to the peer.
     pub fn start_screen_share(&mut self) {
         if self.screen_active.load(Ordering::Relaxed) {
-            return; // already sharing
+            log_fmt!("[voice] start_screen_share: already active, ignoring");
+            return;
         }
+        log_fmt!("[voice] start_screen_share: launching capture thread, peer={}", self.peer_addr);
         self.screen_active.store(true, Ordering::Relaxed);
 
         let socket = self.send_socket.try_clone().unwrap();
@@ -158,11 +160,13 @@ impl VoiceEngine {
 
         self.screen_thread = Some(thread::spawn(move || {
             crate::screen::capture_loop(socket, session, peer_addr, active, running);
+            log_fmt!("[voice] screen capture thread exited");
         }));
     }
 
     /// Stop sharing our screen.
     pub fn stop_screen_share(&mut self) {
+        log_fmt!("[voice] stop_screen_share");
         self.screen_active.store(false, Ordering::Relaxed);
         if let Some(t) = self.screen_thread.take() {
             let _ = t.join();
@@ -303,11 +307,14 @@ pub fn start_engine(
     our_identity: &Identity,
     our_nickname: &str,
 ) -> Result<VoiceEngine, String> {
+    log_fmt!("[voice] start_engine: peer={} local_port={}", peer_addr, local_port);
+
     // Query each device's native channel count (Voicemeeter on Windows only supports stereo)
     let input_channels = input_device.default_input_config()
         .map(|c| c.channels()).unwrap_or(1);
     let output_channels = output_device.default_output_config()
         .map(|c| c.channels()).unwrap_or(1);
+    log_fmt!("[voice] audio: input={}ch, output={}ch", input_channels, output_channels);
 
     let input_config = cpal::StreamConfig {
         channels: input_channels,
