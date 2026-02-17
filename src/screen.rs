@@ -565,12 +565,18 @@ pub fn capture_loop(
     let mut frame_id: u16 = 0;
     let mut frame_count: u32 = 0;
 
+    let mut wouldblock_count: u64 = 0;
+
     while active.load(Ordering::Relaxed) && running.load(Ordering::Relaxed) {
         let frame_start = Instant::now();
 
         // Capture frame
         let bgra_frame = match capturer.frame() {
             Ok(frame) => {
+                if wouldblock_count > 0 {
+                    log_fmt!("[screen] got frame after {} WouldBlock retries", wouldblock_count);
+                    wouldblock_count = 0;
+                }
                 let stride = frame.len() / native_h;
                 if stride == native_w * 4 {
                     frame.to_vec()
@@ -584,6 +590,10 @@ pub fn capture_loop(
                 }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                wouldblock_count += 1;
+                if wouldblock_count % 5000 == 0 {
+                    log_fmt!("[screen] WouldBlock x{} (still waiting for frame)", wouldblock_count);
+                }
                 std::thread::sleep(Duration::from_millis(1));
                 continue;
             }
@@ -605,9 +615,12 @@ pub fn capture_loop(
 
         // Encode
         let force_keyframe = frame_count % KEYFRAME_INTERVAL == 0;
+        let enc_start = Instant::now();
         let encoded = encoder.encode(&scaled, force_keyframe);
+        let enc_ms = enc_start.elapsed().as_millis();
 
         if encoded.is_empty() {
+            log_fmt!("[screen] frame #{} encode returned empty ({}ms)", frame_count, enc_ms);
             frame_count += 1;
             continue;
         }
@@ -616,14 +629,16 @@ pub fn capture_loop(
         let chunks = ScreenEncoder::fragment(&encoded, frame_id, force_keyframe);
 
         // Encrypt and send each chunk
+        let send_start = Instant::now();
         for chunk in &chunks {
             let packet = session.encrypt_packet(PKT_SCREEN, chunk);
             let _ = socket.send_to(&packet, peer_addr);
         }
+        let send_ms = send_start.elapsed().as_millis();
 
-        if frame_count % 30 == 0 {
-            log_fmt!("[screen] frame #{} sent ({} bytes, {} chunks, kf={})",
-                frame_count, encoded.len(), chunks.len(), force_keyframe);
+        if frame_count % 30 == 0 || frame_count < 5 {
+            log_fmt!("[screen] frame #{} sent ({} bytes, {} chunks, kf={}, enc={}ms, send={}ms)",
+                frame_count, encoded.len(), chunks.len(), force_keyframe, enc_ms, send_ms);
         }
 
         frame_id = frame_id.wrapping_add(1);
