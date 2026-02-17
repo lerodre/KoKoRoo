@@ -230,7 +230,8 @@ fn handshake(
 }
 
 /// Exchange persistent identity keys + nicknames over the encrypted session.
-/// Returns (peer_pubkey, peer_nickname).
+/// Returns (peer_pubkey, peer_nickname, our_identity_packet) — the packet is kept
+/// so the receiver thread can re-send it if the peer is slow to reach this phase.
 fn exchange_identity(
     socket: &UdpSocket,
     peer_addr: &str,
@@ -238,7 +239,7 @@ fn exchange_identity(
     our_identity: &Identity,
     our_nickname: &str,
     running: &Arc<AtomicBool>,
-) -> Result<([u8; 32], String), String> {
+) -> Result<([u8; 32], String, Vec<u8>), String> {
     // Build payload: [32-byte pubkey][utf8 nickname bytes]
     let mut payload = Vec::with_capacity(32 + our_nickname.len());
     payload.extend_from_slice(&our_identity.pubkey);
@@ -281,13 +282,13 @@ fn exchange_identity(
     }
 
     // Send identity a few more times for the peer
-    for _ in 0..5 {
+    for _ in 0..10 {
         let _ = socket.send_to(&identity_packet, peer_addr);
         thread::sleep(std::time::Duration::from_millis(100));
     }
 
     peer_identity
-        .map(|pk| (pk, peer_nickname))
+        .map(|pk| (pk, peer_nickname, identity_packet))
         .ok_or_else(|| "Identity exchange timeout".to_string())
 }
 
@@ -331,7 +332,7 @@ pub fn start_engine(
     let session = Arc::new(Mutex::new(session));
 
     // ── Identity Exchange (with nickname) ──
-    let (peer_identity_pubkey, peer_nickname) =
+    let (peer_identity_pubkey, peer_nickname, our_identity_packet) =
         exchange_identity(&socket, peer_addr, &session, our_identity, our_nickname, &running)?;
     let peer_fingerprint = crypto::fingerprint(&peer_identity_pubkey);
     let contact_id = identity::derive_contact_id(&our_identity.pubkey, &peer_identity_pubkey);
@@ -551,6 +552,9 @@ pub fn start_engine(
     let running_r = running.clone();
     let session_r = session.clone();
     let screen_viewer_r = screen_viewer.clone();
+    let reply_socket = socket.try_clone().unwrap();
+    let identity_reply = our_identity_packet.clone();
+    let peer_addr_for_recv = peer_addr.to_string();
     socket.set_read_timeout(Some(std::time::Duration::from_millis(100))).unwrap();
 
     let receiver = thread::spawn(move || {
@@ -569,8 +573,15 @@ pub fn start_engine(
                         continue;
                     }
 
-                    // Skip HELLO and IDENTITY packets (handshake is done)
-                    if bytes_read > 0 && (recv_buf[0] == PKT_HELLO || recv_buf[0] == PKT_IDENTITY) {
+                    // Skip HELLO packets (handshake is done)
+                    if bytes_read > 0 && recv_buf[0] == PKT_HELLO {
+                        continue;
+                    }
+
+                    // Late IDENTITY packet: peer is still in identity exchange
+                    // Re-send our identity so they can complete
+                    if bytes_read > 0 && recv_buf[0] == PKT_IDENTITY {
+                        let _ = reply_socket.send_to(&identity_reply, &peer_addr_for_recv);
                         continue;
                     }
 
