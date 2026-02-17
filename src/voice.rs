@@ -174,21 +174,34 @@ impl VoiceEngine {
 fn handshake(
     socket: &UdpSocket,
     peer_addr: &str,
+    running: &Arc<AtomicBool>,
 ) -> Result<Session, String> {
     let (our_secret, our_pubkey) = crypto::generate_keypair();
     let hello = crypto::build_hello(&our_pubkey);
 
-    println!("Key exchange: waiting for peer (sending HELLOs)...");
+    println!("Key exchange: sending HELLOs to {peer_addr}...");
+    println!("Local socket: {:?}", socket.local_addr());
 
     let mut buf = [0u8; 1024];
     let mut peer_pubkey = None;
 
-    for _attempt in 0..60 {
-        let _ = socket.send_to(&hello, peer_addr);
+    for attempt in 0..60 {
+        if !running.load(Ordering::Relaxed) {
+            return Err("Cancelled".to_string());
+        }
+        match socket.send_to(&hello, peer_addr) {
+            Ok(n) => {
+                if attempt % 10 == 0 {
+                    println!("  HELLO #{attempt} sent ({n} bytes) → {peer_addr}");
+                }
+            }
+            Err(e) => println!("  HELLO #{attempt} send error: {e}"),
+        }
         socket.set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
 
         match socket.recv_from(&mut buf) {
-            Ok((n, _from)) => {
+            Ok((n, from)) => {
+                println!("  Received {n} bytes from {from} (type=0x{:02x})", buf[0]);
                 if let Some(pk) = crypto::parse_hello(&buf[..n]) {
                     peer_pubkey = Some(pk);
                     break;
@@ -224,6 +237,7 @@ fn exchange_identity(
     session: &Arc<Mutex<Session>>,
     our_identity: &Identity,
     our_nickname: &str,
+    running: &Arc<AtomicBool>,
 ) -> Result<([u8; 32], String), String> {
     // Build payload: [32-byte pubkey][utf8 nickname bytes]
     let mut payload = Vec::with_capacity(32 + our_nickname.len());
@@ -241,6 +255,9 @@ fn exchange_identity(
 
     // Send identity and wait for peer's
     for _attempt in 0..30 {
+        if !running.load(Ordering::Relaxed) {
+            return Err("Cancelled".to_string());
+        }
         let _ = socket.send_to(&identity_packet, peer_addr);
         socket.set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
 
@@ -309,13 +326,13 @@ pub fn start_engine(
     })?;
 
     // ── Key Exchange Handshake ──
-    let session = handshake(&socket, peer_addr)?;
+    let session = handshake(&socket, peer_addr, &running)?;
     let verification_code = session.verification_code.clone();
     let session = Arc::new(Mutex::new(session));
 
     // ── Identity Exchange (with nickname) ──
     let (peer_identity_pubkey, peer_nickname) =
-        exchange_identity(&socket, peer_addr, &session, our_identity, our_nickname)?;
+        exchange_identity(&socket, peer_addr, &session, our_identity, our_nickname, &running)?;
     let peer_fingerprint = crypto::fingerprint(&peer_identity_pubkey);
     let contact_id = identity::derive_contact_id(&our_identity.pubkey, &peer_identity_pubkey);
 

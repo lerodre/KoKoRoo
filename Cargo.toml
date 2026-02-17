@@ -17,4 +17,4 @@ serde = { version = "1", features = ["derive"] }  # serialization for contacts/c
 serde_json = "1"           # JSON for contacts storage
 nnnoiseless = "0.5"        # RNNoise-based noise suppression (pure Rust)
 scrap = "0.5"              # cross-platform screen capture (BGRA frames)
-env-libvpx-sys = "5.1"     # raw libvpx FFI bindings (VP8 encode/decode), Windows-compatible
+env-libvpx-sys = { version = "5.1", features = ["generate"] }  # raw libvpx FFI bindings (VP8 encode/decode), Windows-compatible

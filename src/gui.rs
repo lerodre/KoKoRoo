@@ -35,29 +35,55 @@ fn list_audio_devices() -> DeviceList {
 
 fn get_ipv6_addresses() -> Vec<(String, String)> {
     let mut addrs = vec![("::1".to_string(), "::1 (loopback)".to_string())];
-    if let Ok(output) = std::process::Command::new("ip").args(["-6", "addr", "show"]).output() {
-        let text = String::from_utf8_lossy(&output.stdout);
-        for line in text.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("inet6") {
-                if let Some(addr_cidr) = trimmed.split_whitespace().nth(1) {
-                    let addr = addr_cidr.split('/').next().unwrap_or(addr_cidr);
-                    if addr != "::1" {
-                        let scope = if trimmed.contains("scope global") { "global" }
-                            else if trimmed.contains("scope link") { "link-local" }
-                            else { "other" };
-                        addrs.push((addr.to_string(), format!("{addr} ({scope})")));
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(output) = std::process::Command::new("ip").args(["-6", "addr", "show"]).output() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("inet6") {
+                    if let Some(addr_cidr) = trimmed.split_whitespace().nth(1) {
+                        let addr = addr_cidr.split('/').next().unwrap_or(addr_cidr);
+                        if addr != "::1" {
+                            let scope = if trimmed.contains("scope global") { "global" }
+                                else if trimmed.contains("scope link") { "link-local" }
+                                else { "other" };
+                            addrs.push((addr.to_string(), format!("{addr} ({scope})")));
+                        }
                     }
                 }
             }
         }
     }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Windows: parse "netsh interface ipv6 show addresses" or fall back to "ipconfig"
+        if let Ok(output) = std::process::Command::new("powershell")
+            .args(["-Command", "(Get-NetIPAddress -AddressFamily IPv6).IPAddress"])
+            .output()
+        {
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines() {
+                let addr = line.trim().to_string();
+                if addr.is_empty() || addr == "::1" { continue; }
+                let scope = if addr.starts_with("fe80") { "link-local" }
+                    else if addr.starts_with("::1") { continue }
+                    else { "global" };
+                addrs.push((addr.clone(), format!("{addr} ({scope})")));
+            }
+        }
+    }
+
     // Sort: global first, then link-local, then other
-    addrs[1..].sort_by_key(|(_, label)| {
-        if label.contains("global") { 0 }
-        else if label.contains("link-local") { 1 }
-        else { 2 }
-    });
+    if addrs.len() > 1 {
+        addrs[1..].sort_by_key(|(_, label)| {
+            if label.contains("global") { 0 }
+            else if label.contains("link-local") { 1 }
+            else { 2 }
+        });
+    }
     addrs
 }
 
@@ -356,7 +382,11 @@ impl eframe::App for HostelApp {
                     }
                     Err(e) => {
                         self.running.store(false, Ordering::Relaxed);
-                        self.screen = Screen::Error(e);
+                        if e == "Cancelled" {
+                            self.screen = Screen::Setup;
+                        } else {
+                            self.screen = Screen::Error(e);
+                        }
                     }
                 }
             }
@@ -562,7 +592,7 @@ impl HostelApp {
         }
     }
 
-    fn draw_connecting(&self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    fn draw_connecting(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.vertical_centered(|ui| {
             ui.add_space(60.0);
             ui.heading("Connecting...");
@@ -571,6 +601,14 @@ impl HostelApp {
             ui.add_space(15.0);
             ui.label("Key exchange + identity verification");
             ui.label(format!("Peer: [{}]:{}", self.peer_ip, self.peer_port));
+            ui.add_space(20.0);
+            let btn = egui::Button::new(egui::RichText::new("Cancel").size(16.0))
+                .min_size(egui::vec2(120.0, 34.0))
+                .fill(egui::Color32::from_rgb(160, 50, 50));
+            if ui.add(btn).clicked() {
+                self.running.store(false, Ordering::Relaxed);
+                self.cleanup_call();
+            }
         });
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
     }
