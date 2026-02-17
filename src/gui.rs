@@ -51,6 +51,12 @@ fn get_ipv6_addresses() -> Vec<(String, String)> {
             }
         }
     }
+    // Sort: global first, then link-local, then other
+    addrs[1..].sort_by_key(|(_, label)| {
+        if label.contains("global") { 0 }
+        else if label.contains("link-local") { 1 }
+        else { 2 }
+    });
     addrs
 }
 
@@ -94,6 +100,7 @@ pub struct HostelApp {
 
     // Contact list
     contacts: Vec<Contact>,
+    contact_search: String,
 
     // Call state
     running: Arc<AtomicBool>,
@@ -147,13 +154,14 @@ impl HostelApp {
             network_mode: 0,
             selected_input,
             selected_output,
-            selected_addr: 0,
+            selected_addr: ipv6_addrs.iter().position(|(ip, _)| ip != "::1").unwrap_or(0),
             local_port,
             peer_ip: "::1".to_string(),
             peer_port: "9000".to_string(),
             devices,
             ipv6_addrs,
             contacts,
+            contact_search: String::new(),
             running: Arc::new(AtomicBool::new(false)),
             mic_active: Arc::new(AtomicBool::new(true)),
             local_hangup: None,
@@ -388,18 +396,19 @@ impl HostelApp {
         // IPv6
         let filtered_addrs: Vec<(usize, &(String, String))> = self.ipv6_addrs.iter()
             .enumerate()
-            .filter(|(_, (_, label))| {
-                if self.network_mode == 1 {
-                    label.contains("global") || label.contains("loopback")
-                } else {
-                    label.contains("link-local") || label.contains("loopback")
-                }
-            }).collect();
+            .filter(|(_, (ip, _))| ip != "::1")
+            .collect();
 
         if !filtered_addrs.is_empty() {
+            // Auto-select first global address, fallback to first available
+            if !filtered_addrs.iter().any(|(i, _)| *i == self.selected_addr) {
+                self.selected_addr = filtered_addrs.iter()
+                    .find(|(_, (_, label))| label.contains("global"))
+                    .unwrap_or(&filtered_addrs[0]).0;
+            }
+
             ui.horizontal(|ui| {
                 ui.label("Your IPv6:");
-                // Copy button for sharing your address
                 let selected_ip = filtered_addrs.iter()
                     .find(|(i, _)| *i == self.selected_addr)
                     .map(|(_, (ip, _))| ip.clone())
@@ -465,14 +474,28 @@ impl HostelApp {
         if !self.contacts.is_empty() {
             ui.add_space(8.0);
             ui.separator();
-            ui.label(egui::RichText::new("Contacts").strong());
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Contacts").strong());
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.contact_search)
+                        .hint_text("Search...")
+                        .desired_width(150.0)
+                );
+            });
 
+            let search = self.contact_search.to_lowercase();
             let max_height = ui.available_height().max(80.0);
             egui::ScrollArea::vertical()
                 .max_height(max_height)
                 .id_salt("contacts_scroll")
                 .show(ui, |ui| {
                     for contact in &self.contacts {
+                        if !search.is_empty()
+                            && !contact.nickname.to_lowercase().contains(&search)
+                            && !contact.fingerprint.to_lowercase().contains(&search)
+                        {
+                            continue;
+                        }
                         let display = format_peer_display(&contact.nickname, &contact.fingerprint);
                         let addr_info = if !contact.last_address.is_empty() {
                             format!("  [{}]:{}", contact.last_address, contact.last_port)
