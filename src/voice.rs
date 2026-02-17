@@ -564,6 +564,9 @@ pub fn start_engine(
     let peer_addr_for_recv = peer_addr.to_string();
     socket.set_read_timeout(Some(std::time::Duration::from_millis(100))).unwrap();
 
+    let peer_ip = peer_addr.parse::<std::net::SocketAddr>()
+        .map(|sa| sa.ip())
+        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
     let receiver = thread::spawn(move || {
         let mut decoder = Decoder::new(SampleRate::Hz48000, Channels::Mono)
             .expect("Failed to create Opus decoder");
@@ -572,12 +575,31 @@ pub fn start_engine(
         let mut pcm_out = vec![0f32; FRAME_SIZE];
         let mut screen_chunk_count: u64 = 0;
 
+        // Extract peer's /64 prefix for IPv6 privacy extension handling
+        let peer_prefix_64 = match peer_ip {
+            std::net::IpAddr::V6(v6) => {
+                let seg = v6.segments();
+                Some([seg[0], seg[1], seg[2], seg[3]])
+            }
+            _ => None,
+        };
+
         while running_r.load(Ordering::Relaxed) {
             match socket.recv_from(&mut recv_buf) {
                 Ok((bytes_read, from)) => {
                     let ip = from.ip();
 
-                    if firewall.check(ip) == Action::Deny {
+                    // Skip firewall for IPs in the peer's /64 subnet
+                    // (IPv6 privacy extensions may use different addresses)
+                    let is_peer_subnet = match (ip, peer_prefix_64) {
+                        (std::net::IpAddr::V6(v6), Some(prefix)) => {
+                            let seg = v6.segments();
+                            [seg[0], seg[1], seg[2], seg[3]] == prefix
+                        }
+                        _ => ip == peer_ip,
+                    };
+
+                    if !is_peer_subnet && firewall.check(ip) == Action::Deny {
                         continue;
                     }
 
