@@ -5,12 +5,14 @@ use std::cell::Cell;
 use std::os::unix::io::OwnedFd;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType};
 use ashpd::desktop::PersistMode;
 use libspa::param::format::{FormatProperties, MediaSubtype, MediaType};
+use libspa::param::video::VideoFormat;
 use pipewire as pw;
 use pipewire::stream::StreamFlags;
 
@@ -22,144 +24,238 @@ pub fn is_wayland() -> bool {
             .unwrap_or(false)
 }
 
-/// Result of a successful portal negotiation.
-pub struct PortalSession {
+/// Long-lived portal session. Created once per call, stays alive until dropped.
+/// The recording indicator in the system tray stays visible while this exists.
+/// When dropped, the portal session is closed and the indicator disappears.
+pub struct WaylandPortal {
+    fd_request_tx: mpsc::Sender<mpsc::SyncSender<Option<OwnedFd>>>,
+    pub node_id: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+// mpsc::Sender is Send
+unsafe impl Send for WaylandPortal {}
+
+/// Lightweight capture params for a single screen share session.
+pub struct PortalCapture {
     pub pw_fd: OwnedFd,
     pub node_id: u32,
     pub width: u32,
     pub height: u32,
 }
 
-// OwnedFd is Send, so PortalSession is Send
-unsafe impl Send for PortalSession {}
+unsafe impl Send for PortalCapture {}
 
-/// Request screen capture permission via XDG Desktop Portal.
-/// This BLOCKS the calling thread while showing the OS permission dialog.
-/// Returns None if user cancels or portal is unavailable.
-pub fn request_screencast() -> Option<PortalSession> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .ok()?;
+impl WaylandPortal {
+    /// Request screen capture permission via XDG Desktop Portal.
+    /// Shows the OS permission dialog. Blocks until user responds.
+    /// Returns None if user cancels or portal is unavailable.
+    pub fn request() -> Option<Self> {
+        // Channel for the initial result (node_id, width, height)
+        let (result_tx, result_rx) = mpsc::sync_channel::<Option<(u32, u32, u32)>>(1);
+        // Channel for fd requests (reusable)
+        let (fd_req_tx, fd_req_rx) = mpsc::channel::<mpsc::SyncSender<Option<OwnedFd>>>();
 
-    rt.block_on(async {
-        let proxy = Screencast::new().await.ok()?;
-        let session = proxy.create_session().await.ok()?;
-        proxy
-            .select_sources(
-                &session,
-                CursorMode::Embedded,
-                SourceType::Monitor.into(),
-                false,
-                None,
-                PersistMode::DoNot,
-            )
-            .await
-            .ok()?;
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(_) => {
+                    let _ = result_tx.send(None);
+                    return;
+                }
+            };
 
-        let response = proxy.start(&session, None).await.ok()?.response().ok()?;
-        let streams = response.streams();
-        let stream = streams.first()?;
-        let node_id = stream.pipe_wire_node_id();
-        let (w, h) = stream.size().unwrap_or((1920, 1080));
+            rt.block_on(async {
+                log_fmt!("[wayland] portal: creating proxy...");
+                let proxy = match Screencast::new().await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        log_fmt!("[wayland] portal: failed to create proxy: {e}");
+                        let _ = result_tx.send(None);
+                        return;
+                    }
+                };
 
-        let pw_fd = proxy.open_pipe_wire_remote(&session).await.ok()?;
-        Some(PortalSession {
-            pw_fd,
+                log_fmt!("[wayland] portal: creating session...");
+                let session = match proxy.create_session().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        log_fmt!("[wayland] portal: failed to create session: {e}");
+                        let _ = result_tx.send(None);
+                        return;
+                    }
+                };
+
+                log_fmt!("[wayland] portal: selecting sources...");
+                if let Err(e) = proxy
+                    .select_sources(
+                        &session,
+                        CursorMode::Embedded,
+                        SourceType::Monitor.into(),
+                        false,
+                        None,
+                        PersistMode::DoNot,
+                    )
+                    .await
+                {
+                    log_fmt!("[wayland] portal: failed to select sources: {e}");
+                    let _ = result_tx.send(None);
+                    return;
+                }
+
+                log_fmt!("[wayland] portal: starting (waiting for user)...");
+                let response = match proxy.start(&session, None).await {
+                    Ok(r) => match r.response() {
+                        Ok(resp) => resp,
+                        Err(e) => {
+                            log_fmt!("[wayland] portal: user cancelled or error: {e}");
+                            let _ = result_tx.send(None);
+                            return;
+                        }
+                    },
+                    Err(e) => {
+                        log_fmt!("[wayland] portal: start failed: {e}");
+                        let _ = result_tx.send(None);
+                        return;
+                    }
+                };
+
+                log_fmt!("[wayland] portal: user accepted, getting streams...");
+                let streams = response.streams();
+                let stream = match streams.first() {
+                    Some(s) => s,
+                    None => {
+                        log_fmt!("[wayland] portal: no streams returned");
+                        let _ = result_tx.send(None);
+                        return;
+                    }
+                };
+                let node_id = stream.pipe_wire_node_id();
+                let (w, h) = stream.size().unwrap_or((1920, 1080));
+
+                log_fmt!("[wayland] portal: success! node_id={}, {}x{}", node_id, w, h);
+                let _ = result_tx.send(Some((node_id, w as u32, h as u32)));
+
+                // Event loop: handle fd requests and keep session alive.
+                // The async sleep keeps the tokio event loop responsive for D-Bus.
+                loop {
+                    match fd_req_rx.try_recv() {
+                        Ok(reply_tx) => {
+                            log_fmt!("[wayland] portal: opening new pipewire fd...");
+                            let fd = proxy.open_pipe_wire_remote(&session).await.ok();
+                            if fd.is_some() {
+                                log_fmt!("[wayland] portal: fd opened successfully");
+                            } else {
+                                log_fmt!("[wayland] portal: failed to open fd");
+                            }
+                            let _ = reply_tx.send(fd);
+                        }
+                        Err(mpsc::TryRecvError::Disconnected) => {
+                            // WaylandPortal was dropped → close session
+                            break;
+                        }
+                        Err(mpsc::TryRecvError::Empty) => {
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                        }
+                    }
+                }
+                log_fmt!("[wayland] portal: session closing");
+                // `session` drops here → D-Bus Close → indicator disappears
+            });
+        });
+
+        // Block calling thread until portal negotiation completes
+        let (node_id, width, height) = result_rx.recv().ok()??;
+
+        Some(WaylandPortal {
+            fd_request_tx: fd_req_tx,
             node_id,
-            width: w as u32,
-            height: h as u32,
+            width,
+            height,
         })
-    })
+    }
+
+    /// Get a new PipeWire fd for a capture session.
+    /// Can be called multiple times on the same portal.
+    pub fn new_capture(&self) -> Option<PortalCapture> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.fd_request_tx.send(tx).ok()?;
+        let pw_fd = rx.recv().ok()??;
+        Some(PortalCapture {
+            pw_fd,
+            node_id: self.node_id,
+            width: self.width,
+            height: self.height,
+        })
+    }
 }
 
-/// Build SPA video format parameters requesting BGRx pixel format.
-/// Uses the object!/property! macros from libspa for correct pod construction.
-fn build_video_format_params(width: u32, height: u32) -> Vec<Vec<u8>> {
+/// Build SPA video format parameters using the object!/property! macros.
+fn build_video_format_params() -> Vec<u8> {
     use libspa::pod::serialize::PodSerializer;
-    use libspa::pod::{ChoiceValue, Object, Property, PropertyFlags, Value};
-    use libspa::utils::{
-        Choice, ChoiceEnum, ChoiceFlags, Fraction, Id, Rectangle,
-    };
+    use libspa::pod::Value;
 
-    // SPA video format constants (from spa/param/video/raw.h enum)
-    const SPA_VIDEO_FORMAT_RGBX: u32 = 7;
-    const SPA_VIDEO_FORMAT_BGRX: u32 = 8;
-    const SPA_VIDEO_FORMAT_RGBA: u32 = 11;
-    const SPA_VIDEO_FORMAT_BGRA: u32 = 12;
+    let obj = libspa::pod::object!(
+        libspa::utils::SpaTypes::ObjectParamFormat,
+        libspa::param::ParamType::EnumFormat,
+        libspa::pod::property!(
+            FormatProperties::MediaType,
+            Id,
+            MediaType::Video
+        ),
+        libspa::pod::property!(
+            FormatProperties::MediaSubtype,
+            Id,
+            MediaSubtype::Raw
+        ),
+        libspa::pod::property!(
+            FormatProperties::VideoFormat,
+            Choice,
+            Enum,
+            Id,
+            VideoFormat::BGRx,
+            VideoFormat::BGRx,
+            VideoFormat::BGRA,
+            VideoFormat::RGBx,
+            VideoFormat::RGBA,
+        ),
+        libspa::pod::property!(
+            FormatProperties::VideoSize,
+            Choice,
+            Range,
+            Rectangle,
+            libspa::utils::Rectangle { width: 256, height: 256 },
+            libspa::utils::Rectangle { width: 1, height: 1 },
+            libspa::utils::Rectangle { width: 8192, height: 8192 }
+        ),
+        libspa::pod::property!(
+            FormatProperties::VideoFramerate,
+            Choice,
+            Range,
+            Fraction,
+            libspa::utils::Fraction { num: 0, denom: 1 },
+            libspa::utils::Fraction { num: 0, denom: 1 },
+            libspa::utils::Fraction { num: 1000, denom: 1 }
+        ),
+    );
 
-    let obj = Value::Object(Object {
-        type_: libspa::utils::SpaTypes::ObjectParamFormat.as_raw(),
-        id: libspa::param::ParamType::EnumFormat.as_raw(),
-        properties: vec![
-            // media.type = video
-            Property {
-                key: FormatProperties::MediaType.as_raw(),
-                flags: PropertyFlags::empty(),
-                value: Value::Id(Id(MediaType::Video.as_raw())),
-            },
-            // media.subtype = raw
-            Property {
-                key: FormatProperties::MediaSubtype.as_raw(),
-                flags: PropertyFlags::empty(),
-                value: Value::Id(Id(MediaSubtype::Raw.as_raw())),
-            },
-            // format = BGRx preferred, with BGRA, RGBx, RGBA as alternatives
-            Property {
-                key: FormatProperties::VideoFormat.as_raw(),
-                flags: PropertyFlags::empty(),
-                value: Value::Choice(ChoiceValue::Id(Choice(
-                    ChoiceFlags::empty(),
-                    ChoiceEnum::Enum {
-                        default: Id(SPA_VIDEO_FORMAT_BGRX),
-                        alternatives: vec![
-                            Id(SPA_VIDEO_FORMAT_BGRX),
-                            Id(SPA_VIDEO_FORMAT_BGRA),
-                            Id(SPA_VIDEO_FORMAT_RGBX),
-                            Id(SPA_VIDEO_FORMAT_RGBA),
-                        ],
-                    },
-                ))),
-            },
-            // size = width x height (with range)
-            Property {
-                key: FormatProperties::VideoSize.as_raw(),
-                flags: PropertyFlags::empty(),
-                value: Value::Choice(ChoiceValue::Rectangle(Choice(
-                    ChoiceFlags::empty(),
-                    ChoiceEnum::Range {
-                        default: Rectangle { width, height },
-                        min: Rectangle { width: 1, height: 1 },
-                        max: Rectangle { width: 7680, height: 4320 },
-                    },
-                ))),
-            },
-            // framerate = 30/1 (with range 1-120)
-            Property {
-                key: FormatProperties::VideoFramerate.as_raw(),
-                flags: PropertyFlags::empty(),
-                value: Value::Choice(ChoiceValue::Fraction(Choice(
-                    ChoiceFlags::empty(),
-                    ChoiceEnum::Range {
-                        default: Fraction { num: 30, denom: 1 },
-                        min: Fraction { num: 1, denom: 1 },
-                        max: Fraction { num: 120, denom: 1 },
-                    },
-                ))),
-            },
-        ],
-    });
-
-    // Serialize to bytes
-    let (bytes, _) = PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &obj)
-        .expect("Failed to serialize video format params");
-    vec![bytes.into_inner()]
+    PodSerializer::serialize(
+        std::io::Cursor::new(Vec::new()),
+        &Value::Object(obj),
+    )
+    .expect("Failed to serialize video format params")
+    .0
+    .into_inner()
 }
 
 /// Run PipeWire MainLoop on a dedicated thread.
 /// Stores latest captured frame in `frame_buf` for the encoder thread to read.
 pub fn run_pipewire_capture(
-    portal: PortalSession,
+    capture: PortalCapture,
     frame_buf: Arc<Mutex<Option<(Vec<u8>, u32, u32)>>>,
     active: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
@@ -181,7 +277,7 @@ pub fn run_pipewire_capture(
             return;
         }
     };
-    let core = match context.connect_fd(portal.pw_fd, None) {
+    let core = match context.connect_fd(capture.pw_fd, None) {
         Ok(c) => c,
         Err(e) => {
             log_fmt!("[wayland] Failed to connect PipeWire fd: {e}");
@@ -224,15 +320,13 @@ pub fn run_pipewire_capture(
     );
 
     // Track negotiated video dimensions and format
-    // (w, h, format_id, stride)
-    let dims: Rc<Cell<(u32, u32, u32, u32)>> = Rc::new(Cell::new((portal.width, portal.height, 0, 0)));
+    let dims: Rc<Cell<(u32, u32, u32, u32)>> =
+        Rc::new(Cell::new((capture.width, capture.height, 0, 0)));
     let dims_changed = dims.clone();
     let frame_buf_process = frame_buf.clone();
 
-    const SPA_VIDEO_FORMAT_RGBX: u32 = 7;
-    const SPA_VIDEO_FORMAT_BGRX: u32 = 8;
-    const SPA_VIDEO_FORMAT_RGBA: u32 = 11;
-    const SPA_VIDEO_FORMAT_BGRA: u32 = 12;
+    let fmt_rgbx = VideoFormat::RGBx.as_raw();
+    let fmt_rgba = VideoFormat::RGBA.as_raw();
 
     let _listener = stream
         .add_local_listener::<()>()
@@ -283,7 +377,6 @@ pub fn run_pipewire_capture(
                     return;
                 }
 
-                // Get actual stride from chunk metadata
                 let stride = data.chunk().stride() as u32;
                 let chunk_size = data.chunk().size() as usize;
 
@@ -297,17 +390,15 @@ pub fn run_pipewire_capture(
                         return;
                     }
 
-                    // Copy pixel data, handling stride (row padding)
                     let mut bgra = Vec::with_capacity(row_bytes * h as usize);
                     for row in 0..h as usize {
                         let start = row * actual_stride;
                         bgra.extend_from_slice(&slice[start..start + row_bytes]);
                     }
 
-                    // Convert RGBx/RGBA to BGRx/BGRA by swapping R and B channels
-                    if fmt == SPA_VIDEO_FORMAT_RGBX || fmt == SPA_VIDEO_FORMAT_RGBA {
+                    if fmt == fmt_rgbx || fmt == fmt_rgba {
                         for pixel in bgra.chunks_exact_mut(4) {
-                            pixel.swap(0, 2); // R <-> B
+                            pixel.swap(0, 2);
                         }
                     }
 
@@ -320,19 +411,15 @@ pub fn run_pipewire_capture(
         .register()
         .expect("Failed to register PipeWire stream listener");
 
-    // Build video format parameters
-    let param_bytes = build_video_format_params(portal.width, portal.height);
-    let pods: Vec<&libspa::pod::Pod> = param_bytes
-        .iter()
-        .map(|bytes| libspa::pod::Pod::from_bytes(bytes).expect("invalid pod"))
-        .collect();
-    let mut param_refs: Vec<&libspa::pod::Pod> = pods;
+    let param_bytes = build_video_format_params();
+    let pod = libspa::pod::Pod::from_bytes(&param_bytes).expect("invalid pod");
+    let mut params = vec![pod];
 
     if let Err(e) = stream.connect(
         libspa::utils::Direction::Input,
-        Some(portal.node_id),
+        Some(capture.node_id),
         StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
-        &mut param_refs,
+        &mut params,
     ) {
         log_fmt!("[wayland] Failed to connect PipeWire stream: {e}");
         active.store(false, Ordering::Relaxed);
@@ -341,7 +428,7 @@ pub fn run_pipewire_capture(
 
     log_fmt!(
         "[wayland] PipeWire mainloop running, node_id={}",
-        portal.node_id
+        capture.node_id
     );
     mainloop.run();
     log_fmt!("[wayland] PipeWire mainloop exited");

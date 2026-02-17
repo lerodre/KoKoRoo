@@ -133,6 +133,9 @@ pub struct VoiceEngine {
     sys_audio_active: Arc<AtomicBool>,
     sys_audio_stream: Option<cpal::Stream>,
     sys_audio_producer: Arc<Mutex<Option<HeapProd<f32>>>>,
+    /// Wayland portal session (kept alive for the entire call)
+    #[cfg(target_os = "linux")]
+    wayland_portal: Option<crate::wayland_capture::WaylandPortal>,
     /// Cloned session for screen capture thread to encrypt independently
     session: Arc<Mutex<Session>>,
     /// Socket clone for screen sharing
@@ -199,14 +202,19 @@ impl VoiceEngine {
         // Determine capture source: Wayland PipeWire or scrap (X11/Windows)
         #[cfg(target_os = "linux")]
         let source = if crate::wayland_capture::is_wayland() {
-            log_fmt!("[voice] Wayland detected, requesting screencast via portal...");
-            match crate::wayland_capture::request_screencast() {
-                Some(portal) => {
-                    log_fmt!("[voice] Portal granted: node_id={}, {}x{}", portal.node_id, portal.width, portal.height);
-                    crate::screen::CaptureSource::PipeWire { portal }
+            // Create portal session on first use, reuse for subsequent shares
+            if self.wayland_portal.is_none() {
+                log_fmt!("[voice] Wayland detected, requesting screencast via portal...");
+                self.wayland_portal = crate::wayland_capture::WaylandPortal::request();
+            }
+            match self.wayland_portal.as_ref().and_then(|p| p.new_capture()) {
+                Some(capture) => {
+                    log_fmt!("[voice] Portal capture: node_id={}, {}x{}", capture.node_id, capture.width, capture.height);
+                    crate::screen::CaptureSource::PipeWire { capture }
                 }
                 None => {
                     log_fmt!("[voice] Wayland portal: user cancelled or unavailable, falling back to scrap");
+                    self.wayland_portal = None; // Clear stale portal
                     crate::screen::CaptureSource::Scrap { display_index }
                 }
             }
@@ -845,6 +853,8 @@ pub fn start_engine(
         screen_viewer,
         screen_active,
         screen_thread: None,
+        #[cfg(target_os = "linux")]
+        wayland_portal: None,
         sys_audio_active,
         sys_audio_stream: None,
         sys_audio_producer,

@@ -23,7 +23,7 @@ pub enum CaptureSource {
     /// Wayland XDG Desktop Portal + PipeWire (Linux only)
     #[cfg(target_os = "linux")]
     PipeWire {
-        portal: crate::wayland_capture::PortalSession,
+        capture: crate::wayland_capture::PortalCapture,
     },
 }
 
@@ -280,7 +280,7 @@ impl ScreenEncoder {
             cfg.rc_end_usage = VPX_CBR;
             cfg.g_error_resilient = 1;
             cfg.g_lag_in_frames = 0;
-            cfg.g_threads = 2;
+            cfg.g_threads = if width >= 1920 { 4 } else { 2 };
             cfg.kf_mode = VPX_KF_AUTO;
             cfg.kf_max_dist = KEYFRAME_INTERVAL;
             log_fmt!("[screen] encoder config set, calling vpx_codec_enc_init_ver...");
@@ -631,8 +631,8 @@ pub fn capture_loop(
             capture_loop_scrap(socket, session, peer_addr, active, running, quality, display_index);
         }
         #[cfg(target_os = "linux")]
-        CaptureSource::PipeWire { portal } => {
-            capture_loop_pipewire(socket, session, peer_addr, active, running, quality, portal);
+        CaptureSource::PipeWire { capture } => {
+            capture_loop_pipewire(socket, session, peer_addr, active, running, quality, capture);
         }
     }
 }
@@ -645,11 +645,14 @@ fn capture_loop_pipewire(
     active: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     quality: ScreenQuality,
-    portal: crate::wayland_capture::PortalSession,
+    capture: crate::wayland_capture::PortalCapture,
 ) {
     use std::thread;
 
     log_fmt!("[screen] capture_loop_pipewire: starting, peer={}, quality={:?}", peer_addr, quality);
+
+    let native_w = capture.width;
+    let native_h = capture.height;
 
     let frame_buf: Arc<Mutex<Option<(Vec<u8>, u32, u32)>>> = Arc::new(Mutex::new(None));
 
@@ -659,14 +662,18 @@ fn capture_loop_pipewire(
         let a = active.clone();
         let r = running.clone();
         thread::spawn(move || {
-            crate::wayland_capture::run_pipewire_capture(portal, fb, a, r);
+            crate::wayland_capture::run_pipewire_capture(capture, fb, a, r);
         })
     };
 
-    let enc_w = quality.width();
-    let enc_h = quality.height();
+    // Cap encoder resolution to native capture dims — avoid upscaling small screens
+    let enc_w = quality.width().min(native_w);
+    let enc_h = quality.height().min(native_h);
     let enc_fps = quality.fps();
-    let mut encoder = ScreenEncoder::new(enc_w, enc_h, enc_fps, quality.bitrate_kbps());
+    let enc_bps = quality.bitrate_kbps();
+    log_fmt!("[screen] pw encoder: {}x{} {}fps {}kbps (native {}x{})",
+        enc_w, enc_h, enc_fps, enc_bps, native_w, native_h);
+    let mut encoder = ScreenEncoder::new(enc_w, enc_h, enc_fps, enc_bps);
     let frame_duration = Duration::from_secs_f64(1.0 / enc_fps as f64);
     let mut frame_id: u16 = 0;
     let mut frame_count: u32 = 0;
