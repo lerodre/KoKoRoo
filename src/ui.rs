@@ -180,6 +180,14 @@ pub fn run() {
     let running = Arc::new(AtomicBool::new(true));
     let mic_active = Arc::new(AtomicBool::new(true));
 
+    if let Ok(port_num) = local_port.parse::<u16>() {
+        match crate::sysfirewall::ensure_udp_port_open(port_num) {
+            Ok(true) => log_fmt!("[firewall] Added rule for UDP port {}", port_num),
+            Ok(false) => log_fmt!("[firewall] Rule already exists for UDP port {}", port_num),
+            Err(e) => log_fmt!("[firewall] WARNING: {}", e),
+        }
+    }
+
     let engine = match voice::start_engine(
         input_device, output_device,
         &peer_addr, &local_port,
@@ -187,7 +195,14 @@ pub fn run() {
         &identity,
         &settings.nickname,
     ) {
-        Ok(e) => e,
+        Ok(mut e) => {
+            // TUI mode: auto-confirm pending contact (warning is printed to terminal)
+            if let Some(ref warning) = e.key_change_warning {
+                eprintln!("\x1b[1;31m{warning}\x1b[0m");
+            }
+            e.confirm_contact();
+            e
+        }
         Err(e) => {
             eprintln!("\x1b[1;31mFailed: {e}\x1b[0m");
             eprintln!("Make sure your peer is also running hostelD.");

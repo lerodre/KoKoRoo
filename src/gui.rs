@@ -14,6 +14,7 @@ use crate::screen::{ScreenCommand, ScreenQuality, ScreenViewer};
 enum Screen {
     Setup,
     Connecting,
+    KeyWarning,
     InCall,
     Error(String),
 }
@@ -105,6 +106,7 @@ struct CallInfo {
     peer_nickname: String,
     contact_id: String,
     key_change_warning: Option<String>,
+    pending_contact: Option<Contact>,
     chat_tx: mpsc::Sender<String>,
     chat_rx: mpsc::Receiver<String>,
     local_hangup: Arc<AtomicBool>,
@@ -143,6 +145,7 @@ pub struct HostelApp {
     peer_nickname: String,
     contact_id: String,
     key_change_warning: Option<String>,
+    pending_contact: Option<Contact>,
 
     // Chat
     chat_tx: Option<mpsc::Sender<String>>,
@@ -217,6 +220,7 @@ impl HostelApp {
             peer_nickname: String::new(),
             contact_id: String::new(),
             key_change_warning: None,
+            pending_contact: None,
             chat_tx: None,
             chat_rx: None,
             chat_input: String::new(),
@@ -287,6 +291,14 @@ impl HostelApp {
                     fingerprint: identity_fingerprint,
                 };
 
+                if let Ok(port_num) = local_port.parse::<u16>() {
+                    match crate::sysfirewall::ensure_udp_port_open(port_num) {
+                        Ok(true) => log_fmt!("[firewall] Added rule for UDP port {}", port_num),
+                        Ok(false) => log_fmt!("[firewall] Rule already exists for UDP port {}", port_num),
+                        Err(e) => log_fmt!("[firewall] WARNING: {}", e),
+                    }
+                }
+
                 // Channel for GUI to signal start/stop screen sharing
                 let (screen_cmd_tx, screen_cmd_rx) = mpsc::channel::<ScreenCommand>();
 
@@ -303,6 +315,7 @@ impl HostelApp {
                             peer_nickname: engine.peer_nickname.clone(),
                             contact_id: engine.contact_id.clone(),
                             key_change_warning: engine.key_change_warning.clone(),
+                            pending_contact: engine.pending_contact.take(),
                             chat_tx: engine.chat_tx.take().unwrap(),
                             chat_rx: engine.chat_rx.take().unwrap(),
                             local_hangup: engine.local_hangup.clone(),
@@ -369,6 +382,7 @@ impl HostelApp {
         self.peer_nickname.clear();
         self.contact_id.clear();
         self.key_change_warning = None;
+        self.pending_contact = None;
         self.chat_tx = None;
         self.chat_rx = None;
         self.chat_input.clear();
@@ -403,7 +417,8 @@ impl eframe::App for HostelApp {
                         self.peer_fingerprint = info.peer_fingerprint;
                         self.peer_nickname = info.peer_nickname;
                         self.contact_id = info.contact_id.clone();
-                        self.key_change_warning = info.key_change_warning;
+                        self.key_change_warning = info.key_change_warning.clone();
+                        self.pending_contact = info.pending_contact;
                         self.chat_tx = Some(info.chat_tx);
                         self.chat_rx = Some(info.chat_rx);
                         self.local_hangup = Some(info.local_hangup);
@@ -415,7 +430,11 @@ impl eframe::App for HostelApp {
                             &info.contact_id,
                             &self.identity.secret,
                         ));
-                        self.screen = Screen::InCall;
+                        if info.key_change_warning.is_some() {
+                            self.screen = Screen::KeyWarning;
+                        } else {
+                            self.screen = Screen::InCall;
+                        }
                     }
                     Err(e) => {
                         self.running.store(false, Ordering::Relaxed);
@@ -429,6 +448,15 @@ impl eframe::App for HostelApp {
             }
             drop(lock);
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+
+        // Detect remote hangup while on KeyWarning screen
+        if matches!(self.screen, Screen::KeyWarning) {
+            if !self.running.load(Ordering::Relaxed) {
+                self.on_remote_hangup();
+                return;
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
 
         // Poll incoming chat messages + detect remote hangup
@@ -508,6 +536,7 @@ impl eframe::App for HostelApp {
             match &self.screen {
                 Screen::Setup => self.draw_setup(ui),
                 Screen::Connecting => self.draw_connecting(ui, ctx),
+                Screen::KeyWarning => self.draw_key_warning(ui),
                 Screen::InCall => self.draw_call(ui),
                 Screen::Error(_) => {
                     let msg = if let Screen::Error(m) = &self.screen { m.clone() } else { unreachable!() };
@@ -519,6 +548,84 @@ impl eframe::App for HostelApp {
 }
 
 impl HostelApp {
+    fn draw_key_warning(&mut self, ui: &mut egui::Ui) {
+        let peer_display = format_peer_display(&self.peer_nickname, &self.peer_fingerprint);
+        let warning_text = self.key_change_warning.clone().unwrap_or_default();
+
+        ui.vertical_centered(|ui| {
+            ui.add_space(30.0);
+            ui.colored_label(
+                egui::Color32::from_rgb(255, 60, 60),
+                egui::RichText::new("SECURITY WARNING").size(28.0).strong(),
+            );
+            ui.add_space(15.0);
+        });
+
+        ui.add_space(5.0);
+        ui.colored_label(
+            egui::Color32::from_rgb(255, 100, 100),
+            egui::RichText::new(&warning_text).size(15.0).strong(),
+        );
+
+        ui.add_space(15.0);
+        ui.separator();
+        ui.add_space(10.0);
+
+        ui.horizontal(|ui| {
+            ui.label("Peer:");
+            ui.strong(&peer_display);
+        });
+        ui.horizontal(|ui| {
+            ui.label("Verify code:");
+            ui.colored_label(
+                egui::Color32::from_rgb(255, 200, 50),
+                egui::RichText::new(&self.verification_code).size(18.0).strong(),
+            );
+        });
+
+        ui.add_space(15.0);
+        ui.label("Possible reasons:");
+        ui.label("  - The peer reinstalled the app or changed devices");
+        ui.label("  - Someone is impersonating the peer (MITM attack)");
+        ui.add_space(5.0);
+        ui.colored_label(
+            egui::Color32::from_rgb(255, 200, 100),
+            "Verify the code above with your peer through a trusted channel.",
+        );
+
+        ui.add_space(25.0);
+        ui.vertical_centered(|ui| {
+            ui.horizontal(|ui| {
+                let proceed_btn = egui::Button::new(
+                    egui::RichText::new("Proceed (Trust)").size(18.0).color(egui::Color32::WHITE),
+                )
+                .min_size(egui::vec2(180.0, 44.0))
+                .fill(egui::Color32::from_rgb(40, 140, 60));
+
+                if ui.add(proceed_btn).clicked() {
+                    if let Some(contact) = self.pending_contact.take() {
+                        identity::save_contact(&contact);
+                    }
+                    self.key_change_warning = None;
+                    self.screen = Screen::InCall;
+                }
+
+                ui.add_space(20.0);
+
+                let reject_btn = egui::Button::new(
+                    egui::RichText::new("Reject (Hang Up)").size(18.0).color(egui::Color32::WHITE),
+                )
+                .min_size(egui::vec2(180.0, 44.0))
+                .fill(egui::Color32::from_rgb(180, 40, 40));
+
+                if ui.add(reject_btn).clicked() {
+                    self.pending_contact = None;
+                    self.hang_up();
+                }
+            });
+        });
+    }
+
     fn draw_setup(&mut self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
             ui.add_space(8.0);
@@ -713,16 +820,6 @@ impl HostelApp {
         });
 
         ui.separator();
-
-        // ── TOFU warning ──
-        if let Some(ref warning) = self.key_change_warning {
-            ui.add_space(2.0);
-            ui.colored_label(
-                egui::Color32::from_rgb(255, 80, 80),
-                egui::RichText::new(format!("!! {warning}")).strong(),
-            );
-            ui.add_space(2.0);
-        }
 
         // ── Info row ──
         ui.horizontal(|ui| {

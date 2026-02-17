@@ -11,6 +11,7 @@ mod gui;
 mod identity;
 mod screen;
 mod sysaudio;
+mod sysfirewall;
 mod voice;
 mod ui;
 

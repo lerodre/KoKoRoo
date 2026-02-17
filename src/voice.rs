@@ -55,6 +55,14 @@ pub fn call(peer_ip: &str, peer_port: &str, local_port: &str) {
 
     let peer_addr = format!("[{peer_ip}]:{peer_port}");
 
+    if let Ok(port_num) = local_port.parse::<u16>() {
+        match crate::sysfirewall::ensure_udp_port_open(port_num) {
+            Ok(true) => log_fmt!("[firewall] Added rule for UDP port {}", port_num),
+            Ok(false) => log_fmt!("[firewall] Rule already exists for UDP port {}", port_num),
+            Err(e) => log_fmt!("[firewall] WARNING: {}", e),
+        }
+    }
+
     let result = start_engine(
         &input_device, &output_device,
         &peer_addr, local_port,
@@ -64,7 +72,7 @@ pub fn call(peer_ip: &str, peer_port: &str, local_port: &str) {
     );
 
     match result {
-        Ok(engine) => {
+        Ok(mut engine) => {
             let peer_display = if engine.peer_nickname.is_empty() {
                 engine.peer_fingerprint.clone()
             } else {
@@ -74,6 +82,8 @@ pub fn call(peer_ip: &str, peer_port: &str, local_port: &str) {
                 println!("\x1b[1;31m{warning}\x1b[0m");
                 println!();
             }
+            // CLI mode: auto-confirm pending contact
+            engine.confirm_contact();
             println!("Verification code: {}", engine.verification_code);
             println!("Peer:              {peer_display}");
             println!();
@@ -107,6 +117,8 @@ pub struct VoiceEngine {
     pub contact_id: String,
     /// TOFU warning if peer's key changed or nickname conflict detected
     pub key_change_warning: Option<String>,
+    /// Contact pending user confirmation (when key_change_warning is set)
+    pub pending_contact: Option<identity::Contact>,
     /// Send chat text to the network thread
     pub chat_tx: Option<mpsc::Sender<String>>,
     /// Receive chat text from the network thread
@@ -188,6 +200,13 @@ impl VoiceEngine {
             crate::screen::capture_loop(socket, session, peer_addr, active, running, quality);
             log_fmt!("[voice] screen capture thread exited");
         }));
+    }
+
+    /// Confirm and save the pending contact (used after user accepts a TOFU warning).
+    pub fn confirm_contact(&mut self) {
+        if let Some(contact) = self.pending_contact.take() {
+            identity::save_contact(&contact);
+        }
     }
 
     /// Stop sharing our screen.
@@ -457,14 +476,21 @@ pub fn start_engine(
         last_port: peer_port_str,
         call_count: existing.as_ref().map(|c| c.call_count).unwrap_or(0) + 1,
     };
-    identity::save_contact(&contact);
+
+    // If there's a TOFU warning, defer saving until user confirms
+    let pending_contact = if key_change_warning.is_some() {
+        Some(contact.clone())
+    } else {
+        identity::save_contact(&contact);
+        None
+    };
 
     if let Some(ref ex) = existing {
         println!("Known contact: {} (call #{})", contact.nickname, contact.call_count);
         if ex.call_count > 5 && key_change_warning.is_none() {
             println!("Trusted contact ({} previous calls)", ex.call_count);
         }
-    } else {
+    } else if key_change_warning.is_none() {
         println!("New contact saved!");
     }
 
@@ -784,6 +810,7 @@ pub fn start_engine(
         peer_nickname,
         contact_id,
         key_change_warning,
+        pending_contact,
         chat_tx: Some(outgoing_tx),
         chat_rx: Some(incoming_rx),
         screen_viewer,
