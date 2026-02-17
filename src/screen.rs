@@ -73,9 +73,10 @@ impl ScreenQuality {
 }
 
 /// Command from GUI to engine thread to start/stop screen sharing.
+/// `audio_device`: None = no system audio, Some("") = default device, Some(name) = specific device.
 #[derive(Debug, Clone)]
 pub enum ScreenCommand {
-    Start { quality: ScreenQuality, share_audio: bool },
+    Start { quality: ScreenQuality, audio_device: Option<String> },
     Stop,
 }
 

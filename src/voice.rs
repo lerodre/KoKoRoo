@@ -147,22 +147,24 @@ impl Drop for VoiceEngine {
 
 impl VoiceEngine {
     /// Start sharing our screen to the peer at the given quality.
-    /// If `share_audio` is true, also capture system/desktop audio and mix it into the voice stream.
-    pub fn start_screen_share(&mut self, quality: ScreenQuality, share_audio: bool) {
+    /// `audio_device`: None = no system audio, Some("") = default device, Some(name) = specific device.
+    pub fn start_screen_share(&mut self, quality: ScreenQuality, audio_device: Option<String>) {
         if self.screen_active.load(Ordering::Relaxed) {
             log_fmt!("[voice] start_screen_share: already active, ignoring");
             return;
         }
-        log_fmt!("[voice] start_screen_share: launching capture thread, peer={}, quality={:?}, audio={}", self.peer_addr, quality, share_audio);
+        log_fmt!("[voice] start_screen_share: launching capture thread, peer={}, quality={:?}, audio_device={:?}", self.peer_addr, quality, audio_device);
         self.screen_active.store(true, Ordering::Relaxed);
 
         // System audio capture
-        if share_audio {
+        if let Some(ref device_name) = audio_device {
             if let Some(producer) = self.sys_audio_producer.lock().unwrap().take() {
                 self.sys_audio_active.store(true, Ordering::Relaxed);
+                let dev = if device_name.is_empty() { None } else { Some(device_name.as_str()) };
                 self.sys_audio_stream = crate::sysaudio::start_system_audio_capture(
                     producer,
                     self.sys_audio_active.clone(),
+                    dev,
                 );
                 if self.sys_audio_stream.is_none() {
                     log_fmt!("[voice] WARNING: system audio capture failed to start");

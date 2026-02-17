@@ -3,6 +3,7 @@ use eframe::egui;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
+use std::time::Instant;
 
 use crate::chat::ChatHistory;
 use crate::identity::{self, Contact, Identity, Settings};
@@ -156,7 +157,12 @@ pub struct HostelApp {
     screen_active: Option<Arc<AtomicBool>>,
     screen_cmd_tx: Option<mpsc::Sender<ScreenCommand>>,
     selected_screen_quality: usize,
-    share_audio: bool,
+    show_screen_popup: bool,
+    selected_audio_device: usize, // 0=None, 1=Default, 2+=specific loopback device
+    loopback_devices: Vec<String>,
+    video_fullscreen: bool,
+    last_mouse_move: Instant,
+    last_frame_time: Option<Instant>,
     is_fullscreen: bool,
 
     // Async connection result
@@ -221,7 +227,12 @@ impl HostelApp {
             screen_active: None,
             screen_cmd_tx: None,
             selected_screen_quality: 0,
-            share_audio: false,
+            show_screen_popup: false,
+            selected_audio_device: 0,
+            loopback_devices: Vec::new(),
+            video_fullscreen: false,
+            last_mouse_move: Instant::now(),
+            last_frame_time: None,
             is_fullscreen: false,
             connect_result: Arc::new(std::sync::Mutex::new(None)),
         }
@@ -305,7 +316,7 @@ impl HostelApp {
                         while running.load(Ordering::Relaxed) {
                             while let Ok(cmd) = screen_cmd_rx.try_recv() {
                                 match cmd {
-                                    ScreenCommand::Start { quality, share_audio } => engine.start_screen_share(quality, share_audio),
+                                    ScreenCommand::Start { quality, audio_device } => engine.start_screen_share(quality, audio_device),
                                     ScreenCommand::Stop => engine.stop_screen_share(),
                                 }
                             }
@@ -363,11 +374,15 @@ impl HostelApp {
         self.chat_input.clear();
         self.chat_history = None;
         self.screen_sharing = false;
-        self.share_audio = false;
+        self.show_screen_popup = false;
+        self.selected_audio_device = 0;
+        self.loopback_devices.clear();
         self.screen_texture = None;
         self.screen_viewer = None;
         self.screen_active = None;
         self.screen_cmd_tx = None;
+        self.video_fullscreen = false;
+        self.last_frame_time = None;
         self.is_fullscreen = false;
         *self.connect_result.lock().unwrap() = None;
         // Reload contacts (the call may have created/updated one)
@@ -431,11 +446,32 @@ impl eframe::App for HostelApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
                 return;
             }
-            // ESC exits fullscreen
-            if self.is_fullscreen && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-                self.is_fullscreen = false;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+            // ESC exits video fullscreen (or app fullscreen)
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                if self.video_fullscreen {
+                    self.video_fullscreen = false;
+                    self.is_fullscreen = false;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                } else if self.is_fullscreen {
+                    self.is_fullscreen = false;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                }
             }
+
+            // Frozen frame detection: if no new frame for >2s, clear texture
+            if let Some(t) = self.last_frame_time {
+                if t.elapsed().as_secs_f32() > 2.0 {
+                    self.screen_texture = None;
+                    self.last_frame_time = None;
+                }
+            }
+
+            // Track mouse movement for fullscreen overlay auto-hide
+            let mouse_delta = ctx.input(|i| i.pointer.delta());
+            if mouse_delta != egui::Vec2::ZERO {
+                self.last_mouse_move = Instant::now();
+            }
+
             // Repaint faster when screen sharing is active (for smooth video)
             let repaint_ms = if self.screen_texture.is_some() { 33 } else { 200 };
             ctx.request_repaint_after(std::time::Duration::from_millis(repaint_ms));
@@ -447,13 +483,21 @@ impl eframe::App for HostelApp {
         style.spacing.button_padding = egui::vec2(14.0, 6.0);
         ctx.set_style(style);
 
+        // Video-only fullscreen: skip all UI except video + overlay
+        if self.video_fullscreen && matches!(self.screen, Screen::InCall) {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                self.draw_fullscreen_video(ui);
+            });
+            return;
+        }
+
         // Side panel for chat when video is active during a call
         let video_active = matches!(self.screen, Screen::InCall) && self.screen_texture.is_some();
         if video_active {
             egui::SidePanel::right("chat_panel")
                 .default_width(280.0)
                 .resizable(true)
-                .min_width(200.0)
+                .min_width(160.0)
                 .max_width(400.0)
                 .show(ctx, |ui| {
                     self.draw_chat(ui);
@@ -695,21 +739,9 @@ impl HostelApp {
 
         ui.add_space(4.0);
 
-        // ── Controls row: quality + mic + screen share + fullscreen + hang up ──
+        // ── Controls row: Mic + Screen + Hang Up ... (right) Fullscreen ──
         ui.horizontal(|ui| {
-            // Quality selector (disabled while sharing)
-            ui.add_enabled_ui(!self.screen_sharing, |ui| {
-                let current_label = ScreenQuality::ALL[self.selected_screen_quality].label();
-                egui::ComboBox::from_id_salt("screen_quality")
-                    .width(120.0)
-                    .selected_text(current_label)
-                    .show_ui(ui, |ui| {
-                        for (i, q) in ScreenQuality::ALL.iter().enumerate() {
-                            ui.selectable_value(&mut self.selected_screen_quality, i, q.label());
-                        }
-                    });
-            });
-
+            // Mic toggle
             let (btn_text, btn_color) = if mic_on {
                 ("Mic: ON", egui::Color32::from_rgb(40, 140, 60))
             } else {
@@ -722,12 +754,7 @@ impl HostelApp {
                 self.mic_active.store(!mic_on, Ordering::Relaxed);
             }
 
-            // System audio toggle (only changeable when not currently sharing)
-            ui.add_enabled_ui(!self.screen_sharing, |ui| {
-                ui.checkbox(&mut self.share_audio, "Audio");
-            });
-
-            // Screen share toggle
+            // Screen share toggle: OFF → open popup, ON → stop sharing
             let (scr_text, scr_color) = if self.screen_sharing {
                 ("Screen: ON", egui::Color32::from_rgb(40, 100, 180))
             } else {
@@ -737,44 +764,116 @@ impl HostelApp {
                 egui::RichText::new(scr_text).size(16.0).color(egui::Color32::WHITE)
             ).min_size(egui::vec2(130.0, 35.0)).fill(scr_color);
             if ui.add(scr_btn).clicked() {
-                self.screen_sharing = !self.screen_sharing;
-                if let Some(tx) = &self.screen_cmd_tx {
-                    if self.screen_sharing {
-                        let quality = ScreenQuality::ALL[self.selected_screen_quality];
-                        let _ = tx.send(ScreenCommand::Start { quality, share_audio: self.share_audio });
-                    } else {
+                if self.screen_sharing {
+                    // Stop sharing
+                    self.screen_sharing = false;
+                    if let Some(tx) = &self.screen_cmd_tx {
                         let _ = tx.send(ScreenCommand::Stop);
                     }
+                } else {
+                    // Open popup to configure before sharing
+                    if self.loopback_devices.is_empty() {
+                        self.loopback_devices = crate::sysaudio::list_loopback_devices();
+                    }
+                    self.show_screen_popup = true;
                 }
             }
 
-            // Fullscreen toggle (only shown when receiving video)
-            if has_video {
-                let fs_text = if self.is_fullscreen { "Exit Fullscreen" } else { "Fullscreen" };
-                let fs_btn = egui::Button::new(
-                    egui::RichText::new(fs_text).size(14.0).color(egui::Color32::WHITE)
-                ).min_size(egui::vec2(110.0, 35.0)).fill(egui::Color32::from_rgb(80, 80, 120));
-                if ui.add(fs_btn).clicked() {
-                    self.is_fullscreen = !self.is_fullscreen;
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.is_fullscreen));
-                }
-            }
-
+            // Hang Up
             let hangup_btn = egui::Button::new(
                 egui::RichText::new("Hang Up").size(16.0).color(egui::Color32::WHITE)
             ).min_size(egui::vec2(100.0, 35.0)).fill(egui::Color32::from_rgb(180, 40, 40));
             if ui.add(hangup_btn).clicked() {
-                if self.is_fullscreen {
+                if self.is_fullscreen || self.video_fullscreen {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
                     self.is_fullscreen = false;
+                    self.video_fullscreen = false;
                 }
                 self.hang_up();
                 return;
             }
+
+            // Right-aligned fullscreen button (only when receiving video)
+            if has_video {
+                // Push to the right
+                let remaining = ui.available_width() - 120.0;
+                if remaining > 0.0 {
+                    ui.add_space(remaining);
+                }
+                let fs_btn = egui::Button::new(
+                    egui::RichText::new("Fullscreen").size(14.0).color(egui::Color32::WHITE)
+                ).min_size(egui::vec2(110.0, 35.0)).fill(egui::Color32::from_rgb(80, 80, 120));
+                if ui.add(fs_btn).clicked() {
+                    self.video_fullscreen = true;
+                    self.is_fullscreen = true;
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+                }
+            }
         });
 
+        // ── Screen share config popup ──
+        if self.show_screen_popup {
+            let mut open = true;
+            egui::Window::new("Screen Share")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .open(&mut open)
+                .show(ui.ctx(), |ui| {
+                    ui.label("Quality:");
+                    let current_label = ScreenQuality::ALL[self.selected_screen_quality].label();
+                    egui::ComboBox::from_id_salt("popup_quality")
+                        .width(160.0)
+                        .selected_text(current_label)
+                        .show_ui(ui, |ui| {
+                            for (i, q) in ScreenQuality::ALL.iter().enumerate() {
+                                ui.selectable_value(&mut self.selected_screen_quality, i, q.label());
+                            }
+                        });
+
+                    ui.add_space(4.0);
+                    ui.label("System Audio:");
+                    let audio_label = match self.selected_audio_device {
+                        0 => "None".to_string(),
+                        1 => "Default".to_string(),
+                        n => self.loopback_devices.get(n - 2)
+                            .cloned().unwrap_or_else(|| "Unknown".to_string()),
+                    };
+                    egui::ComboBox::from_id_salt("popup_audio")
+                        .width(240.0)
+                        .selected_text(&audio_label)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.selected_audio_device, 0, "None");
+                            ui.selectable_value(&mut self.selected_audio_device, 1, "Default");
+                            for (i, name) in self.loopback_devices.iter().enumerate() {
+                                ui.selectable_value(&mut self.selected_audio_device, i + 2, name.as_str());
+                            }
+                        });
+
+                    ui.add_space(8.0);
+                    let share_btn = egui::Button::new(
+                        egui::RichText::new("Share Screen").size(16.0).color(egui::Color32::WHITE)
+                    ).min_size(egui::vec2(160.0, 35.0)).fill(egui::Color32::from_rgb(40, 100, 180));
+                    if ui.add(share_btn).clicked() {
+                        let quality = ScreenQuality::ALL[self.selected_screen_quality];
+                        let audio_device = match self.selected_audio_device {
+                            0 => None,
+                            1 => Some(String::new()), // empty = default
+                            n => self.loopback_devices.get(n - 2).cloned(),
+                        };
+                        if let Some(tx) = &self.screen_cmd_tx {
+                            let _ = tx.send(ScreenCommand::Start { quality, audio_device });
+                        }
+                        self.screen_sharing = true;
+                        self.show_screen_popup = false;
+                    }
+                });
+            if !open {
+                self.show_screen_popup = false;
+            }
+        }
+
         // ── Screen viewer (incoming screen from peer) ──
-        // Read decoded frame dimensions from the viewer
         let mut video_w: u32 = 1280;
         let mut video_h: u32 = 720;
         if let Some(viewer) = &self.screen_viewer {
@@ -782,6 +881,7 @@ impl HostelApp {
                 video_w = v.frame_width;
                 video_h = v.frame_height;
                 if let Some(rgba_frame) = v.take_frame() {
+                    self.last_frame_time = Some(Instant::now());
                     let image = egui::ColorImage::from_rgba_unmultiplied(
                         [video_w as usize, video_h as usize],
                         &rgba_frame,
@@ -794,10 +894,8 @@ impl HostelApp {
         }
         if let Some(tex) = &self.screen_texture {
             ui.separator();
-            // Aspect-fit: fit video to both available width AND height
             let available_width = ui.available_width();
             let available_height = if has_video {
-                // When video is active, chat is in side panel — use all remaining height
                 ui.available_height()
             } else {
                 ui.available_height() * 0.6
@@ -814,7 +912,6 @@ impl HostelApp {
                     (w_from_height, h_from_height)
                 }
             };
-            // Center video horizontally
             let pad_x = (available_width - display_w).max(0.0) / 2.0;
             ui.horizontal(|ui| {
                 ui.add_space(pad_x);
@@ -829,6 +926,95 @@ impl HostelApp {
         if !has_video {
             ui.separator();
             self.draw_chat(ui);
+        }
+    }
+
+    /// Render video-only fullscreen with auto-hiding overlay.
+    fn draw_fullscreen_video(&mut self, ui: &mut egui::Ui) {
+        // Update video from screen viewer
+        let mut video_w: u32 = 1280;
+        let mut video_h: u32 = 720;
+        if let Some(viewer) = &self.screen_viewer {
+            if let Ok(mut v) = viewer.lock() {
+                video_w = v.frame_width;
+                video_h = v.frame_height;
+                if let Some(rgba_frame) = v.take_frame() {
+                    self.last_frame_time = Some(Instant::now());
+                    let image = egui::ColorImage::from_rgba_unmultiplied(
+                        [video_w as usize, video_h as usize],
+                        &rgba_frame,
+                    );
+                    self.screen_texture = Some(
+                        ui.ctx().load_texture("screen_share", image, Default::default())
+                    );
+                }
+            }
+        }
+
+        // Render video filling entire area
+        if let Some(tex) = &self.screen_texture {
+            let available_width = ui.available_width();
+            let available_height = ui.available_height();
+            let aspect = video_w as f32 / video_h as f32;
+            let (display_w, display_h) = {
+                let w_from_width = available_width;
+                let h_from_width = available_width / aspect;
+                let h_from_height = available_height;
+                let w_from_height = available_height * aspect;
+                if h_from_width <= available_height {
+                    (w_from_width, h_from_width)
+                } else {
+                    (w_from_height, h_from_height)
+                }
+            };
+            let pad_x = (available_width - display_w).max(0.0) / 2.0;
+            let pad_y = (available_height - display_h).max(0.0) / 2.0;
+            ui.add_space(pad_y);
+            ui.horizontal(|ui| {
+                ui.add_space(pad_x);
+                ui.image(egui::load::SizedTexture::new(
+                    tex.id(),
+                    egui::vec2(display_w, display_h),
+                ));
+            });
+        } else {
+            // No video — exit fullscreen
+            self.video_fullscreen = false;
+            self.is_fullscreen = false;
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+            return;
+        }
+
+        // Semi-transparent overlay when mouse moved within last 3 seconds
+        let show_overlay = self.last_mouse_move.elapsed().as_secs_f32() < 3.0;
+        if show_overlay {
+            egui::Area::new(egui::Id::new("fs_overlay"))
+                .fixed_pos(egui::pos2(0.0, 0.0))
+                .order(egui::Order::Foreground)
+                .show(ui.ctx(), |ui| {
+                    let screen_width = ui.ctx().screen_rect().width();
+                    let frame = egui::Frame::none()
+                        .fill(egui::Color32::from_rgba_premultiplied(0, 0, 0, 160))
+                        .inner_margin(egui::Margin::same(8.0));
+                    frame.show(ui, |ui: &mut egui::Ui| {
+                        ui.set_min_width(screen_width);
+                        ui.horizontal(|ui: &mut egui::Ui| {
+                            ui.colored_label(
+                                egui::Color32::WHITE,
+                                egui::RichText::new("hostelD").size(16.0),
+                            );
+                            ui.separator();
+                            let exit_btn = egui::Button::new(
+                                egui::RichText::new("Exit Fullscreen").size(14.0).color(egui::Color32::WHITE)
+                            ).fill(egui::Color32::from_rgb(80, 80, 120));
+                            if ui.add(exit_btn).clicked() {
+                                self.video_fullscreen = false;
+                                self.is_fullscreen = false;
+                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                            }
+                        });
+                    });
+                });
         }
     }
 

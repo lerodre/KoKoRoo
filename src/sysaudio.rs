@@ -4,41 +4,93 @@ use ringbuf::HeapProd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+/// List available loopback/monitor audio devices.
+///
+/// - **Windows**: Returns output device names (each can be used for WASAPI loopback).
+/// - **Linux**: Returns input device names containing "Monitor".
+pub fn list_loopback_devices() -> Vec<String> {
+    let host = cpal::default_host();
+    let mut names = Vec::new();
+
+    #[cfg(windows)]
+    {
+        if let Ok(devices) = host.output_devices() {
+            for dev in devices {
+                if let Ok(name) = dev.name() {
+                    names.push(name);
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(devices) = host.input_devices() {
+            for dev in devices {
+                if let Ok(name) = dev.name() {
+                    if name.to_lowercase().contains("monitor") {
+                        names.push(name);
+                    }
+                }
+            }
+        }
+    }
+
+    names
+}
+
 /// Start capturing system/desktop audio into a ring buffer.
 ///
 /// - **Windows**: Uses WASAPI loopback (`output_device.build_input_stream()`).
 /// - **Linux**: Finds a PipeWire/PulseAudio "Monitor" input device, or falls back
 ///   to `default_output_device().build_input_stream()`.
 ///
+/// If `device_name` is Some, find that specific device instead of using default.
+/// An empty string means use default.
+///
 /// Returns `Some(Stream)` on success — the stream captures while alive and stops on drop.
 pub fn start_system_audio_capture(
     producer: HeapProd<f32>,
     active: Arc<AtomicBool>,
+    device_name: Option<&str>,
 ) -> Option<cpal::Stream> {
     #[cfg(windows)]
     {
-        capture_wasapi_loopback(producer, active)
+        capture_wasapi_loopback(producer, active, device_name)
     }
     #[cfg(target_os = "linux")]
     {
-        capture_linux_monitor(producer, active)
+        capture_linux_monitor(producer, active, device_name)
     }
     #[cfg(not(any(windows, target_os = "linux")))]
     {
-        let _ = (producer, active);
+        let _ = (producer, active, device_name);
         log_fmt!("[sysaudio] system audio capture not supported on this platform");
         None
     }
 }
 
-/// Windows: WASAPI loopback — call `build_input_stream` on the default output device.
+/// Windows: WASAPI loopback — call `build_input_stream` on an output device.
+/// If `device_name` is Some and non-empty, find that specific device; otherwise use default.
 #[cfg(windows)]
 fn capture_wasapi_loopback(
     producer: HeapProd<f32>,
     active: Arc<AtomicBool>,
+    device_name: Option<&str>,
 ) -> Option<cpal::Stream> {
     let host = cpal::default_host();
-    let device = host.default_output_device()?;
+    let device = match device_name {
+        Some(name) if !name.is_empty() => {
+            log_fmt!("[sysaudio] looking for output device: {}", name);
+            host.output_devices().ok()?
+                .find(|d| d.name().map(|n| n == name).unwrap_or(false))
+                .or_else(|| {
+                    log_fmt!("[sysaudio] device '{}' not found, falling back to default", name);
+                    host.default_output_device()
+                })?
+        }
+        _ => host.default_output_device()?,
+    };
     let name = device.name().unwrap_or_default();
     log_fmt!("[sysaudio] WASAPI loopback on: {}", name);
 
@@ -58,10 +110,12 @@ fn capture_wasapi_loopback(
 
 /// Linux: find a "Monitor" input device (PipeWire/PulseAudio loopback), or fall back
 /// to `default_output_device().build_input_stream()`.
+/// If `device_name` is Some and non-empty, find that specific Monitor device.
 #[cfg(target_os = "linux")]
 fn capture_linux_monitor(
     producer: HeapProd<f32>,
     active: Arc<AtomicBool>,
+    device_name: Option<&str>,
 ) -> Option<cpal::Stream> {
     let host = cpal::default_host();
 
@@ -69,6 +123,12 @@ fn capture_linux_monitor(
     if let Ok(devices) = host.input_devices() {
         for dev in devices {
             let name = dev.name().unwrap_or_default();
+            // If a specific device was requested, only match that one
+            if let Some(req) = device_name {
+                if !req.is_empty() && name != req {
+                    continue;
+                }
+            }
             if name.to_lowercase().contains("monitor") {
                 log_fmt!("[sysaudio] found monitor device: {}", name);
                 if let Ok(config) = dev.default_input_config() {
