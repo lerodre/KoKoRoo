@@ -23,6 +23,8 @@
 - [x] Full pubkey hex as storage key (collision-proof)
 - [x] Migration from old fingerprint-based contact files
 - [x] IPv6 address copy button (share your IP easily)
+- [x] Noise suppression (RNNoise via nnnoiseless, pure Rust)
+- [x] Windows stereo device support (stereo↔mono conversion at stream boundary)
 
 ---
 

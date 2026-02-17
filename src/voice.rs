@@ -10,6 +10,8 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use nnnoiseless::DenoiseState;
+
 use crate::chat;
 use crate::crypto::{self, Session, PKT_CHAT, PKT_HANGUP, PKT_HELLO, PKT_IDENTITY, PKT_VOICE};
 use crate::firewall::{Action, Firewall};
@@ -17,6 +19,10 @@ use crate::identity::{self, Identity};
 
 /// Opus frame size: 960 samples @ 48kHz = 20ms.
 const FRAME_SIZE: usize = 960;
+
+/// RNNoise frame size: 480 samples @ 48kHz = 10ms.
+/// Our Opus frame (960) = exactly 2 RNNoise frames.
+const DENOISE_FRAME: usize = 480;
 
 /// Max encoded Opus packet size.
 const MAX_OPUS_PACKET: usize = 512;
@@ -387,6 +393,11 @@ pub fn start_engine(
         ).expect("Failed to create Opus encoder");
         encoder.set_bitrate(audiopus::Bitrate::BitsPerSecond(64000)).unwrap();
 
+        // RNNoise denoiser — processes 480-sample (10ms) frames at 48kHz
+        let mut denoiser = DenoiseState::new();
+        let mut denoise_in = [0f32; DENOISE_FRAME];
+        let mut denoise_out = [0f32; DENOISE_FRAME];
+
         let mut pcm_frame = vec![0f32; FRAME_SIZE];
         let mut opus_buf = vec![0u8; MAX_OPUS_PACKET];
 
@@ -427,6 +438,19 @@ pub fn start_engine(
             }
 
             if !running_s.load(Ordering::Relaxed) { break; }
+
+            // ── Noise suppression: process 2x 480-sample RNNoise frames ──
+            // RNNoise expects samples in [-32768, 32767] range
+            for half in 0..2 {
+                let offset = half * DENOISE_FRAME;
+                for i in 0..DENOISE_FRAME {
+                    denoise_in[i] = pcm_frame[offset + i] * 32768.0;
+                }
+                denoiser.process_frame(&mut denoise_out, &denoise_in);
+                for i in 0..DENOISE_FRAME {
+                    pcm_frame[offset + i] = denoise_out[i] / 32768.0;
+                }
+            }
 
             // Encode + encrypt + send voice
             let encoded_len = match encoder.encode_float(&pcm_frame, &mut opus_buf) {

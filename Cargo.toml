@@ -15,3 +15,4 @@ rand = "0.8"               # cryptographically secure random
 eframe = "0.29"            # egui framework — simple flat cross-platform GUI
 serde = { version = "1", features = ["derive"] }  # serialization for contacts/chat
 serde_json = "1"           # JSON for contacts storage
+nnnoiseless = "0.5"        # RNNoise-based noise suppression (pure Rust)

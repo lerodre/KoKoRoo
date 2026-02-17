@@ -133,7 +133,16 @@ After session is established:
 - **Codec**: Opus at 64 kbps (VoIP optimized)
 - **Sample rate**: 48 kHz mono
 - **Frame size**: 960 samples = 20ms
+- **Noise suppression**: RNNoise via `nnnoiseless` (pure Rust). Each 960-sample Opus frame is split into 2x 480-sample RNNoise frames, denoised, then encoded. Runs in the sender thread before Opus encoding.
 - **Ring buffers**: Lock-free single-producer single-consumer for mic → encoder and decoder → speakers
+- **Stereo support**: Devices that only support stereo (e.g. Voicemeeter on Windows) are handled by converting stereo↔mono at the stream boundary. Opus always works in mono internally.
+
+### Audio Pipeline
+
+```
+Mic → [stereo→mono if needed] → ring buffer → [RNNoise denoise] → Opus encode → encrypt → UDP
+UDP → decrypt → Opus decode → ring buffer → [mono→stereo if needed] → Speakers
+```
 
 ---
 
