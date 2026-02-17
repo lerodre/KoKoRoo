@@ -10,6 +10,7 @@ mod firewall;
 mod gui;
 mod identity;
 mod screen;
+mod sysaudio;
 mod voice;
 mod ui;
 

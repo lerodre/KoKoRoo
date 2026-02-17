@@ -21,31 +21,36 @@ pub enum ScreenQuality {
     Hd720p30,
     Hd1080p30,
     Hd1080p30Premium,
+    Hd1080p60Premium,
 }
 
 impl ScreenQuality {
-    pub const ALL: [ScreenQuality; 3] = [
+    pub const ALL: [ScreenQuality; 4] = [
         ScreenQuality::Hd720p30,
         ScreenQuality::Hd1080p30,
         ScreenQuality::Hd1080p30Premium,
+        ScreenQuality::Hd1080p60Premium,
     ];
 
     pub fn width(self) -> u32 {
         match self {
             ScreenQuality::Hd720p30 => 1280,
-            ScreenQuality::Hd1080p30 | ScreenQuality::Hd1080p30Premium => 1920,
+            _ => 1920,
         }
     }
 
     pub fn height(self) -> u32 {
         match self {
             ScreenQuality::Hd720p30 => 720,
-            ScreenQuality::Hd1080p30 | ScreenQuality::Hd1080p30Premium => 1080,
+            _ => 1080,
         }
     }
 
     pub fn fps(self) -> u32 {
-        30
+        match self {
+            ScreenQuality::Hd1080p60Premium => 60,
+            _ => 30,
+        }
     }
 
     pub fn bitrate_kbps(self) -> u32 {
@@ -53,6 +58,7 @@ impl ScreenQuality {
             ScreenQuality::Hd720p30 => 2000,
             ScreenQuality::Hd1080p30 => 4000,
             ScreenQuality::Hd1080p30Premium => 6000,
+            ScreenQuality::Hd1080p60Premium => 8000,
         }
     }
 
@@ -61,6 +67,7 @@ impl ScreenQuality {
             ScreenQuality::Hd720p30 => "720p 2Mbps",
             ScreenQuality::Hd1080p30 => "1080p 4Mbps",
             ScreenQuality::Hd1080p30Premium => "1080p 6Mbps",
+            ScreenQuality::Hd1080p60Premium => "1080p60 8Mbps",
         }
     }
 }
@@ -68,7 +75,7 @@ impl ScreenQuality {
 /// Command from GUI to engine thread to start/stop screen sharing.
 #[derive(Debug, Clone)]
 pub enum ScreenCommand {
-    Start(ScreenQuality),
+    Start { quality: ScreenQuality, share_audio: bool },
     Stop,
 }
 

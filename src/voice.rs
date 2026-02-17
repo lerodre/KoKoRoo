@@ -3,7 +3,7 @@ use audiopus::packet::Packet;
 use audiopus::{Application, Channels, MutSignals, SampleRate};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ringbuf::traits::{Consumer, Producer, Split};
-use ringbuf::HeapRb;
+use ringbuf::{HeapProd, HeapRb};
 use std::net::UdpSocket;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -117,6 +117,10 @@ pub struct VoiceEngine {
     pub screen_active: Arc<AtomicBool>,
     /// Screen capture thread handle
     screen_thread: Option<thread::JoinHandle<()>>,
+    /// System audio capture: active flag, stream handle, and producer for ring buffer
+    sys_audio_active: Arc<AtomicBool>,
+    sys_audio_stream: Option<cpal::Stream>,
+    sys_audio_producer: Arc<Mutex<Option<HeapProd<f32>>>>,
     /// Cloned session for screen capture thread to encrypt independently
     session: Arc<Mutex<Session>>,
     /// Socket clone for screen sharing
@@ -131,6 +135,8 @@ pub struct VoiceEngine {
 
 impl Drop for VoiceEngine {
     fn drop(&mut self) {
+        self.sys_audio_active.store(false, Ordering::Relaxed);
+        self.sys_audio_stream = None;
         self.screen_active.store(false, Ordering::Relaxed);
         if let Some(t) = self.screen_thread.take() {
             let _ = t.join();
@@ -141,13 +147,31 @@ impl Drop for VoiceEngine {
 
 impl VoiceEngine {
     /// Start sharing our screen to the peer at the given quality.
-    pub fn start_screen_share(&mut self, quality: ScreenQuality) {
+    /// If `share_audio` is true, also capture system/desktop audio and mix it into the voice stream.
+    pub fn start_screen_share(&mut self, quality: ScreenQuality, share_audio: bool) {
         if self.screen_active.load(Ordering::Relaxed) {
             log_fmt!("[voice] start_screen_share: already active, ignoring");
             return;
         }
-        log_fmt!("[voice] start_screen_share: launching capture thread, peer={}, quality={:?}", self.peer_addr, quality);
+        log_fmt!("[voice] start_screen_share: launching capture thread, peer={}, quality={:?}, audio={}", self.peer_addr, quality, share_audio);
         self.screen_active.store(true, Ordering::Relaxed);
+
+        // System audio capture
+        if share_audio {
+            if let Some(producer) = self.sys_audio_producer.lock().unwrap().take() {
+                self.sys_audio_active.store(true, Ordering::Relaxed);
+                self.sys_audio_stream = crate::sysaudio::start_system_audio_capture(
+                    producer,
+                    self.sys_audio_active.clone(),
+                );
+                if self.sys_audio_stream.is_none() {
+                    log_fmt!("[voice] WARNING: system audio capture failed to start");
+                    self.sys_audio_active.store(false, Ordering::Relaxed);
+                }
+            } else {
+                log_fmt!("[voice] WARNING: sys_audio_producer already taken");
+            }
+        }
 
         let socket = self.send_socket.try_clone().unwrap();
         let session = {
@@ -168,6 +192,9 @@ impl VoiceEngine {
     pub fn stop_screen_share(&mut self) {
         log_fmt!("[voice] stop_screen_share");
         self.screen_active.store(false, Ordering::Relaxed);
+        // Stop system audio capture
+        self.sys_audio_active.store(false, Ordering::Relaxed);
+        self.sys_audio_stream = None;
         if let Some(t) = self.screen_thread.take() {
             let _ = t.join();
         }
@@ -448,6 +475,12 @@ pub fn start_engine(
     let spk_ring = HeapRb::<f32>::new(48000);
     let (mut spk_producer, mut spk_consumer) = spk_ring.split();
 
+    // System audio ring buffer (for desktop audio sharing)
+    let sys_ring = HeapRb::<f32>::new(48000);
+    let (sys_producer, mut sys_consumer) = sys_ring.split();
+    let sys_audio_active = Arc::new(AtomicBool::new(false));
+    let sys_audio_producer = Arc::new(Mutex::new(Some(sys_producer)));
+
     let send_socket = socket.try_clone().unwrap();
     let screen_socket = socket.try_clone().unwrap();
     let peer_addr_owned = peer_addr.to_string();
@@ -460,6 +493,7 @@ pub fn start_engine(
     let mic_active_s = mic_active.clone();
     let session_s = session.clone();
     let local_hangup_s = local_hangup.clone();
+    let sys_audio_active_s = sys_audio_active.clone();
 
     let sender = thread::spawn(move || {
         let mut encoder = Encoder::new(
@@ -523,6 +557,15 @@ pub fn start_engine(
                 denoiser.process_frame(&mut denoise_out, &denoise_in);
                 for i in 0..DENOISE_FRAME {
                     pcm_frame[offset + i] = denoise_out[i] / 32768.0;
+                }
+            }
+
+            // ── Mix system audio (after denoise so RNNoise only cleans mic) ──
+            if sys_audio_active_s.load(Ordering::Relaxed) {
+                for sample in pcm_frame.iter_mut() {
+                    if let Some(s) = sys_consumer.try_pop() {
+                        *sample = (*sample + s).clamp(-1.0, 1.0);
+                    }
                 }
             }
 
@@ -740,6 +783,9 @@ pub fn start_engine(
         screen_viewer,
         screen_active,
         screen_thread: None,
+        sys_audio_active,
+        sys_audio_stream: None,
+        sys_audio_producer,
         session,
         send_socket: screen_socket,
         peer_addr: peer_addr.to_string(),

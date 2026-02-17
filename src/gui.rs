@@ -156,6 +156,7 @@ pub struct HostelApp {
     screen_active: Option<Arc<AtomicBool>>,
     screen_cmd_tx: Option<mpsc::Sender<ScreenCommand>>,
     selected_screen_quality: usize,
+    share_audio: bool,
     is_fullscreen: bool,
 
     // Async connection result
@@ -220,6 +221,7 @@ impl HostelApp {
             screen_active: None,
             screen_cmd_tx: None,
             selected_screen_quality: 0,
+            share_audio: false,
             is_fullscreen: false,
             connect_result: Arc::new(std::sync::Mutex::new(None)),
         }
@@ -303,7 +305,7 @@ impl HostelApp {
                         while running.load(Ordering::Relaxed) {
                             while let Ok(cmd) = screen_cmd_rx.try_recv() {
                                 match cmd {
-                                    ScreenCommand::Start(quality) => engine.start_screen_share(quality),
+                                    ScreenCommand::Start { quality, share_audio } => engine.start_screen_share(quality, share_audio),
                                     ScreenCommand::Stop => engine.stop_screen_share(),
                                 }
                             }
@@ -361,6 +363,7 @@ impl HostelApp {
         self.chat_input.clear();
         self.chat_history = None;
         self.screen_sharing = false;
+        self.share_audio = false;
         self.screen_texture = None;
         self.screen_viewer = None;
         self.screen_active = None;
@@ -719,6 +722,11 @@ impl HostelApp {
                 self.mic_active.store(!mic_on, Ordering::Relaxed);
             }
 
+            // System audio toggle (only changeable when not currently sharing)
+            ui.add_enabled_ui(!self.screen_sharing, |ui| {
+                ui.checkbox(&mut self.share_audio, "Audio");
+            });
+
             // Screen share toggle
             let (scr_text, scr_color) = if self.screen_sharing {
                 ("Screen: ON", egui::Color32::from_rgb(40, 100, 180))
@@ -733,7 +741,7 @@ impl HostelApp {
                 if let Some(tx) = &self.screen_cmd_tx {
                     if self.screen_sharing {
                         let quality = ScreenQuality::ALL[self.selected_screen_quality];
-                        let _ = tx.send(ScreenCommand::Start(quality));
+                        let _ = tx.send(ScreenCommand::Start { quality, share_audio: self.share_audio });
                     } else {
                         let _ = tx.send(ScreenCommand::Stop);
                     }
