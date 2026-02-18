@@ -18,6 +18,8 @@ serde_json = "1"
 nnnoiseless = "0.5"
 scrap = "0.5"
 env-libvpx-sys = { version = "5.1", features = ["generate"] }
+nokhwa = { version = "0.10", features = ["input-msmf"] }
+tokio = { version = "1", features = ["rt", "time", "macros"] }
 
 # Windows deps: Visual Studio Build Tools + CMake + LLVM + vcpkg install libvpx:x64-windows
 # Build env vars (set before cargo build):
@@ -27,3 +29,4 @@ env-libvpx-sys = { version = "5.1", features = ["generate"] }
 #   VPX_VERSION=1.15.0
 #   VPX_STATIC=1
 #   CMAKE_POLICY_VERSION_MINIMUM=3.5
+# Build:      copy Cargo.toml.windows Cargo.toml && cargo build --release
