@@ -43,6 +43,8 @@ pub struct MsgDaemon {
     last_keepalive: Instant,
     /// Counts of HELLO retries per address.
     hello_retries: HashMap<SocketAddr, u32>,
+    /// Saved peer info for reconnection after voice call ends.
+    saved_peers: Vec<(String, SocketAddr, [u8; 32])>,
 }
 
 impl MsgDaemon {
@@ -66,6 +68,7 @@ impl MsgDaemon {
             retry_state: HashMap::new(),
             last_keepalive: Instant::now(),
             hello_retries: HashMap::new(),
+            saved_peers: Vec::new(),
         }
     }
 
@@ -114,6 +117,17 @@ impl MsgDaemon {
                 MsgCommand::Shutdown => return false,
 
                 MsgCommand::YieldSocket => {
+                    // Save connected peer info for reconnection after call
+                    self.saved_peers.clear();
+                    for peer in self.peers.values() {
+                        if !peer.contact_id.is_empty() {
+                            self.saved_peers.push((
+                                peer.contact_id.clone(),
+                                peer.peer_addr,
+                                peer.peer_pubkey,
+                            ));
+                        }
+                    }
                     // Disconnect all peers and drop socket for voice call
                     if let Some(ref socket) = self.socket {
                         for peer in self.peers.values() {
@@ -137,9 +151,22 @@ impl MsgDaemon {
 
                 MsgCommand::ReclaimSocket => {
                     self.bind_socket();
-                    // Reconnect peers with pending outbox messages
-                    // Peers with pending messages will be reconnected when the GUI
-                    // re-issues Connect commands (the GUI holds contact info).
+                    // Reconnect all peers that were active before the call
+                    let to_reconnect = std::mem::take(&mut self.saved_peers);
+                    if let Some(ref socket) = self.socket {
+                        for (contact_id, peer_addr, peer_pubkey) in to_reconnect {
+                            if self.contact_addrs.contains_key(&contact_id) {
+                                continue;
+                            }
+                            if let Some(session) = protocol::initiate_handshake(
+                                socket, &contact_id, peer_addr, peer_pubkey,
+                            ) {
+                                self.contact_addrs.insert(contact_id, peer_addr);
+                                self.hello_retries.insert(peer_addr, 0);
+                                self.peers.insert(peer_addr, session);
+                            }
+                        }
+                    }
                 }
 
                 MsgCommand::Connect { contact_id, peer_addr, peer_pubkey } => {
