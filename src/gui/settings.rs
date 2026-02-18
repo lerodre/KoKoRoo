@@ -4,6 +4,8 @@ use super::{HostelApp, list_audio_devices, get_adapter_names, get_best_ipv6};
 
 impl HostelApp {
     pub(crate) fn draw_settings_tab(&mut self, ui: &mut egui::Ui) {
+        let settings_start = std::time::Instant::now();
+
         ui.add_space(10.0);
         ui.heading("Settings");
         ui.add_space(10.0);
@@ -21,9 +23,15 @@ impl HostelApp {
 
         ui.add_space(8.0);
 
-        // Network adapter
+        // Network adapter — use cached list, only refresh on demand
         ui.label("Network adapter:");
-        let adapters = get_adapter_names();
+        if self.adapter_names.is_empty() {
+            let t = std::time::Instant::now();
+            self.adapter_names = get_adapter_names();
+            log_fmt!("[settings] get_adapter_names() took {}ms ({} adapters)",
+                t.elapsed().as_millis(), self.adapter_names.len());
+        }
+        let adapters = &self.adapter_names;
         let prev_adapter = self.settings.network_adapter.clone();
         let selected_text = if self.settings.network_adapter.is_empty() {
             "Auto".to_string()
@@ -34,13 +42,15 @@ impl HostelApp {
             .selected_text(&selected_text)
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut self.settings.network_adapter, String::new(), "Auto");
-                for name in &adapters {
+                for name in adapters {
                     ui.selectable_value(&mut self.settings.network_adapter, name.clone(), name.as_str());
                 }
             });
         if self.settings.network_adapter != prev_adapter {
             self.settings.save();
+            let t = std::time::Instant::now();
             self.best_ipv6 = get_best_ipv6(&self.settings.network_adapter);
+            log_fmt!("[settings] get_best_ipv6() took {}ms", t.elapsed().as_millis());
         }
 
         ui.add_space(8.0);
@@ -92,8 +102,13 @@ impl HostelApp {
         }
 
         ui.add_space(10.0);
-        if ui.button("Refresh Audio Devices").clicked() {
+        if ui.button("Refresh Devices").clicked() {
+            let t = std::time::Instant::now();
             self.devices = list_audio_devices();
+            log_fmt!("[settings] list_audio_devices() took {}ms", t.elapsed().as_millis());
+            let t2 = std::time::Instant::now();
+            self.adapter_names = get_adapter_names();
+            log_fmt!("[settings] get_adapter_names() refresh took {}ms", t2.elapsed().as_millis());
             // Re-match saved names
             self.selected_input = if !self.settings.mic.is_empty() {
                 self.devices.input_names.iter().position(|n| n == &self.settings.mic).unwrap_or(0)
@@ -188,6 +203,11 @@ impl HostelApp {
             if let Some(ip) = unban_ip {
                 self.settings.unban_ip(&ip);
             }
+        }
+
+        let total_ms = settings_start.elapsed().as_millis();
+        if total_ms > 16 {
+            log_fmt!("[settings] draw_settings_tab took {}ms (slow!)", total_ms);
         }
     }
 }

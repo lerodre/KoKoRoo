@@ -132,18 +132,21 @@ fn get_network_interfaces() -> Vec<(String, String, String)> {
 
     #[cfg(target_os = "windows")]
     {
-        // Use PowerShell to get interface + address pairs
+        // Use PowerShell CSV output to handle adapter names with spaces (e.g. "Ethernet 2", "vEthernet (WSL)")
         if let Ok(output) = std::process::Command::new("powershell")
-            .args(["-Command", "Get-NetIPAddress -AddressFamily IPv6 | Where-Object { $_.SuffixOrigin -ne 'Random' -and $_.IPAddress -ne '::1' -and $_.AddressState -eq 'Preferred' } | Select-Object InterfaceAlias, IPAddress | Format-Table -HideTableHeaders"])
+            .args(["-Command", "Get-NetIPAddress -AddressFamily IPv6 | Where-Object { $_.SuffixOrigin -ne 'Random' -and $_.IPAddress -ne '::1' -and $_.AddressState -eq 'Preferred' } | Select-Object InterfaceAlias, IPAddress | ConvertTo-Csv -NoTypeInformation"])
             .output()
         {
             let text = String::from_utf8_lossy(&output.stdout);
-            for line in text.lines() {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    let iface = parts[0].to_string();
-                    let addr = parts[1].to_string();
-                    if addr == "::1" { continue; }
+            for line in text.lines().skip(1) { // skip CSV header
+                let line = line.trim();
+                if line.is_empty() { continue; }
+                // CSV format: "InterfaceAlias","IPAddress"
+                let fields: Vec<&str> = line.split(',').collect();
+                if fields.len() >= 2 {
+                    let iface = fields[0].trim_matches('"').to_string();
+                    let addr = fields[1].trim_matches('"').to_string();
+                    if addr == "::1" || addr.is_empty() { continue; }
                     let scope = if addr.starts_with("fe80") { "link-local" } else { "global" };
                     result.push((iface, addr, scope.to_string()));
                 }
@@ -207,6 +210,7 @@ pub struct HostelApp {
     pub(crate) peer_ip: String,
     pub(crate) peer_port: String,
     pub(crate) devices: DeviceList,
+    pub(crate) adapter_names: Vec<String>,
 
     // Contact list
     pub(crate) contacts: Vec<Contact>,
@@ -330,6 +334,7 @@ impl HostelApp {
             peer_ip: "::1".to_string(),
             peer_port: "9000".to_string(),
             devices,
+            adapter_names: Vec::new(),
             contacts,
             contact_search: String::new(),
             running: Arc::new(AtomicBool::new(false)),
