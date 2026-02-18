@@ -22,7 +22,8 @@ pub enum MsgCommand {
     /// Block an incoming contact request (ban IP + block pubkey).
     BlockRequest { request_id: String, ip: String },
     /// User dismissed an incoming call notification — clear cooldown so re-calls work.
-    DismissIncomingCall { ip: String },
+    /// If reject=true, daemon will complete voice handshake + send HANGUP to cut the caller.
+    DismissIncomingCall { ip: String, reject: bool },
     /// Voice call starting — daemon must release the UDP socket.
     YieldSocket,
     /// Voice call ended — daemon can reclaim the UDP socket.

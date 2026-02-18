@@ -4,7 +4,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::crypto::{
-    PKT_HELLO,
+    self, PKT_HELLO, PKT_HANGUP,
     PKT_MSG_ACK, PKT_MSG_BYE, PKT_MSG_CHAT, PKT_MSG_HELLO, PKT_MSG_IDENTITY,
     PKT_MSG_REQUEST, PKT_MSG_REQUEST_ACK,
 };
@@ -56,7 +56,8 @@ pub struct MsgDaemon {
     /// Settings snapshot for checking banned IPs / blocked contacts.
     settings: Settings,
     /// IPs we already notified about an incoming voice call (avoid re-notifying on HELLO retries).
-    notified_calls: HashMap<String, Instant>,
+    /// Value: (timestamp, peer_addr, peer_ephemeral_pubkey) — stored for reject-with-hangup.
+    notified_calls: HashMap<String, (Instant, SocketAddr, [u8; 32])>,
 }
 
 impl MsgDaemon {
@@ -132,8 +133,22 @@ impl MsgDaemon {
             match cmd {
                 MsgCommand::Shutdown => return false,
 
-                MsgCommand::DismissIncomingCall { ip } => {
-                    self.notified_calls.remove(&ip);
+                MsgCommand::DismissIncomingCall { ip, reject } => {
+                    if reject {
+                        // Complete voice handshake and send HANGUP to cut the caller's attempt
+                        if let Some((_, peer_addr, peer_ephemeral)) = self.notified_calls.remove(&ip) {
+                            if let Some(ref socket) = self.socket {
+                                let (our_secret, our_pubkey) = crypto::generate_keypair();
+                                let hello_reply = crypto::build_hello(&our_pubkey);
+                                socket.send_to(&hello_reply, peer_addr).ok();
+                                let session = crypto::complete_handshake(our_secret, &peer_ephemeral);
+                                let hangup = session.encrypt_packet(PKT_HANGUP, &[]);
+                                socket.send_to(&hangup, peer_addr).ok();
+                            }
+                        }
+                    } else {
+                        self.notified_calls.remove(&ip);
+                    }
                 }
 
                 MsgCommand::YieldSocket => {
@@ -584,15 +599,43 @@ impl MsgDaemon {
                         continue;
                     }
                     // Only notify once per caller (expires after 60s to allow re-calls)
-                    if let Some(t) = self.notified_calls.get(&ip_str) {
+                    if let Some((t, ..)) = self.notified_calls.get(&ip_str) {
                         if t.elapsed() < Duration::from_secs(60) {
                             continue;
                         }
                     }
-                    // Check if caller matches a known contact by last_address
-                    let contacts = identity::load_all_contacts();
-                    if let Some(contact) = contacts.iter().find(|c| c.last_address == ip_str) {
-                        self.notified_calls.insert(ip_str.clone(), Instant::now());
+                    // Parse ephemeral pubkey from HELLO
+                    let peer_ephemeral = match crypto::parse_hello(data) {
+                        Some(pk) => pk,
+                        None => continue,
+                    };
+
+                    // Try to identify caller:
+                    // 1. Check active messaging peers (most reliable)
+                    let mut found_contact: Option<identity::Contact> = None;
+                    if let Some(peer) = self.peers.get(&from) {
+                        if peer.is_connected() && !peer.contact_id.is_empty() {
+                            found_contact = identity::load_contact(&peer.peer_pubkey);
+                        }
+                    }
+                    // 2. Check contacts by exact last_address
+                    if found_contact.is_none() {
+                        let contacts = identity::load_all_contacts();
+                        found_contact = contacts.into_iter()
+                            .find(|c| c.last_address == ip_str);
+                    }
+                    // 3. Check contacts by /64 prefix match (IPv6 privacy addresses)
+                    if found_contact.is_none() {
+                        let contacts = identity::load_all_contacts();
+                        found_contact = contacts.into_iter()
+                            .find(|c| ipv6_prefix_match(&c.last_address, &ip_str));
+                    }
+
+                    if let Some(contact) = found_contact {
+                        self.notified_calls.insert(
+                            ip_str.clone(),
+                            (Instant::now(), from, peer_ephemeral),
+                        );
                         self.event_tx.send(MsgEvent::IncomingCall {
                             nickname: contact.nickname.clone(),
                             fingerprint: contact.fingerprint.clone(),
@@ -614,7 +657,7 @@ impl MsgDaemon {
         let now = Instant::now();
 
         // Clean up expired incoming call notifications
-        self.notified_calls.retain(|_, t| t.elapsed() < Duration::from_secs(60));
+        self.notified_calls.retain(|_, (t, ..)| t.elapsed() < Duration::from_secs(60));
 
         // Keepalives
         if now.duration_since(self.last_keepalive) > KEEPALIVE_INTERVAL {
@@ -754,4 +797,24 @@ impl MsgDaemon {
             }
         }
     }
+}
+
+/// Check if two IPv6 addresses share the same /64 prefix.
+/// This handles IPv6 privacy extensions where the host part changes
+/// but the network prefix stays the same.
+fn ipv6_prefix_match(a: &str, b: &str) -> bool {
+    use std::net::Ipv6Addr;
+    let a_addr: Ipv6Addr = match a.parse() {
+        Ok(addr) => addr,
+        Err(_) => return false,
+    };
+    let b_addr: Ipv6Addr = match b.parse() {
+        Ok(addr) => addr,
+        Err(_) => return false,
+    };
+    let a_segs = a_addr.segments();
+    let b_segs = b_addr.segments();
+    // Compare first 4 segments (64 bits = /64 prefix)
+    a_segs[0] == b_segs[0] && a_segs[1] == b_segs[1]
+        && a_segs[2] == b_segs[2] && a_segs[3] == b_segs[3]
 }

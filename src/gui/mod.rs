@@ -191,6 +191,38 @@ pub(crate) fn censor_ip(ip: &str) -> String {
     }
 }
 
+/// Send an OS-level desktop notification (notify-send on Linux, PowerShell balloon on Windows).
+fn send_desktop_notification(title: &str, body: &str) {
+    let t = title.to_string();
+    let b = body.to_string();
+    std::thread::spawn(move || {
+        #[cfg(target_os = "linux")]
+        {
+            std::process::Command::new("notify-send")
+                .args(["-u", "critical", "-a", "hostelD", &t, &b])
+                .spawn()
+                .ok();
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let script = format!(
+                "[void] [System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms'); \
+                 $n = New-Object System.Windows.Forms.NotifyIcon; \
+                 $n.Icon = [System.Drawing.SystemIcons]::Information; \
+                 $n.Visible = $true; \
+                 $n.ShowBalloonTip(5000, '{}', '{}', 'Info'); \
+                 Start-Sleep -Seconds 6; $n.Dispose()",
+                t.replace('\'', "''"),
+                b.replace('\'', "''"),
+            );
+            std::process::Command::new("powershell")
+                .args(["-WindowStyle", "Hidden", "-Command", &script])
+                .spawn()
+                .ok();
+        }
+    });
+}
+
 // ── Connection result sent from background thread ──
 
 pub(crate) struct CallInfo {
@@ -728,6 +760,14 @@ impl eframe::App for HostelApp {
                     MsgEvent::IncomingCall { nickname, fingerprint, ip, port } => {
                         // Only show if not already in a call
                         if matches!(self.screen, Screen::Setup) {
+                            // OS-level desktop notification
+                            let caller = if nickname.is_empty() {
+                                format!("#{}", fingerprint)
+                            } else {
+                                format!("{} #{}", nickname, fingerprint)
+                            };
+                            send_desktop_notification("hostelD — Incoming Call", &caller);
+
                             self.incoming_call = Some(IncomingCallInfo {
                                 nickname, fingerprint, ip, port,
                             });
@@ -870,9 +910,9 @@ impl HostelApp {
 
         if accept {
             if let Some(info) = self.incoming_call.take() {
-                // Clear cooldown so future calls from same peer work
+                // Clear cooldown (no reject — we're accepting)
                 if let Some(tx) = &self.msg_cmd_tx {
-                    tx.send(MsgCommand::DismissIncomingCall { ip: info.ip.clone() }).ok();
+                    tx.send(MsgCommand::DismissIncomingCall { ip: info.ip.clone(), reject: false }).ok();
                 }
                 self.peer_ip = info.ip;
                 self.peer_port = info.port;
@@ -882,9 +922,9 @@ impl HostelApp {
         }
         if reject {
             if let Some(info) = self.incoming_call.take() {
-                // Tell daemon to clear cooldown so re-calls trigger notification again
+                // Reject: daemon will complete handshake + send HANGUP to cut caller
                 if let Some(tx) = &self.msg_cmd_tx {
-                    tx.send(MsgCommand::DismissIncomingCall { ip: info.ip }).ok();
+                    tx.send(MsgCommand::DismissIncomingCall { ip: info.ip, reject: true }).ok();
                 }
             }
         }
