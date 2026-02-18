@@ -300,6 +300,7 @@ pub struct HostelApp {
 
     // Incoming call notification
     pub(crate) incoming_call: Option<IncomingCallInfo>,
+    pub(crate) incoming_call_attention: bool,
 }
 
 pub(crate) struct IncomingCallInfo {
@@ -416,6 +417,7 @@ impl HostelApp {
             req_status: String::new(),
             show_ips: false,
             incoming_call: None,
+            incoming_call_attention: false,
         }
     }
 
@@ -729,6 +731,7 @@ impl eframe::App for HostelApp {
                             self.incoming_call = Some(IncomingCallInfo {
                                 nickname, fingerprint, ip, port,
                             });
+                            self.incoming_call_attention = true;
                         }
                     }
                 }
@@ -737,6 +740,14 @@ impl eframe::App for HostelApp {
         // Deferred: open chat for newly accepted contact (after borrow of msg_event_rx ends)
         if let Some(cid) = accepted_contact_id {
             self.open_msg_chat(&cid);
+        }
+
+        // Flash taskbar/window for incoming call (system-level attention)
+        if self.incoming_call_attention {
+            self.incoming_call_attention = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Critical,
+            ));
         }
 
         // Style
@@ -859,6 +870,10 @@ impl HostelApp {
 
         if accept {
             if let Some(info) = self.incoming_call.take() {
+                // Clear cooldown so future calls from same peer work
+                if let Some(tx) = &self.msg_cmd_tx {
+                    tx.send(MsgCommand::DismissIncomingCall { ip: info.ip.clone() }).ok();
+                }
                 self.peer_ip = info.ip;
                 self.peer_port = info.port;
                 self.active_tab = SidebarTab::Call;
@@ -866,7 +881,12 @@ impl HostelApp {
             }
         }
         if reject {
-            self.incoming_call = None;
+            if let Some(info) = self.incoming_call.take() {
+                // Tell daemon to clear cooldown so re-calls trigger notification again
+                if let Some(tx) = &self.msg_cmd_tx {
+                    tx.send(MsgCommand::DismissIncomingCall { ip: info.ip }).ok();
+                }
+            }
         }
 
         ctx.request_repaint_after(std::time::Duration::from_millis(200));

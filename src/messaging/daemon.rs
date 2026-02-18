@@ -132,6 +132,10 @@ impl MsgDaemon {
             match cmd {
                 MsgCommand::Shutdown => return false,
 
+                MsgCommand::DismissIncomingCall { ip } => {
+                    self.notified_calls.remove(&ip);
+                }
+
                 MsgCommand::YieldSocket => {
                     // Save connected peer info for reconnection after call
                     self.saved_peers.clear();
