@@ -24,20 +24,20 @@ pub enum MsgCommand {
     /// User dismissed an incoming call notification — clear cooldown so re-calls work.
     /// If reject=true, daemon will complete voice handshake + send HANGUP to cut the caller.
     DismissIncomingCall { ip: String, reject: bool },
+    /// Ask connected peers for a contact's current address (IP relay).
+    QueryPeer { target_pubkey: [u8; 32] },
     /// Voice call starting — daemon must release the UDP socket.
     YieldSocket,
     /// Voice call ended — daemon can reclaim the UDP socket.
     ReclaimSocket,
-    /// App shutting down.
-    Shutdown,
 }
 
 /// Events sent from the messaging daemon to the GUI.
 pub enum MsgEvent {
     /// A message arrived from a peer.
-    IncomingMessage { contact_id: String, text: String, timestamp: u64 },
+    IncomingMessage { contact_id: String, text: String },
     /// A previously sent message was acknowledged by the peer.
-    MessageDelivered { contact_id: String, seq: u32 },
+    MessageDelivered,
     /// A peer's online status changed.
     PeerStatus { contact_id: String, online: bool },
     /// An incoming contact request from a stranger.
@@ -48,4 +48,6 @@ pub enum MsgEvent {
     RequestFailed { peer_addr: String, reason: String },
     /// Incoming voice call detected from a known contact.
     IncomingCall { nickname: String, fingerprint: String, ip: String, port: String },
+    /// A contact's address was updated via IP relay (announce or peer response).
+    PeerAddressUpdate { contact_id: String, ip: String, port: String },
 }

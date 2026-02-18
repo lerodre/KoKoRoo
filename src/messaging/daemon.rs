@@ -7,6 +7,7 @@ use crate::crypto::{
     self, PKT_HELLO, PKT_HANGUP,
     PKT_MSG_ACK, PKT_MSG_BYE, PKT_MSG_CHAT, PKT_MSG_HELLO, PKT_MSG_IDENTITY,
     PKT_MSG_REQUEST, PKT_MSG_REQUEST_ACK,
+    PKT_MSG_IP_ANNOUNCE, PKT_MSG_PEER_QUERY, PKT_MSG_PEER_RESPONSE,
 };
 use crate::identity::{self, Identity, Settings};
 
@@ -20,6 +21,13 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(60);
 const PEER_TIMEOUT: Duration = Duration::from_secs(300);
 const HELLO_RETRY_INTERVAL: Duration = Duration::from_secs(3);
 const HELLO_MAX_RETRIES: u32 = 20;
+
+// IP relay constants
+const IP_CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60); // 30 minutes
+const PEER_QUERY_COOLDOWN: Duration = Duration::from_secs(5 * 60); // 5 min per target pubkey
+const QUERY_RATE_WINDOW: Duration = Duration::from_secs(60);       // 1 minute window
+const QUERY_RATE_MAX: u32 = 6;                                     // max 6 queries per window per peer
+const ANNOUNCE_MAX_AGE: Duration = Duration::from_secs(2 * 60 * 60); // 2 hours
 
 /// Retry backoff tiers: 10s, 30s, 1m, 5m, 15m cap
 const RETRY_BACKOFFS: &[Duration] = &[
@@ -60,6 +68,17 @@ pub struct MsgDaemon {
     notified_calls: HashMap<String, (Instant, SocketAddr, [u8; 32])>,
     /// Recently rejected IPs — suppress extra HELLOs for a few seconds after reject.
     rejected_ips: HashMap<String, Instant>,
+    // ── IP relay state ──
+    /// Cached IP announces from peers: identity pubkey → (ip, port, timestamp).
+    ip_announces: HashMap<[u8; 32], (String, String, u64)>,
+    /// Last time we checked our own IP for changes.
+    last_ip_check: Instant,
+    /// Our last announced IP (to detect changes).
+    last_announced_ip: String,
+    /// Cooldown per target pubkey for outgoing PEER_QUERY commands.
+    peer_query_cooldowns: HashMap<[u8; 32], Instant>,
+    /// Rate limiting for incoming PEER_QUERY: peer addr → (window_start, count).
+    query_counts: HashMap<SocketAddr, (Instant, u32)>,
 }
 
 impl MsgDaemon {
@@ -89,6 +108,11 @@ impl MsgDaemon {
             settings: Settings::load(),
             notified_calls: HashMap::new(),
             rejected_ips: HashMap::new(),
+            ip_announces: HashMap::new(),
+            last_ip_check: Instant::now() - IP_CHECK_INTERVAL, // trigger check on first housekeep
+            last_announced_ip: String::new(),
+            peer_query_cooldowns: HashMap::new(),
+            query_counts: HashMap::new(),
         }
     }
 
@@ -139,12 +163,16 @@ impl MsgDaemon {
         }
     }
 
-    /// Process all pending commands. Returns false on Shutdown.
+    /// Process all pending commands. Returns false when the channel is closed (app exit).
     fn process_commands(&mut self) -> bool {
-        while let Ok(cmd) = self.command_rx.try_recv() {
+        use std::sync::mpsc::TryRecvError;
+        loop {
+            let cmd = match self.command_rx.try_recv() {
+                Ok(cmd) => cmd,
+                Err(TryRecvError::Empty) => return true,
+                Err(TryRecvError::Disconnected) => return false,
+            };
             match cmd {
-                MsgCommand::Shutdown => return false,
-
                 MsgCommand::DismissIncomingCall { ip, reject } => {
                     log_fmt!("[daemon] DismissIncomingCall ip={} reject={}", ip, reject);
                     log_fmt!("[daemon]   notified_calls keys: {:?}", self.notified_calls.keys().collect::<Vec<_>>());
@@ -367,6 +395,24 @@ impl MsgDaemon {
                     }
                 }
 
+                MsgCommand::QueryPeer { target_pubkey } => {
+                    // Ask all connected peers for the target's current address
+                    // Respect cooldown per target pubkey
+                    if let Some(last) = self.peer_query_cooldowns.get(&target_pubkey) {
+                        if last.elapsed() < PEER_QUERY_COOLDOWN {
+                            continue;
+                        }
+                    }
+                    self.peer_query_cooldowns.insert(target_pubkey, Instant::now());
+                    if let Some(ref socket) = self.socket {
+                        for peer in self.peers.values() {
+                            if peer.is_connected() {
+                                protocol::send_peer_query(peer, socket, &target_pubkey);
+                            }
+                        }
+                    }
+                }
+
                 MsgCommand::SendMessage { contact_id, peer_addr, peer_pubkey, text } => {
                     // Ensure outbox exists
                     let outbox = self.outboxes.entry(contact_id.clone())
@@ -397,7 +443,6 @@ impl MsgDaemon {
                 }
             }
         }
-        true
     }
 
     fn receive_packets(&mut self) {
@@ -435,9 +480,7 @@ impl MsgDaemon {
                         };
                         let session = crate::crypto::complete_handshake(our_secret, &peer_ephemeral);
                         peer.session = Some(session);
-                        peer.state = super::session::PeerState::AwaitingIdentity {
-                            sent_at: Instant::now(),
-                        };
+                        peer.state = super::session::PeerState::AwaitingIdentity;
                         peer.touch();
                         // Send REQUEST (not IDENTITY)
                         protocol::send_request(peer, socket, &self.identity, &self.nickname);
@@ -493,15 +536,9 @@ impl MsgDaemon {
                             // Send ACK
                             protocol::send_ack(peer, socket, seq);
 
-                            let timestamp = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs();
-
                             self.event_tx.send(MsgEvent::IncomingMessage {
                                 contact_id: peer.contact_id.clone(),
                                 text,
-                                timestamp,
                             }).ok();
                         }
                     }
@@ -515,10 +552,7 @@ impl MsgDaemon {
                             if let Some(outbox) = self.outboxes.get_mut(&cid) {
                                 outbox.remove_acked(seq);
                             }
-                            self.event_tx.send(MsgEvent::MessageDelivered {
-                                contact_id: cid,
-                                seq,
-                            }).ok();
+                            self.event_tx.send(MsgEvent::MessageDelivered).ok();
                         }
                     }
                 }
@@ -618,6 +652,99 @@ impl MsgDaemon {
                             self.event_tx.send(MsgEvent::RequestAccepted {
                                 contact_id,
                             }).ok();
+                        }
+                    }
+                }
+
+                PKT_MSG_IP_ANNOUNCE => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((ip, port, timestamp)) = protocol::handle_ip_announce(data, peer) {
+                            peer.touch();
+                            let peer_pubkey = peer.peer_pubkey;
+                            let contact_id = peer.contact_id.clone();
+                            // Only accept if timestamp is newer than what we have
+                            let dominated = self.ip_announces.get(&peer_pubkey)
+                                .map(|(_, _, old_ts)| timestamp <= *old_ts)
+                                .unwrap_or(false);
+                            if !dominated {
+                                log_fmt!("[daemon] IP_ANNOUNCE from {} => ip={} port={} ts={}", from, ip, port, timestamp);
+                                self.ip_announces.insert(peer_pubkey, (ip.clone(), port.clone(), timestamp));
+                                // Update contact on disk
+                                if let Some(mut contact) = identity::load_contact(&peer_pubkey) {
+                                    contact.last_address = ip.clone();
+                                    contact.last_port = port.clone();
+                                    contact.last_seen = identity::now_timestamp();
+                                    identity::save_contact(&contact);
+                                }
+                                if !contact_id.is_empty() {
+                                    self.event_tx.send(MsgEvent::PeerAddressUpdate {
+                                        contact_id,
+                                        ip,
+                                        port,
+                                    }).ok();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                PKT_MSG_PEER_QUERY => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some(target_pubkey) = protocol::handle_peer_query(data, peer) {
+                            peer.touch();
+                            // Rate limit: max QUERY_RATE_MAX queries per QUERY_RATE_WINDOW per peer
+                            let (window_start, count) = self.query_counts.entry(from)
+                                .or_insert((Instant::now(), 0));
+                            if window_start.elapsed() > QUERY_RATE_WINDOW {
+                                *window_start = Instant::now();
+                                *count = 0;
+                            }
+                            *count += 1;
+                            if *count > QUERY_RATE_MAX {
+                                continue; // Rate limited
+                            }
+                            // Only respond if target is our contact AND we have a recent announce
+                            if identity::load_contact(&target_pubkey).is_some() {
+                                if let Some((ip, port, ts)) = self.ip_announces.get(&target_pubkey) {
+                                    let age = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_secs()
+                                        .saturating_sub(*ts);
+                                    if age < ANNOUNCE_MAX_AGE.as_secs() {
+                                        if let Some(ref socket) = self.socket {
+                                            log_fmt!("[daemon] PEER_QUERY from {} for target => responding with ip={} port={}", from, ip, port);
+                                            protocol::send_peer_response(
+                                                peer, socket, &target_pubkey,
+                                                ip, port, *ts,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                PKT_MSG_PEER_RESPONSE => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((target_pubkey, ip, port, timestamp)) = protocol::handle_peer_response(data, peer) {
+                            peer.touch();
+                            log_fmt!("[daemon] PEER_RESPONSE from {} => target ip={} port={} ts={}", from, ip, port, timestamp);
+                            // Update the target contact's address
+                            if let Some(mut contact) = identity::load_contact(&target_pubkey) {
+                                contact.last_address = ip.clone();
+                                contact.last_port = port.clone();
+                                contact.last_seen = identity::now_timestamp();
+                                identity::save_contact(&contact);
+                                // Also cache the announce
+                                self.ip_announces.insert(target_pubkey, (ip.clone(), port.clone(), timestamp));
+                                self.event_tx.send(MsgEvent::PeerAddressUpdate {
+                                    contact_id: contact.contact_id,
+                                    ip,
+                                    port,
+                                }).ok();
+                            }
                         }
                     }
                 }
@@ -724,6 +851,36 @@ impl MsgDaemon {
         // Clean up expired incoming call notifications
         self.notified_calls.retain(|_, (t, ..)| t.elapsed() < Duration::from_secs(60));
         self.rejected_ips.retain(|_, t| t.elapsed() < Duration::from_secs(5));
+        // Clean up expired query rate counters
+        self.query_counts.retain(|_, (t, _)| t.elapsed() < QUERY_RATE_WINDOW * 2);
+        // Clean up expired query cooldowns
+        self.peer_query_cooldowns.retain(|_, t| t.elapsed() < PEER_QUERY_COOLDOWN);
+
+        // IP change detection and announce (every IP_CHECK_INTERVAL)
+        if self.last_ip_check.elapsed() >= IP_CHECK_INTERVAL {
+            self.last_ip_check = now;
+            let current_ip = crate::gui::get_best_ipv6(&self.settings.network_adapter);
+            if current_ip != "::1" && current_ip != self.last_announced_ip {
+                log_fmt!("[daemon] IP changed: '{}' -> '{}'", self.last_announced_ip, current_ip);
+                self.last_announced_ip = current_ip.clone();
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                // Broadcast IP_ANNOUNCE to all connected peers
+                if let Some(ref socket) = self.socket {
+                    for peer in self.peers.values() {
+                        if peer.is_connected() {
+                            protocol::send_ip_announce(
+                                peer, socket,
+                                &self.last_announced_ip, &self.local_port,
+                                timestamp,
+                            );
+                        }
+                    }
+                }
+            }
+        }
 
         // Keepalives
         if now.duration_since(self.last_keepalive) > KEEPALIVE_INTERVAL {

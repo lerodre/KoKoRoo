@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use vpx_sys::*;
@@ -667,6 +667,7 @@ fn capture_loop_pipewire(
     quality: ScreenQuality,
     capture: crate::wayland_capture::PortalCapture,
 ) {
+    use std::sync::Mutex;
     use std::thread;
 
     log_fmt!("[screen] capture_loop_pipewire: starting, peer={}, quality={:?}", peer_addr, quality);

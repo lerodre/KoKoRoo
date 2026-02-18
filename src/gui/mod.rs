@@ -234,9 +234,8 @@ fn start_ringtone() -> Arc<AtomicBool> {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_clone = stop.clone();
     std::thread::spawn(move || {
-        let home = std::env::var("HOME").unwrap_or_default();
         #[cfg(target_os = "linux")]
-        let path = format!("{}/.hostelD/ringtone.mp3", home);
+        let path = format!("{}/.hostelD/ringtone.mp3", std::env::var("HOME").unwrap_or_default());
         #[cfg(target_os = "windows")]
         let path = format!("{}\\.hostelD\\ringtone.mp3", std::env::var("USERPROFILE").unwrap_or_default());
 
@@ -440,6 +439,9 @@ pub struct HostelApp {
     // Ringtone playback (background thread)
     pub(crate) ringtone_stop: Option<Arc<AtomicBool>>,
 
+    // App logo texture (loaded once from embedded PNG)
+    pub(crate) logo_texture: Option<egui::TextureHandle>,
+
     // Color palette editor
     pub(crate) color_hex_inputs: HashMap<String, String>,
     pub(crate) color_locks: std::collections::HashSet<String>,
@@ -569,6 +571,7 @@ impl HostelApp {
             incoming_call: None,
             incoming_call_attention: false,
             ringtone_stop: None,
+            logo_texture: None,
             color_hex_inputs: HashMap::new(),
             color_locks: std::collections::HashSet::new(),
             show_firewall_prompt: needs_firewall_prompt,
@@ -842,7 +845,7 @@ impl eframe::App for HostelApp {
         if let Some(rx) = &self.msg_event_rx {
             while let Ok(evt) = rx.try_recv() {
                 match evt {
-                    MsgEvent::IncomingMessage { contact_id, text, .. } => {
+                    MsgEvent::IncomingMessage { contact_id, text } => {
                         // Append to chat history
                         let history = self.msg_chat_histories.entry(contact_id.clone())
                             .or_insert_with(|| ChatHistory::load(&contact_id, &self.identity.secret));
@@ -852,7 +855,7 @@ impl eframe::App for HostelApp {
                             *self.msg_unread.entry(contact_id).or_insert(0) += 1;
                         }
                     }
-                    MsgEvent::MessageDelivered { .. } => {
+                    MsgEvent::MessageDelivered => {
                         // Could update delivery status UI here
                     }
                     MsgEvent::PeerStatus { contact_id, online } => {
@@ -872,6 +875,13 @@ impl eframe::App for HostelApp {
                     }
                     MsgEvent::RequestFailed { peer_addr, reason } => {
                         self.req_status = format!("Failed ({}): {}", peer_addr, reason);
+                    }
+                    MsgEvent::PeerAddressUpdate { contact_id, ip, port } => {
+                        // Update local contact list with new address
+                        if let Some(contact) = self.contacts.iter_mut().find(|c| c.contact_id == contact_id) {
+                            contact.last_address = ip;
+                            contact.last_port = port;
+                        }
                     }
                     MsgEvent::IncomingCall { nickname, fingerprint, ip, port } => {
                         log_fmt!("[gui] IncomingCall event: nick='{}' fp='{}' ip='{}' port='{}' screen={}",
@@ -1187,12 +1197,52 @@ impl HostelApp {
     }
 }
 
+/// Load the embedded logo PNG cropped to its non-transparent bounding box.
+/// Returns (rgba_bytes, width, height).
+pub(crate) fn load_logo_cropped() -> (Vec<u8>, u32, u32) {
+    let png_bytes = include_bytes!("../../assets/logo.png");
+    let img = image::load_from_memory(png_bytes).expect("failed to decode logo PNG");
+    let rgba = img.to_rgba8();
+    let (w, h) = (rgba.width(), rgba.height());
+
+    // Find bounding box of non-transparent pixels
+    let mut min_x = w;
+    let mut min_y = h;
+    let mut max_x = 0u32;
+    let mut max_y = 0u32;
+    for y in 0..h {
+        for x in 0..w {
+            if rgba.get_pixel(x, y)[3] > 0 {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+
+    if max_x < min_x || max_y < min_y {
+        // Fully transparent? Return original
+        return (rgba.into_raw(), w, h);
+    }
+
+    let crop_w = max_x - min_x + 1;
+    let crop_h = max_y - min_y + 1;
+    let cropped = image::imageops::crop_imm(&rgba, min_x, min_y, crop_w, crop_h).to_image();
+    (cropped.into_raw(), crop_w, crop_h)
+}
+
 pub fn run() {
+    // Window icon from cropped logo (cross-platform: Windows, Linux, macOS)
+    let (rgba, w, h) = load_logo_cropped();
+    let icon = egui::IconData { rgba, width: w, height: h };
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([884.0, 750.0])
             .with_min_inner_size([484.0, 600.0])
-            .with_title("hostelD — Secure P2P Voice + Chat + Screen"),
+            .with_title("hostelD — Secure P2P Voice + Chat + Screen")
+            .with_icon(std::sync::Arc::new(icon)),
         ..Default::default()
     };
     eframe::run_native(

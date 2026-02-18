@@ -1,6 +1,7 @@
 use eframe::egui;
 use crate::chat::ChatHistory;
 use crate::identity;
+use crate::messaging::MsgCommand;
 use super::{HostelApp, SidebarTab, format_peer_display, peer_display_job, censor_ip};
 
 impl HostelApp {
@@ -185,6 +186,21 @@ impl HostelApp {
                 self.viewing_chat = None;
                 self.active_tab = SidebarTab::Messages;
                 self.open_msg_chat(&cid);
+            }
+
+            // "Find Peer" button — query connected peers for this contact's current address
+            let online = self.msg_peer_online.get(&contact.contact_id).copied().unwrap_or(false);
+            if !online {
+                let find_btn = egui::Button::new(
+                    egui::RichText::new("Find Peer").size(14.0)
+                ).min_size(egui::vec2(100.0, 34.0));
+                if ui.add(find_btn).clicked() {
+                    if let Some(tx) = &self.msg_cmd_tx {
+                        tx.send(MsgCommand::QueryPeer {
+                            target_pubkey: contact.pubkey,
+                        }).ok();
+                    }
+                }
             }
         });
 

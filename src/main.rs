@@ -1,3 +1,10 @@
+// Hide the console window on Windows release builds (GUI app).
+// The console still appears if launched from a terminal with arguments (tui, call, etc).
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 use std::env;
 use std::net::UdpSocket;
 

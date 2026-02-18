@@ -21,6 +21,9 @@ pub const PKT_MSG_ACK: u8      = 0x13; // delivery confirmation: [4-byte seq]
 pub const PKT_MSG_BYE: u8      = 0x14; // disconnect signal
 pub const PKT_MSG_REQUEST: u8  = 0x15; // contact request: encrypted [32-byte identity pubkey][nickname]
 pub const PKT_MSG_REQUEST_ACK: u8 = 0x16; // contact request accepted: encrypted [32-byte identity pubkey][nickname]
+pub const PKT_MSG_IP_ANNOUNCE: u8  = 0x17; // IP relay: encrypted [ip_str][0x00][port_str][0x00][8-byte timestamp LE]
+pub const PKT_MSG_PEER_QUERY: u8   = 0x18; // peer lookup: encrypted [32-byte target pubkey]
+pub const PKT_MSG_PEER_RESPONSE: u8 = 0x19; // peer lookup reply: encrypted [32-byte pubkey][ip_str][0x00][port_str][0x00][8-byte timestamp LE]
 
 /// Size of an X25519 public key.
 pub const PUBKEY_SIZE: usize = 32;
@@ -33,10 +36,6 @@ const NONCE_SIZE: usize = 12;
 
 /// Poly1305 authentication tag size (16 bytes).
 const TAG_SIZE: usize = 16;
-
-/// Overhead added to each voice packet by encryption:
-/// 1 (type) + 4 (counter) + 16 (auth tag) = 21 bytes.
-pub const ENCRYPT_OVERHEAD: usize = 1 + 4 + TAG_SIZE;
 
 /// Holds the cryptographic state for one session.
 pub struct Session {
@@ -163,51 +162,6 @@ impl Session {
         self.cipher.decrypt(&nonce, ciphertext)
             .ok()
             .map(|plain| (pkt_type, plain))
-    }
-
-    /// Encrypt a voice frame. Returns the full packet ready to send:
-    /// [0x02][4-byte counter][ciphertext + 16-byte auth tag]
-    pub fn encrypt_voice(&self, plaintext: &[u8]) -> Vec<u8> {
-        // Build nonce from counter (12 bytes, first 4 are counter, rest zero)
-        let counter = self.send_counter.fetch_add(1, Ordering::Relaxed);
-
-        let mut nonce_bytes = [0u8; NONCE_SIZE];
-        nonce_bytes[..4].copy_from_slice(&counter.to_le_bytes());
-        let nonce = Nonce::from(nonce_bytes);
-
-        let ciphertext = self.cipher.encrypt(&nonce, plaintext)
-            .expect("encryption failed");
-
-        // Packet: [type][counter][ciphertext+tag]
-        let mut packet = Vec::with_capacity(1 + 4 + ciphertext.len());
-        packet.push(PKT_VOICE);
-        packet.extend_from_slice(&counter.to_le_bytes());
-        packet.extend_from_slice(&ciphertext);
-        packet
-    }
-
-    /// Decrypt a received voice packet. Returns the plaintext (Opus frame).
-    /// Returns None if decryption fails (tampered, wrong key, or spam).
-    pub fn decrypt_voice(&self, packet: &[u8]) -> Option<Vec<u8>> {
-        // Minimum: 1 type + 4 counter + 16 tag + at least 1 byte ciphertext
-        if packet.len() < 1 + 4 + TAG_SIZE + 1 {
-            return None;
-        }
-        if packet[0] != PKT_VOICE {
-            return None;
-        }
-
-        // Extract counter and rebuild nonce
-        let mut counter_bytes = [0u8; 4];
-        counter_bytes.copy_from_slice(&packet[1..5]);
-        let mut nonce_bytes = [0u8; NONCE_SIZE];
-        nonce_bytes[..4].copy_from_slice(&counter_bytes);
-        let nonce = Nonce::from(nonce_bytes);
-
-        // Ciphertext + tag is everything after type + counter
-        let ciphertext = &packet[5..];
-
-        self.cipher.decrypt(&nonce, ciphertext).ok()
     }
 
     /// Create a clone that shares the same cipher key and atomic send counter.

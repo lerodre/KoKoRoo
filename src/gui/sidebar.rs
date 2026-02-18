@@ -4,6 +4,22 @@ use super::{HostelApp, SidebarTab};
 impl HostelApp {
     pub(crate) fn draw_sidebar(&mut self, ui: &mut egui::Ui, in_call: bool) {
         ui.add_space(8.0);
+
+        // Logo: load texture once (cropped to remove transparent padding)
+        let texture = self.logo_texture.get_or_insert_with(|| {
+            let (rgba, w, h) = super::load_logo_cropped();
+            let size = [w as usize, h as usize];
+            let pixels = egui::ColorImage::from_rgba_unmultiplied(size, &rgba);
+            ui.ctx().load_texture("app-logo", pixels, egui::TextureOptions::LINEAR)
+        });
+        let available_w = ui.available_width();
+        let aspect = texture.size()[1] as f32 / texture.size()[0] as f32;
+        let logo_size = egui::vec2(available_w, available_w * aspect);
+        ui.vertical_centered(|ui| {
+            ui.image(egui::load::SizedTexture::new(texture.id(), logo_size));
+        });
+
+        ui.add_space(4.0);
         ui.vertical_centered(|ui| {
             let total_unread: u32 = self.msg_unread.values().sum();
 

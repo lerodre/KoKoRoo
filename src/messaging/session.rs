@@ -12,7 +12,7 @@ pub enum PeerState {
         sent_at: Instant,
     },
     /// Handshake done, waiting for encrypted identity exchange.
-    AwaitingIdentity { sent_at: Instant },
+    AwaitingIdentity,
     /// Fully connected, can exchange messages.
     Connected,
 }

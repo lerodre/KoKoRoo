@@ -4,6 +4,7 @@ use std::time::Instant;
 use crate::crypto::{
     self, PKT_MSG_ACK, PKT_MSG_BYE, PKT_MSG_CHAT, PKT_MSG_IDENTITY,
     PKT_MSG_REQUEST, PKT_MSG_REQUEST_ACK,
+    PKT_MSG_IP_ANNOUNCE, PKT_MSG_PEER_QUERY, PKT_MSG_PEER_RESPONSE,
 };
 use crate::identity::Identity;
 
@@ -42,7 +43,7 @@ pub fn handle_incoming_hello(
         peer_addr: from,
         session: Some(session),
         last_activity: Instant::now(),
-        state: PeerState::AwaitingIdentity { sent_at: Instant::now() },
+        state: PeerState::AwaitingIdentity,
     })
 }
 
@@ -60,10 +61,8 @@ pub fn handle_hello_response(
         None => return false,
     };
 
-    let (our_secret, sent_at) = match &mut peer.state {
-        PeerState::AwaitingHello { our_secret, sent_at, .. } => {
-            (our_secret.take(), *sent_at)
-        }
+    let our_secret = match &mut peer.state {
+        PeerState::AwaitingHello { our_secret, .. } => our_secret.take(),
         _ => return false,
     };
 
@@ -82,7 +81,7 @@ pub fn handle_hello_response(
     socket.send_to(&pkt, peer.peer_addr).ok();
 
     peer.session = Some(session);
-    peer.state = PeerState::AwaitingIdentity { sent_at };
+    peer.state = PeerState::AwaitingIdentity;
     peer.touch();
     true
 }
@@ -263,4 +262,133 @@ pub fn handle_request_accept(data: &[u8], peer: &PeerSession) -> Option<([u8; 32
     pubkey.copy_from_slice(&plain[..32]);
     let nickname = String::from_utf8_lossy(&plain[32..]).to_string();
     Some((pubkey, nickname))
+}
+
+// ── IP relay protocol ──
+
+/// Send an IP_ANNOUNCE to a peer: our current IP + port + timestamp.
+/// Payload: [ip_bytes][0x00][port_bytes][0x00][8-byte timestamp LE]
+pub fn send_ip_announce(
+    peer: &PeerSession,
+    socket: &UdpSocket,
+    ip: &str,
+    port: &str,
+    timestamp: u64,
+) {
+    if let Some(session) = &peer.session {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(ip.as_bytes());
+        payload.push(0x00);
+        payload.extend_from_slice(port.as_bytes());
+        payload.push(0x00);
+        payload.extend_from_slice(&timestamp.to_le_bytes());
+        let pkt = session.encrypt_packet(PKT_MSG_IP_ANNOUNCE, &payload);
+        socket.send_to(&pkt, peer.peer_addr).ok();
+    }
+}
+
+/// Handle an incoming IP_ANNOUNCE. Returns (ip, port, timestamp).
+pub fn handle_ip_announce(data: &[u8], peer: &PeerSession) -> Option<(String, String, u64)> {
+    let session = peer.session.as_ref()?;
+    let (pkt_type, plain) = session.decrypt_packet(data)?;
+    if pkt_type != PKT_MSG_IP_ANNOUNCE {
+        return None;
+    }
+    // Need at least: 1 byte ip + 0x00 + 1 byte port + 0x00 + 8 bytes timestamp
+    if plain.len() < 12 {
+        return None;
+    }
+    // Find first null separator (end of IP)
+    let ip_end = plain.iter().position(|&b| b == 0x00)?;
+    let ip = String::from_utf8_lossy(&plain[..ip_end]).to_string();
+    // Find second null separator (end of port)
+    let rest = &plain[ip_end + 1..];
+    let port_end = rest.iter().position(|&b| b == 0x00)?;
+    let port = String::from_utf8_lossy(&rest[..port_end]).to_string();
+    // Remaining should be 8 bytes for timestamp
+    let ts_data = &rest[port_end + 1..];
+    if ts_data.len() < 8 {
+        return None;
+    }
+    let mut ts_bytes = [0u8; 8];
+    ts_bytes.copy_from_slice(&ts_data[..8]);
+    let timestamp = u64::from_le_bytes(ts_bytes);
+    Some((ip, port, timestamp))
+}
+
+/// Send a PEER_QUERY to ask a peer about another contact's address.
+/// Payload: [32-byte target pubkey]
+pub fn send_peer_query(
+    peer: &PeerSession,
+    socket: &UdpSocket,
+    target_pubkey: &[u8; 32],
+) {
+    if let Some(session) = &peer.session {
+        let pkt = session.encrypt_packet(PKT_MSG_PEER_QUERY, target_pubkey);
+        socket.send_to(&pkt, peer.peer_addr).ok();
+    }
+}
+
+/// Handle an incoming PEER_QUERY. Returns the target pubkey being searched.
+pub fn handle_peer_query(data: &[u8], peer: &PeerSession) -> Option<[u8; 32]> {
+    let session = peer.session.as_ref()?;
+    let (pkt_type, plain) = session.decrypt_packet(data)?;
+    if pkt_type != PKT_MSG_PEER_QUERY || plain.len() < 32 {
+        return None;
+    }
+    let mut pubkey = [0u8; 32];
+    pubkey.copy_from_slice(&plain[..32]);
+    Some(pubkey)
+}
+
+/// Send a PEER_RESPONSE with the found peer's address info.
+/// Payload: [32-byte pubkey][ip_bytes][0x00][port_bytes][0x00][8-byte timestamp LE]
+pub fn send_peer_response(
+    peer: &PeerSession,
+    socket: &UdpSocket,
+    target_pubkey: &[u8; 32],
+    ip: &str,
+    port: &str,
+    timestamp: u64,
+) {
+    if let Some(session) = &peer.session {
+        let mut payload = Vec::with_capacity(32 + ip.len() + port.len() + 10);
+        payload.extend_from_slice(target_pubkey);
+        payload.extend_from_slice(ip.as_bytes());
+        payload.push(0x00);
+        payload.extend_from_slice(port.as_bytes());
+        payload.push(0x00);
+        payload.extend_from_slice(&timestamp.to_le_bytes());
+        let pkt = session.encrypt_packet(PKT_MSG_PEER_RESPONSE, &payload);
+        socket.send_to(&pkt, peer.peer_addr).ok();
+    }
+}
+
+/// Handle an incoming PEER_RESPONSE. Returns (target_pubkey, ip, port, timestamp).
+pub fn handle_peer_response(data: &[u8], peer: &PeerSession) -> Option<([u8; 32], String, String, u64)> {
+    let session = peer.session.as_ref()?;
+    let (pkt_type, plain) = session.decrypt_packet(data)?;
+    if pkt_type != PKT_MSG_PEER_RESPONSE {
+        return None;
+    }
+    // Need at least: 32 pubkey + 1 ip + 0x00 + 1 port + 0x00 + 8 timestamp
+    if plain.len() < 44 {
+        return None;
+    }
+    let mut pubkey = [0u8; 32];
+    pubkey.copy_from_slice(&plain[..32]);
+    let rest = &plain[32..];
+    let ip_end = rest.iter().position(|&b| b == 0x00)?;
+    let ip = String::from_utf8_lossy(&rest[..ip_end]).to_string();
+    let rest2 = &rest[ip_end + 1..];
+    let port_end = rest2.iter().position(|&b| b == 0x00)?;
+    let port = String::from_utf8_lossy(&rest2[..port_end]).to_string();
+    let ts_data = &rest2[port_end + 1..];
+    if ts_data.len() < 8 {
+        return None;
+    }
+    let mut ts_bytes = [0u8; 8];
+    ts_bytes.copy_from_slice(&ts_data[..8]);
+    let timestamp = u64::from_le_bytes(ts_bytes);
+    Some((pubkey, ip, port, timestamp))
 }

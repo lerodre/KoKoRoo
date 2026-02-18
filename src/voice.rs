@@ -677,7 +677,7 @@ pub fn start_engine(
             };
             let packet = {
                 let sess = session_s.lock().unwrap();
-                sess.encrypt_voice(&opus_buf[..encoded_len])
+                sess.encrypt_packet(crate::crypto::PKT_VOICE, &opus_buf[..encoded_len])
             };
             let _ = send_socket.send_to(&packet, &peer_addr_owned);
         }
