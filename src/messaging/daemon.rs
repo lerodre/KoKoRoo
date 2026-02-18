@@ -118,14 +118,23 @@ impl MsgDaemon {
 
     fn bind_socket(&mut self) {
         let addr = format!("[::]:{}", self.local_port);
-        match UdpSocket::bind(&addr) {
-            Ok(s) => {
-                s.set_read_timeout(Some(RECV_TIMEOUT)).ok();
-                s.set_nonblocking(false).ok();
-                self.socket = Some(s);
-            }
-            Err(e) => {
-                eprintln!("[msg-daemon] Failed to bind {}: {}", addr, e);
+        // Retry up to 20 times (4 seconds) — voice engine may still hold the socket
+        for attempt in 0..20 {
+            match UdpSocket::bind(&addr) {
+                Ok(s) => {
+                    s.set_read_timeout(Some(RECV_TIMEOUT)).ok();
+                    s.set_nonblocking(false).ok();
+                    self.socket = Some(s);
+                    log_fmt!("[daemon] bind_socket OK on attempt {}", attempt + 1);
+                    return;
+                }
+                Err(e) => {
+                    if attempt < 19 {
+                        std::thread::sleep(Duration::from_millis(200));
+                    } else {
+                        log_fmt!("[daemon] bind_socket FAILED after 20 attempts: {}", e);
+                    }
+                }
             }
         }
     }
@@ -163,6 +172,7 @@ impl MsgDaemon {
                 }
 
                 MsgCommand::YieldSocket => {
+                    log_fmt!("[daemon] YieldSocket — releasing socket for voice call");
                     // Save connected peer info for reconnection after call
                     self.saved_peers.clear();
                     for peer in self.peers.values() {
@@ -196,6 +206,7 @@ impl MsgDaemon {
                 }
 
                 MsgCommand::ReclaimSocket => {
+                    log_fmt!("[daemon] ReclaimSocket — rebinding socket after voice call");
                     self.bind_socket();
                     // Fresh slate after a call — allow new incoming call notifications
                     self.notified_calls.clear();
