@@ -379,6 +379,9 @@ fn exchange_identity(
             Ok((n, _)) => {
                 let sess = session.lock().unwrap();
                 if let Some((pkt_type, plaintext)) = sess.decrypt_packet(&buf[..n]) {
+                    if pkt_type == PKT_HANGUP {
+                        return Err("Call rejected".to_string());
+                    }
                     if pkt_type == PKT_IDENTITY && plaintext.len() >= 32 {
                         let mut pk = [0u8; 32];
                         pk.copy_from_slice(&plaintext[..32]);

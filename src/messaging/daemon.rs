@@ -58,6 +58,8 @@ pub struct MsgDaemon {
     /// IPs we already notified about an incoming voice call (avoid re-notifying on HELLO retries).
     /// Value: (timestamp, peer_addr, peer_ephemeral_pubkey) — stored for reject-with-hangup.
     notified_calls: HashMap<String, (Instant, SocketAddr, [u8; 32])>,
+    /// Recently rejected IPs — suppress extra HELLOs for a few seconds after reject.
+    rejected_ips: HashMap<String, Instant>,
 }
 
 impl MsgDaemon {
@@ -86,6 +88,7 @@ impl MsgDaemon {
             outgoing_requests: HashMap::new(),
             settings: Settings::load(),
             notified_calls: HashMap::new(),
+            rejected_ips: HashMap::new(),
         }
     }
 
@@ -146,6 +149,9 @@ impl MsgDaemon {
                                 socket.send_to(&hangup, peer_addr).ok();
                             }
                         }
+                        // Suppress extra HELLOs the caller sends after completing handshake
+                        // (voice.rs sends ~10 extra HELLOs). Short TTL so new calls still work.
+                        self.rejected_ips.insert(ip, Instant::now());
                     } else {
                         self.notified_calls.remove(&ip);
                     }
@@ -598,6 +604,12 @@ impl MsgDaemon {
                     if self.settings.is_ip_banned(&ip_str) {
                         continue;
                     }
+                    // Suppress extra HELLOs after a recent reject (short window)
+                    if let Some(t) = self.rejected_ips.get(&ip_str) {
+                        if t.elapsed() < Duration::from_secs(5) {
+                            continue;
+                        }
+                    }
                     // Only notify once per caller (expires after 60s to allow re-calls)
                     if let Some((t, ..)) = self.notified_calls.get(&ip_str) {
                         if t.elapsed() < Duration::from_secs(60) {
@@ -658,6 +670,7 @@ impl MsgDaemon {
 
         // Clean up expired incoming call notifications
         self.notified_calls.retain(|_, (t, ..)| t.elapsed() < Duration::from_secs(60));
+        self.rejected_ips.retain(|_, t| t.elapsed() < Duration::from_secs(5));
 
         // Keepalives
         if now.duration_since(self.last_keepalive) > KEEPALIVE_INTERVAL {
