@@ -192,6 +192,9 @@ impl MsgDaemon {
 
                 MsgCommand::ReclaimSocket => {
                     self.bind_socket();
+                    // Fresh slate after a call — allow new incoming call notifications
+                    self.notified_calls.clear();
+                    self.rejected_ips.clear();
                     // Reconnect all peers that were active before the call
                     let to_reconnect = std::mem::take(&mut self.saved_peers);
                     if let Some(ref socket) = self.socket {
@@ -610,17 +613,18 @@ impl MsgDaemon {
                             continue;
                         }
                     }
-                    // Only notify once per caller (expires after 60s to allow re-calls)
-                    if let Some((t, ..)) = self.notified_calls.get(&ip_str) {
-                        if t.elapsed() < Duration::from_secs(60) {
-                            continue;
-                        }
-                    }
                     // Parse ephemeral pubkey from HELLO
                     let peer_ephemeral = match crypto::parse_hello(data) {
                         Some(pk) => pk,
                         None => continue,
                     };
+                    // Suppress retries from the SAME call (same ephemeral key).
+                    // A NEW call uses a different key, so it always gets through.
+                    if let Some((t, _, stored_pk)) = self.notified_calls.get(&ip_str) {
+                        if *stored_pk == peer_ephemeral && t.elapsed() < Duration::from_secs(60) {
+                            continue;
+                        }
+                    }
 
                     // Try to identify caller:
                     // 1. Check active messaging peers (most reliable)
