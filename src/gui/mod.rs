@@ -56,46 +56,74 @@ pub(crate) fn list_audio_devices() -> DeviceList {
     DeviceList { input_names, output_names }
 }
 
-/// Get the best (non-temporary, non-loopback) IPv6 address for this machine.
-pub(crate) fn get_best_ipv6() -> String {
-    let addrs = get_ipv6_addresses();
-    // Prefer global non-loopback addresses
-    for (ip, label) in &addrs {
-        if ip != "::1" && label.contains("global") {
+/// Get the best (non-temporary, non-loopback) IPv6 address, optionally filtered by adapter.
+pub(crate) fn get_best_ipv6(adapter: &str) -> String {
+    let ifaces = get_network_interfaces();
+    let filtered: Vec<&(String, String, String)> = if adapter.is_empty() {
+        ifaces.iter().collect()
+    } else {
+        ifaces.iter().filter(|(iface, _, _)| iface == adapter).collect()
+    };
+    // Prefer global non-loopback
+    for (_, ip, scope) in &filtered {
+        if *ip != "::1" && scope == "global" {
             return ip.clone();
         }
     }
     // Fallback to link-local
-    for (ip, _) in &addrs {
-        if ip != "::1" {
+    for (_, ip, _) in &filtered {
+        if *ip != "::1" {
             return ip.clone();
         }
     }
     "::1".to_string()
 }
 
-fn get_ipv6_addresses() -> Vec<(String, String)> {
-    let mut addrs = vec![("::1".to_string(), "::1 (loopback)".to_string())];
+/// Get unique network adapter names (excluding loopback and docker/veth).
+pub(crate) fn get_adapter_names() -> Vec<String> {
+    let ifaces = get_network_interfaces();
+    let mut names: Vec<String> = Vec::new();
+    for (iface, _, _) in &ifaces {
+        if iface != "lo" && !names.contains(iface) {
+            names.push(iface.clone());
+        }
+    }
+    names
+}
+
+/// Returns (interface_name, ip, scope) for all non-temporary IPv6 addresses.
+fn get_network_interfaces() -> Vec<(String, String, String)> {
+    let mut result: Vec<(String, String, String)> = Vec::new();
 
     #[cfg(target_os = "linux")]
     {
         if let Ok(output) = std::process::Command::new("ip").args(["-6", "addr", "show"]).output() {
             let text = String::from_utf8_lossy(&output.stdout);
+            let mut current_iface = String::new();
             for line in text.lines() {
                 let trimmed = line.trim();
+                // Interface line: "3: wlp3s0: <BROADCAST,..."
+                if !trimmed.starts_with("inet6") && trimmed.contains(": <") {
+                    if let Some(name) = trimmed.split(':').nth(1) {
+                        current_iface = name.trim().to_string();
+                        // Strip @... suffix (e.g. "vethd3f93b1@enp2s0")
+                        if let Some(pos) = current_iface.find('@') {
+                            current_iface.truncate(pos);
+                        }
+                    }
+                }
                 if trimmed.starts_with("inet6") {
-                    // Skip temporary/privacy extension addresses
-                    if trimmed.contains("temporary") || trimmed.contains("mngtmpaddr") {
+                    // Skip temporary privacy extension addresses
+                    if trimmed.contains("temporary") {
                         continue;
                     }
                     if let Some(addr_cidr) = trimmed.split_whitespace().nth(1) {
                         let addr = addr_cidr.split('/').next().unwrap_or(addr_cidr);
-                        if addr != "::1" {
-                            let scope = if trimmed.contains("scope global") { "global" }
-                                else if trimmed.contains("scope link") { "link-local" }
-                                else { "other" };
-                            addrs.push((addr.to_string(), format!("{addr} ({scope})")));
-                        }
+                        if addr == "::1" { continue; }
+                        let scope = if trimmed.contains("scope global") { "global" }
+                            else if trimmed.contains("scope link") { "link-local" }
+                            else { "other" };
+                        result.push((current_iface.clone(), addr.to_string(), scope.to_string()));
                     }
                 }
             }
@@ -104,30 +132,34 @@ fn get_ipv6_addresses() -> Vec<(String, String)> {
 
     #[cfg(target_os = "windows")]
     {
-        // Filter out temporary privacy extension addresses
+        // Use PowerShell to get interface + address pairs
         if let Ok(output) = std::process::Command::new("powershell")
-            .args(["-Command", "Get-NetIPAddress -AddressFamily IPv6 | Where-Object { $_.SuffixOrigin -ne 'Random' -and $_.IPAddress -ne '::1' -and $_.AddressState -eq 'Preferred' } | Select-Object -ExpandProperty IPAddress"])
+            .args(["-Command", "Get-NetIPAddress -AddressFamily IPv6 | Where-Object { $_.SuffixOrigin -ne 'Random' -and $_.IPAddress -ne '::1' -and $_.AddressState -eq 'Preferred' } | Select-Object InterfaceAlias, IPAddress | Format-Table -HideTableHeaders"])
             .output()
         {
             let text = String::from_utf8_lossy(&output.stdout);
             for line in text.lines() {
-                let addr = line.trim().to_string();
-                if addr.is_empty() || addr == "::1" { continue; }
-                let scope = if addr.starts_with("fe80") { "link-local" } else { "global" };
-                addrs.push((addr.clone(), format!("{addr} ({scope})")));
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    let iface = parts[0].to_string();
+                    let addr = parts[1].to_string();
+                    if addr == "::1" { continue; }
+                    let scope = if addr.starts_with("fe80") { "link-local" } else { "global" };
+                    result.push((iface, addr, scope.to_string()));
+                }
             }
         }
     }
 
-    // Sort: global first, then link-local, then other
-    if addrs.len() > 1 {
-        addrs[1..].sort_by_key(|(_, label)| {
-            if label.contains("global") { 0 }
-            else if label.contains("link-local") { 1 }
-            else { 2 }
-        });
-    }
-    addrs
+    // Sort: global first per interface
+    result.sort_by_key(|(_, _, scope)| {
+        match scope.as_str() {
+            "global" => 0,
+            "link-local" => 1,
+            _ => 2,
+        }
+    });
+    result
 }
 
 /// Format a contact/peer for display: "nickname #fingerprint" or just fingerprint.
@@ -249,7 +281,7 @@ impl HostelApp {
         let identity = Identity::load_or_create();
         let settings = Settings::load();
         let contacts = identity::load_all_contacts();
-        let best_ipv6 = get_best_ipv6();
+        let best_ipv6 = get_best_ipv6(&settings.network_adapter);
 
         let selected_input = if !settings.mic.is_empty() {
             devices.input_names.iter().position(|n| n == &settings.mic).unwrap_or(0)

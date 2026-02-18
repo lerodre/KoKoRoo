@@ -188,6 +188,7 @@ pub struct Settings {
     #[serde(default)] pub speakers: String,
     #[serde(default)] pub local_port: String,
     #[serde(default)] pub network_mode: usize,
+    #[serde(default)] pub network_adapter: String,
     #[serde(default)] pub blocked: Vec<String>,
     #[serde(default)] pub banned_ips: Vec<String>,
 }

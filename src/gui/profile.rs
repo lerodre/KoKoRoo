@@ -40,7 +40,7 @@ impl HostelApp {
                 ui.ctx().copy_text(self.best_ipv6.clone());
             }
             if ui.small_button("Refresh").clicked() {
-                self.best_ipv6 = get_best_ipv6();
+                self.best_ipv6 = get_best_ipv6(&self.settings.network_adapter);
             }
         });
 

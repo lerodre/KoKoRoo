@@ -1,6 +1,6 @@
 use eframe::egui;
 use crate::identity;
-use super::{HostelApp, list_audio_devices};
+use super::{HostelApp, list_audio_devices, get_adapter_names, get_best_ipv6};
 
 impl HostelApp {
     pub(crate) fn draw_settings_tab(&mut self, ui: &mut egui::Ui) {
@@ -17,6 +17,30 @@ impl HostelApp {
         });
         if self.settings.network_mode != prev_mode {
             self.settings.save();
+        }
+
+        ui.add_space(8.0);
+
+        // Network adapter
+        ui.label("Network adapter:");
+        let adapters = get_adapter_names();
+        let prev_adapter = self.settings.network_adapter.clone();
+        let selected_text = if self.settings.network_adapter.is_empty() {
+            "Auto".to_string()
+        } else {
+            self.settings.network_adapter.clone()
+        };
+        egui::ComboBox::from_id_salt("settings_adapter").width(300.0)
+            .selected_text(&selected_text)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.settings.network_adapter, String::new(), "Auto");
+                for name in &adapters {
+                    ui.selectable_value(&mut self.settings.network_adapter, name.clone(), name.as_str());
+                }
+            });
+        if self.settings.network_adapter != prev_adapter {
+            self.settings.save();
+            self.best_ipv6 = get_best_ipv6(&self.settings.network_adapter);
         }
 
         ui.add_space(8.0);
