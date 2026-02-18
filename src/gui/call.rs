@@ -535,38 +535,54 @@ impl HostelApp {
                 }
             }
         }
-        if let Some(tex) = &self.screen_texture {
+        // ── Video + Chat layout ──
+        if has_video {
             ui.separator();
-            let available_width = ui.available_width();
-            let available_height = if has_video {
-                ui.available_height()
-            } else {
-                ui.available_height() * 0.6
-            };
-            let aspect = video_w as f32 / video_h as f32;
-            let (display_w, display_h) = {
-                let w_from_width = available_width;
-                let h_from_width = available_width / aspect;
-                let h_from_height = available_height;
-                let w_from_height = available_height * aspect;
-                if h_from_width <= available_height {
-                    (w_from_width, h_from_width)
-                } else {
-                    (w_from_height, h_from_height)
-                }
-            };
-            let pad_x = (available_width - display_w).max(0.0) / 2.0;
-            ui.horizontal(|ui| {
-                ui.add_space(pad_x);
-                ui.image(egui::load::SizedTexture::new(
-                    tex.id(),
-                    egui::vec2(display_w, display_h),
-                ));
-            });
-        }
+            let chat_w = 280.0_f32;
+            let available = ui.available_rect_before_wrap();
+            let actual_chat_w = chat_w.min(available.width() * 0.4);
+            let video_area_w = (available.width() - actual_chat_w - 4.0).max(100.0);
 
-        // ── Chat area (only when no video) ──
-        if !has_video {
+            let video_rect = egui::Rect::from_min_size(
+                available.min,
+                egui::vec2(video_area_w, available.height()),
+            );
+            let chat_rect = egui::Rect::from_min_size(
+                egui::pos2(available.min.x + video_area_w + 4.0, available.min.y),
+                egui::vec2(actual_chat_w, available.height()),
+            );
+
+            // Video on the left
+            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(video_rect), |ui| {
+                if let Some(tex) = &self.screen_texture {
+                    let avail_w = ui.available_width();
+                    let avail_h = ui.available_height();
+                    let aspect = video_w as f32 / video_h as f32;
+                    let (dw, dh) = {
+                        let h_from_w = avail_w / aspect;
+                        if h_from_w <= avail_h {
+                            (avail_w, h_from_w)
+                        } else {
+                            (avail_h * aspect, avail_h)
+                        }
+                    };
+                    let pad = (avail_w - dw).max(0.0) / 2.0;
+                    ui.horizontal(|ui| {
+                        ui.add_space(pad);
+                        ui.image(egui::load::SizedTexture::new(
+                            tex.id(),
+                            egui::vec2(dw, dh),
+                        ));
+                    });
+                }
+            });
+
+            // Chat on the right
+            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(chat_rect), |ui| {
+                self.draw_chat(ui);
+            });
+        } else {
+            // No video: chat below
             ui.separator();
             self.draw_chat(ui);
         }
