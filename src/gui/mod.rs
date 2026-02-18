@@ -924,6 +924,10 @@ impl eframe::App for HostelApp {
         if self.incoming_call.is_some() {
             self.draw_incoming_call_popup(ctx);
         }
+
+        // Always schedule periodic repaints so we detect daemon events
+        // (incoming calls, messages, peer status) even when idle.
+        ctx.request_repaint_after(std::time::Duration::from_secs(4));
     }
 }
 
