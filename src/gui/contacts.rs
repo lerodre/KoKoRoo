@@ -148,20 +148,33 @@ impl HostelApp {
         });
 
         ui.add_space(8.0);
-        let call_btn = egui::Button::new(
-            egui::RichText::new("Call").size(16.0).color(egui::Color32::WHITE)
-        ).min_size(egui::vec2(120.0, 34.0)).fill(egui::Color32::from_rgb(40, 140, 60));
-        if ui.add(call_btn).clicked() {
-            if !contact.last_address.is_empty() {
-                self.peer_ip = contact.last_address.clone();
+        ui.horizontal(|ui| {
+            let call_btn = egui::Button::new(
+                egui::RichText::new("Call").size(16.0).color(egui::Color32::WHITE)
+            ).min_size(egui::vec2(120.0, 34.0)).fill(egui::Color32::from_rgb(40, 140, 60));
+            if ui.add(call_btn).clicked() {
+                if !contact.last_address.is_empty() {
+                    self.peer_ip = contact.last_address.clone();
+                }
+                if !contact.last_port.is_empty() {
+                    self.peer_port = contact.last_port.clone();
+                }
+                self.viewing_contact = None;
+                self.viewing_chat = None;
+                self.active_tab = SidebarTab::Call;
             }
-            if !contact.last_port.is_empty() {
-                self.peer_port = contact.last_port.clone();
+
+            let msg_btn = egui::Button::new(
+                egui::RichText::new("Message").size(16.0).color(egui::Color32::WHITE)
+            ).min_size(egui::vec2(120.0, 34.0)).fill(egui::Color32::from_rgb(40, 100, 180));
+            if ui.add(msg_btn).clicked() {
+                let cid = contact.contact_id.clone();
+                self.viewing_contact = None;
+                self.viewing_chat = None;
+                self.active_tab = SidebarTab::Messages;
+                self.open_msg_chat(&cid);
             }
-            self.viewing_contact = None;
-            self.viewing_chat = None;
-            self.active_tab = SidebarTab::Call;
-        }
+        });
 
         ui.add_space(10.0);
         ui.separator();

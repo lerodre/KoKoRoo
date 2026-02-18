@@ -5,17 +5,25 @@ impl HostelApp {
     pub(crate) fn draw_sidebar(&mut self, ui: &mut egui::Ui, in_call: bool) {
         ui.add_space(8.0);
         ui.vertical_centered(|ui| {
-            let tabs = [
-                (SidebarTab::Profile, "Profile"),
-                (SidebarTab::Contacts, "Contacts"),
-                (SidebarTab::Call, "Call"),
-                (SidebarTab::Settings, "Settings"),
+            let total_unread: u32 = self.msg_unread.values().sum();
+
+            let tabs: Vec<(SidebarTab, String)> = vec![
+                (SidebarTab::Profile, "Profile".to_string()),
+                (SidebarTab::Contacts, "Contacts".to_string()),
+                (SidebarTab::Messages, if total_unread > 0 {
+                    format!("Messages ({})", total_unread)
+                } else {
+                    "Messages".to_string()
+                }),
+                (SidebarTab::Call, "Call".to_string()),
+                (SidebarTab::Settings, "Settings".to_string()),
             ];
-            for (tab, label) in tabs {
+            for (tab, label) in &tabs {
+                let tab = *tab;
                 let is_selected = self.active_tab == tab;
                 let enabled = !in_call || tab == SidebarTab::Call;
 
-                let text = egui::RichText::new(label).size(11.0);
+                let text = egui::RichText::new(label.as_str()).size(11.0);
                 let text = if !enabled {
                     text.color(egui::Color32::from_gray(100))
                 } else if is_selected {

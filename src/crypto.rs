@@ -13,6 +13,13 @@ pub const PKT_CHAT: u8 = 0x04;     // chat message: [0x04][4-byte counter][encry
 pub const PKT_HANGUP: u8 = 0x05;   // hangup signal: [0x05][4-byte counter][encrypted empty]
 pub const PKT_SCREEN: u8 = 0x06;   // screen share: [0x06][4-byte counter][encrypted VP8 chunk]
 
+// Messaging daemon packet types (independent of voice calls)
+pub const PKT_MSG_HELLO: u8    = 0x10; // msg handshake: [0x10][32-byte ephemeral pubkey]
+pub const PKT_MSG_IDENTITY: u8 = 0x11; // msg identity exchange (encrypted)
+pub const PKT_MSG_CHAT: u8     = 0x12; // message: [4-byte seq][text]
+pub const PKT_MSG_ACK: u8      = 0x13; // delivery confirmation: [4-byte seq]
+pub const PKT_MSG_BYE: u8      = 0x14; // disconnect signal
+
 /// Size of an X25519 public key.
 pub const PUBKEY_SIZE: usize = 32;
 
@@ -55,6 +62,24 @@ pub fn build_hello(pubkey: &[u8; 32]) -> [u8; HELLO_SIZE] {
 /// Parse a received HELLO packet. Returns the peer's public key bytes.
 pub fn parse_hello(data: &[u8]) -> Option<[u8; 32]> {
     if data.len() < HELLO_SIZE || data[0] != PKT_HELLO {
+        return None;
+    }
+    let mut pubkey = [0u8; 32];
+    pubkey.copy_from_slice(&data[1..HELLO_SIZE]);
+    Some(pubkey)
+}
+
+/// Build a MSG_HELLO packet containing our public key.
+pub fn build_msg_hello(pubkey: &[u8; 32]) -> [u8; HELLO_SIZE] {
+    let mut pkt = [0u8; HELLO_SIZE];
+    pkt[0] = PKT_MSG_HELLO;
+    pkt[1..HELLO_SIZE].copy_from_slice(pubkey);
+    pkt
+}
+
+/// Parse a received MSG_HELLO packet. Returns the peer's public key bytes.
+pub fn parse_msg_hello(data: &[u8]) -> Option<[u8; 32]> {
+    if data.len() < HELLO_SIZE || data[0] != PKT_MSG_HELLO {
         return None;
     }
     let mut pubkey = [0u8; 32];

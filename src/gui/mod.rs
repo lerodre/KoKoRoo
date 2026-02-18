@@ -4,9 +4,11 @@ mod contacts;
 mod call;
 mod settings;
 mod error;
+mod messages;
 
 use cpal::traits::{DeviceTrait, HostTrait};
 use eframe::egui;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -14,6 +16,7 @@ use std::time::Instant;
 
 use crate::chat::ChatHistory;
 use crate::identity::{self, Contact, Identity, Settings};
+use crate::messaging::{MsgCommand, MsgDaemon, MsgEvent};
 use crate::screen::{ScreenCommand, ScreenViewer};
 
 // ── App State Machine ──
@@ -30,6 +33,7 @@ pub(crate) enum Screen {
 pub(crate) enum SidebarTab {
     Profile,
     Contacts,
+    Messages,
     Call,
     Settings,
 }
@@ -219,6 +223,16 @@ pub struct HostelApp {
 
     // Async connection result
     pub(crate) connect_result: Arc<std::sync::Mutex<Option<Result<CallInfo, String>>>>,
+
+    // Messaging daemon
+    pub(crate) msg_cmd_tx: Option<mpsc::Sender<MsgCommand>>,
+    pub(crate) msg_event_rx: Option<mpsc::Receiver<MsgEvent>>,
+    pub(crate) msg_active_chat: Option<String>,
+    pub(crate) msg_chat_input: String,
+    pub(crate) msg_chat_histories: HashMap<String, ChatHistory>,
+    pub(crate) msg_unread: HashMap<String, u32>,
+    pub(crate) msg_peer_online: HashMap<String, bool>,
+    pub(crate) msg_show_contact_picker: bool,
 }
 
 impl HostelApp {
@@ -244,6 +258,23 @@ impl HostelApp {
         } else {
             settings.local_port.clone()
         };
+
+        // Spawn messaging daemon
+        let (cmd_tx, cmd_rx) = mpsc::channel::<MsgCommand>();
+        let (evt_tx, evt_rx) = mpsc::channel::<MsgEvent>();
+        let daemon_port = local_port.clone();
+        let daemon_identity = Identity {
+            secret: identity.secret,
+            pubkey: identity.pubkey,
+            fingerprint: identity.fingerprint.clone(),
+        };
+        let daemon_nickname = settings.nickname.clone();
+        thread::spawn(move || {
+            let mut daemon = MsgDaemon::new(
+                daemon_port, daemon_identity, daemon_nickname, cmd_rx, evt_tx,
+            );
+            daemon.run();
+        });
 
         Self {
             screen: Screen::Setup,
@@ -296,10 +327,23 @@ impl HostelApp {
             last_frame_time: None,
             is_fullscreen: false,
             connect_result: Arc::new(std::sync::Mutex::new(None)),
+            msg_cmd_tx: Some(cmd_tx),
+            msg_event_rx: Some(evt_rx),
+            msg_active_chat: None,
+            msg_chat_input: String::new(),
+            msg_chat_histories: HashMap::new(),
+            msg_unread: HashMap::new(),
+            msg_peer_online: HashMap::new(),
+            msg_show_contact_picker: false,
         }
     }
 
     pub(crate) fn start_call(&mut self) {
+        // Tell messaging daemon to release the socket for voice
+        if let Some(tx) = &self.msg_cmd_tx {
+            tx.send(MsgCommand::YieldSocket).ok();
+        }
+
         // Save settings before starting the call
         self.settings.mic = self.devices.input_names.get(self.selected_input)
             .cloned().unwrap_or_default();
@@ -466,6 +510,11 @@ impl HostelApp {
         *self.connect_result.lock().unwrap() = None;
         self.contacts = identity::load_all_contacts();
         self.screen = Screen::Setup;
+
+        // Tell messaging daemon to reclaim the socket
+        if let Some(tx) = &self.msg_cmd_tx {
+            tx.send(MsgCommand::ReclaimSocket).ok();
+        }
     }
 }
 
@@ -557,6 +606,30 @@ impl eframe::App for HostelApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(repaint_ms));
         }
 
+        // Poll messaging daemon events
+        if let Some(rx) = &self.msg_event_rx {
+            while let Ok(evt) = rx.try_recv() {
+                match evt {
+                    MsgEvent::IncomingMessage { contact_id, text, .. } => {
+                        // Append to chat history
+                        let history = self.msg_chat_histories.entry(contact_id.clone())
+                            .or_insert_with(|| ChatHistory::load(&contact_id, &self.identity.secret));
+                        history.add_message(false, text);
+                        // Increment unread if not viewing this chat
+                        if self.msg_active_chat.as_deref() != Some(&contact_id) {
+                            *self.msg_unread.entry(contact_id).or_insert(0) += 1;
+                        }
+                    }
+                    MsgEvent::MessageDelivered { .. } => {
+                        // Could update delivery status UI here
+                    }
+                    MsgEvent::PeerStatus { contact_id, online } => {
+                        self.msg_peer_online.insert(contact_id, online);
+                    }
+                }
+            }
+        }
+
         // Style
         let mut style = (*ctx.style()).clone();
         style.spacing.item_spacing = egui::vec2(8.0, 6.0);
@@ -603,6 +676,7 @@ impl eframe::App for HostelApp {
             match self.active_tab {
                 SidebarTab::Profile => self.draw_profile_tab(ui),
                 SidebarTab::Contacts => self.draw_contacts_tab(ui),
+                SidebarTab::Messages => self.draw_messages_tab(ui),
                 SidebarTab::Call => {
                     match &self.screen {
                         Screen::Setup => self.draw_call_tab(ui),
