@@ -439,8 +439,10 @@ pub struct HostelApp {
     // Ringtone playback (background thread)
     pub(crate) ringtone_stop: Option<Arc<AtomicBool>>,
 
-    // App logo texture (loaded once from embedded PNG)
+    // Icon textures (loaded once from embedded PNGs, cropped + LINEAR filtered)
     pub(crate) logo_texture: Option<egui::TextureHandle>,
+    pub(crate) call_icon_texture: Option<egui::TextureHandle>,
+    pub(crate) settings_icon_texture: Option<egui::TextureHandle>,
 
     // Color palette editor
     pub(crate) color_hex_inputs: HashMap<String, String>,
@@ -572,6 +574,8 @@ impl HostelApp {
             incoming_call_attention: false,
             ringtone_stop: None,
             logo_texture: None,
+            call_icon_texture: None,
+            settings_icon_texture: None,
             color_hex_inputs: HashMap::new(),
             color_locks: std::collections::HashSet::new(),
             show_firewall_prompt: needs_firewall_prompt,
@@ -1197,11 +1201,9 @@ impl HostelApp {
     }
 }
 
-/// Load the embedded logo PNG cropped to its non-transparent bounding box.
-/// Returns (rgba_bytes, width, height).
-pub(crate) fn load_logo_cropped() -> (Vec<u8>, u32, u32) {
-    let png_bytes = include_bytes!("../../assets/logo.png");
-    let img = image::load_from_memory(png_bytes).expect("failed to decode logo PNG");
+/// Load a PNG from bytes, crop transparent padding, return (rgba, width, height).
+pub(crate) fn load_png_cropped(png_bytes: &[u8]) -> (Vec<u8>, u32, u32) {
+    let img = image::load_from_memory(png_bytes).expect("failed to decode PNG");
     let rgba = img.to_rgba8();
     let (w, h) = (rgba.width(), rgba.height());
 
@@ -1222,7 +1224,6 @@ pub(crate) fn load_logo_cropped() -> (Vec<u8>, u32, u32) {
     }
 
     if max_x < min_x || max_y < min_y {
-        // Fully transparent? Return original
         return (rgba.into_raw(), w, h);
     }
 
@@ -1232,9 +1233,24 @@ pub(crate) fn load_logo_cropped() -> (Vec<u8>, u32, u32) {
     (cropped.into_raw(), crop_w, crop_h)
 }
 
+/// Load a PNG, crop transparent padding, downscale with Lanczos3, and create an egui texture.
+/// max_size caps the largest dimension (0 = no downscale).
+pub(crate) fn load_icon_texture_sized(ctx: &egui::Context, name: &str, png_bytes: &[u8], max_size: u32) -> egui::TextureHandle {
+    let (rgba, w, h) = load_png_cropped(png_bytes);
+    let img = image::RgbaImage::from_raw(w, h, rgba).unwrap();
+    let img = if max_size > 0 && (w > max_size || h > max_size) {
+        image::imageops::resize(&img, max_size, max_size, image::imageops::FilterType::Lanczos3)
+    } else {
+        img
+    };
+    let (fw, fh) = (img.width(), img.height());
+    let pixels = egui::ColorImage::from_rgba_unmultiplied([fw as usize, fh as usize], &img);
+    ctx.load_texture(name, pixels, egui::TextureOptions::LINEAR)
+}
+
 pub fn run() {
     // Window icon from cropped logo (cross-platform: Windows, Linux, macOS)
-    let (rgba, w, h) = load_logo_cropped();
+    let (rgba, w, h) = load_png_cropped(include_bytes!("../../assets/logo.png"));
     let icon = egui::IconData { rgba, width: w, height: h };
 
     let options = eframe::NativeOptions {

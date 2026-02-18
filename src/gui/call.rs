@@ -4,7 +4,7 @@ use std::time::Instant;
 use crate::chat::ChatHistory;
 use crate::identity;
 use crate::screen::{ScreenCommand, ScreenQuality};
-use super::{HostelApp, Screen, format_peer_display, peer_display_job, censor_ip};
+use super::{HostelApp, Screen, format_peer_display, peer_display_job, censor_ip, load_icon_texture_sized};
 
 impl HostelApp {
     pub(crate) fn draw_call_tab(&mut self, ui: &mut egui::Ui) {
@@ -34,8 +34,15 @@ impl HostelApp {
             .show(ui, |ui| { ui.add(port_edit); });
 
         ui.add_space(12.0);
-        let btn = egui::Button::new(
-            egui::RichText::new("Call").size(20.0).color(egui::Color32::WHITE)
+        let call_tex = self.call_icon_texture.get_or_insert_with(|| {
+            load_icon_texture_sized(ui.ctx(), "icon-call", include_bytes!("../../assets/call.png"), 64)
+        }).clone();
+        let icon_h = 28.0;
+        let icon_aspect = call_tex.size()[0] as f32 / call_tex.size()[1] as f32;
+        let icon_sized = egui::load::SizedTexture::new(call_tex.id(), egui::vec2(icon_h * icon_aspect, icon_h));
+        let btn = egui::Button::image_and_text(
+            icon_sized,
+            egui::RichText::new("Call").size(20.0).color(egui::Color32::WHITE),
         )
         .min_size(egui::vec2(200.0, 42.0))
         .fill(self.settings.theme.btn_positive());
