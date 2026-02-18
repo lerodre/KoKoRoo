@@ -443,6 +443,7 @@ pub struct HostelApp {
     pub(crate) logo_texture: Option<egui::TextureHandle>,
     pub(crate) call_icon_texture: Option<egui::TextureHandle>,
     pub(crate) settings_icon_texture: Option<egui::TextureHandle>,
+    pub(crate) enablecam_icon_texture: Option<egui::TextureHandle>,
 
     // Color palette editor
     pub(crate) color_hex_inputs: HashMap<String, String>,
@@ -576,6 +577,7 @@ impl HostelApp {
             logo_texture: None,
             call_icon_texture: None,
             settings_icon_texture: None,
+            enablecam_icon_texture: None,
             color_hex_inputs: HashMap::new(),
             color_locks: std::collections::HashSet::new(),
             show_firewall_prompt: needs_firewall_prompt,
@@ -969,7 +971,7 @@ impl eframe::App for HostelApp {
             .fill(self.settings.theme.sidebar_bg())
             .inner_margin(egui::Margin::same(4.0));
         egui::SidePanel::left("sidebar")
-            .exact_width(84.0)
+            .exact_width(125.0)
             .resizable(false)
             .frame(sidebar_frame)
             .show_separator_line(false)
@@ -1239,7 +1241,11 @@ pub(crate) fn load_icon_texture_sized(ctx: &egui::Context, name: &str, png_bytes
     let (rgba, w, h) = load_png_cropped(png_bytes);
     let img = image::RgbaImage::from_raw(w, h, rgba).unwrap();
     let img = if max_size > 0 && (w > max_size || h > max_size) {
-        image::imageops::resize(&img, max_size, max_size, image::imageops::FilterType::Lanczos3)
+        // Preserve aspect ratio: scale so largest dimension = max_size
+        let scale = max_size as f32 / w.max(h) as f32;
+        let nw = ((w as f32 * scale).round() as u32).max(1);
+        let nh = ((h as f32 * scale).round() as u32).max(1);
+        image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3)
     } else {
         img
     };

@@ -20,17 +20,17 @@ impl HostelApp {
 
         // Preload icon textures for Call and Settings
         let call_tex = self.call_icon_texture.get_or_insert_with(|| {
-            load_icon_texture_sized(ui.ctx(), "icon-call", include_bytes!("../../assets/call.png"), 64)
+            load_icon_texture_sized(ui.ctx(), "icon-call", include_bytes!("../../assets/call.png"), 48)
         }).clone();
         let settings_tex = self.settings_icon_texture.get_or_insert_with(|| {
-            load_icon_texture_sized(ui.ctx(), "icon-settings", include_bytes!("../../assets/settings.png"), 64)
+            load_icon_texture_sized(ui.ctx(), "icon-settings", include_bytes!("../../assets/settings.png"), 48)
         }).clone();
 
         ui.vertical_centered(|ui| {
             let total_unread: u32 = self.msg_unread.values().sum();
             let incoming_count = self.req_incoming.len();
 
-            let icon_h = 18.0; // icon height in sidebar buttons
+            let icon_h = 30.0; // icon height in sidebar buttons
 
             let tabs: Vec<(SidebarTab, String)> = vec![
                 (SidebarTab::Profile, "Profile".to_string()),
@@ -54,7 +54,7 @@ impl HostelApp {
                 let is_selected = self.active_tab == tab;
                 let enabled = !in_call || tab == SidebarTab::Call || tab == SidebarTab::Appearance;
 
-                let text = egui::RichText::new(label.as_str()).size(11.0);
+                let text = egui::RichText::new(label.as_str()).size(13.0);
                 let text = if !enabled {
                     text.color(self.settings.theme.text_muted())
                 } else if is_selected {
@@ -75,13 +75,11 @@ impl HostelApp {
                     let icon_w = icon_h * icon_aspect;
                     let icon_sized = egui::load::SizedTexture::new(tex.id(), egui::vec2(icon_w, icon_h));
                     let btn = egui::Button::image_and_text(icon_sized, text)
-                        .min_size(egui::vec2(76.0, 32.0))
-                        .frame(is_selected);
+                        .min_size(egui::vec2(116.0, 38.0));
                     ui.add_enabled(enabled, btn)
                 } else {
                     let btn = egui::Button::new(text)
-                        .min_size(egui::vec2(76.0, 32.0))
-                        .frame(is_selected);
+                        .min_size(egui::vec2(116.0, 38.0));
                     ui.add_enabled(enabled, btn)
                 };
 

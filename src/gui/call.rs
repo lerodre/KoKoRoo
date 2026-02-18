@@ -35,7 +35,7 @@ impl HostelApp {
 
         ui.add_space(12.0);
         let call_tex = self.call_icon_texture.get_or_insert_with(|| {
-            load_icon_texture_sized(ui.ctx(), "icon-call", include_bytes!("../../assets/call.png"), 64)
+            load_icon_texture_sized(ui.ctx(), "icon-call", include_bytes!("../../assets/call.png"), 48)
         }).clone();
         let icon_h = 28.0;
         let icon_aspect = call_tex.size()[0] as f32 / call_tex.size()[1] as f32;
@@ -44,7 +44,7 @@ impl HostelApp {
             icon_sized,
             egui::RichText::new("Call").size(20.0).color(egui::Color32::WHITE),
         )
-        .min_size(egui::vec2(200.0, 42.0))
+        .min_size(egui::vec2(150.0, 42.0))
         .fill(self.settings.theme.btn_positive());
         if ui.add(btn).clicked() {
             self.start_call();
@@ -299,9 +299,16 @@ impl HostelApp {
             } else {
                 ("Cam: OFF", self.settings.theme.btn_neutral())
             };
-            let cam_btn = egui::Button::new(
-                egui::RichText::new(cam_text).size(16.0).color(egui::Color32::WHITE)
-            ).min_size(egui::vec2(110.0, 35.0)).fill(cam_color);
+            let cam_tex = self.enablecam_icon_texture.get_or_insert_with(|| {
+                load_icon_texture_sized(ui.ctx(), "icon-enablecam", include_bytes!("../../assets/enablecam.png"), 48)
+            }).clone();
+            let cam_icon_h = 20.0;
+            let cam_icon_aspect = cam_tex.size()[0] as f32 / cam_tex.size()[1] as f32;
+            let cam_icon_sized = egui::load::SizedTexture::new(cam_tex.id(), egui::vec2(cam_icon_h * cam_icon_aspect, cam_icon_h));
+            let cam_btn = egui::Button::image_and_text(
+                cam_icon_sized,
+                egui::RichText::new(cam_text).size(16.0).color(egui::Color32::WHITE),
+            ).min_size(egui::vec2(120.0, 35.0)).fill(cam_color);
             if ui.add(cam_btn).clicked() {
                 if self.webcam_sharing {
                     self.webcam_sharing = false;

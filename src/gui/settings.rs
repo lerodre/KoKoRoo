@@ -84,7 +84,11 @@ impl HostelApp {
         // Local port
         ui.label("Local port (UDP):");
         ui.horizontal(|ui| {
-            let resp = ui.add(egui::TextEdit::singleline(&mut self.local_port).desired_width(120.0));
+            let port_edit = egui::TextEdit::singleline(&mut self.local_port).desired_width(120.0);
+            let resp = egui::Frame::none()
+                .stroke(egui::Stroke::new(1.0, self.settings.theme.separator()))
+                .inner_margin(0.0)
+                .show(ui, |ui| ui.add(port_edit)).inner;
 
             let save_clicked = ui.button("Save Port").clicked();
 

@@ -17,22 +17,26 @@ impl HostelApp {
 
         ui.horizontal(|ui| {
             ui.label("IP:");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.req_ip_input)
-                    .hint_text("e.g. ::1 or 2001:db8::1")
-                    .desired_width(200.0)
-                    .password(!self.show_ips),
-            );
+            let ip_edit = egui::TextEdit::singleline(&mut self.req_ip_input)
+                .hint_text("e.g. ::1 or 2001:db8::1")
+                .desired_width(200.0)
+                .password(!self.show_ips);
+            egui::Frame::none()
+                .stroke(egui::Stroke::new(1.0, self.settings.theme.separator()))
+                .inner_margin(0.0)
+                .show(ui, |ui| { ui.add(ip_edit); });
             let eye = if self.show_ips { "Hide" } else { "Show" };
             if ui.small_button(eye).clicked() {
                 self.show_ips = !self.show_ips;
             }
             ui.label("Port:");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.req_port_input)
-                    .hint_text("9000")
-                    .desired_width(80.0),
-            );
+            let port_edit = egui::TextEdit::singleline(&mut self.req_port_input)
+                .hint_text("9000")
+                .desired_width(80.0);
+            egui::Frame::none()
+                .stroke(egui::Stroke::new(1.0, self.settings.theme.separator()))
+                .inner_margin(0.0)
+                .show(ui, |ui| { ui.add(port_edit); });
         });
 
         ui.add_space(4.0);

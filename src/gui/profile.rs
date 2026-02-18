@@ -19,11 +19,13 @@ impl HostelApp {
 
         ui.horizontal(|ui| {
             ui.label("Nickname:");
-            let resp = ui.add(
-                egui::TextEdit::singleline(&mut self.settings.nickname)
-                    .desired_width(200.0)
-                    .hint_text("optional")
-            );
+            let nick_edit = egui::TextEdit::singleline(&mut self.settings.nickname)
+                .desired_width(200.0)
+                .hint_text("optional");
+            let resp = egui::Frame::none()
+                .stroke(egui::Stroke::new(1.0, self.settings.theme.separator()))
+                .inner_margin(0.0)
+                .show(ui, |ui| ui.add(nick_edit)).inner;
             if resp.changed() {
                 self.settings.save();
             }
