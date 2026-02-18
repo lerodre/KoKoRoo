@@ -4,6 +4,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::crypto::{
+    PKT_HELLO,
     PKT_MSG_ACK, PKT_MSG_BYE, PKT_MSG_CHAT, PKT_MSG_HELLO, PKT_MSG_IDENTITY,
     PKT_MSG_REQUEST, PKT_MSG_REQUEST_ACK,
 };
@@ -54,6 +55,8 @@ pub struct MsgDaemon {
     outgoing_requests: HashMap<SocketAddr, PeerSession>,
     /// Settings snapshot for checking banned IPs / blocked contacts.
     settings: Settings,
+    /// IPs we already notified about an incoming voice call (avoid re-notifying on HELLO retries).
+    notified_calls: HashMap<String, Instant>,
 }
 
 impl MsgDaemon {
@@ -81,6 +84,7 @@ impl MsgDaemon {
             pending_requests: HashMap::new(),
             outgoing_requests: HashMap::new(),
             settings: Settings::load(),
+            notified_calls: HashMap::new(),
         }
     }
 
@@ -569,7 +573,32 @@ impl MsgDaemon {
                     }
                 }
 
-                _ => {} // Ignore voice packets or unknown types
+                PKT_HELLO => {
+                    // Voice HELLO (0x01) — detect incoming calls from known contacts
+                    let ip_str = from.ip().to_string();
+                    if self.settings.is_ip_banned(&ip_str) {
+                        continue;
+                    }
+                    // Only notify once per caller (expires after 60s to allow re-calls)
+                    if let Some(t) = self.notified_calls.get(&ip_str) {
+                        if t.elapsed() < Duration::from_secs(60) {
+                            continue;
+                        }
+                    }
+                    // Check if caller matches a known contact by last_address
+                    let contacts = identity::load_all_contacts();
+                    if let Some(contact) = contacts.iter().find(|c| c.last_address == ip_str) {
+                        self.notified_calls.insert(ip_str.clone(), Instant::now());
+                        self.event_tx.send(MsgEvent::IncomingCall {
+                            nickname: contact.nickname.clone(),
+                            fingerprint: contact.fingerprint.clone(),
+                            ip: ip_str,
+                            port: from.port().to_string(),
+                        }).ok();
+                    }
+                }
+
+                _ => {} // Ignore unknown packet types
             }
 
             // Only process one packet per frame to keep latency low
@@ -579,6 +608,9 @@ impl MsgDaemon {
 
     fn housekeep(&mut self) {
         let now = Instant::now();
+
+        // Clean up expired incoming call notifications
+        self.notified_calls.retain(|_, t| t.elapsed() < Duration::from_secs(60));
 
         // Keepalives
         if now.duration_since(self.last_keepalive) > KEEPALIVE_INTERVAL {

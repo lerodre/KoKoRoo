@@ -43,4 +43,6 @@ pub enum MsgEvent {
     RequestAccepted { contact_id: String },
     /// Our outgoing contact request failed (peer offline, timeout, etc.).
     RequestFailed { peer_addr: String, reason: String },
+    /// Incoming voice call detected from a known contact.
+    IncomingCall { nickname: String, fingerprint: String, ip: String, port: String },
 }

@@ -297,6 +297,16 @@ pub struct HostelApp {
 
     // IP privacy: censored by default
     pub(crate) show_ips: bool,
+
+    // Incoming call notification
+    pub(crate) incoming_call: Option<IncomingCallInfo>,
+}
+
+pub(crate) struct IncomingCallInfo {
+    pub(crate) nickname: String,
+    pub(crate) fingerprint: String,
+    pub(crate) ip: String,
+    pub(crate) port: String,
 }
 
 impl HostelApp {
@@ -405,6 +415,7 @@ impl HostelApp {
             req_port_input: String::new(),
             req_status: String::new(),
             show_ips: false,
+            incoming_call: None,
         }
     }
 
@@ -712,6 +723,14 @@ impl eframe::App for HostelApp {
                     MsgEvent::RequestFailed { peer_addr, reason } => {
                         self.req_status = format!("Failed ({}): {}", peer_addr, reason);
                     }
+                    MsgEvent::IncomingCall { nickname, fingerprint, ip, port } => {
+                        // Only show if not already in a call
+                        if matches!(self.screen, Screen::Setup) {
+                            self.incoming_call = Some(IncomingCallInfo {
+                                nickname, fingerprint, ip, port,
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -770,6 +789,87 @@ impl eframe::App for HostelApp {
                 SidebarTab::Settings => self.draw_settings_tab(ui),
             }
         });
+
+        // ── Incoming call popup (overlay on top of everything) ──
+        if self.incoming_call.is_some() {
+            self.draw_incoming_call_popup(ctx);
+        }
+    }
+}
+
+impl HostelApp {
+    fn draw_incoming_call_popup(&mut self, ctx: &egui::Context) {
+        let call_info = match &self.incoming_call {
+            Some(info) => info,
+            None => return,
+        };
+        let caller = if call_info.nickname.is_empty() {
+            format!("#{}", call_info.fingerprint)
+        } else {
+            format!("{} #{}", call_info.nickname, call_info.fingerprint)
+        };
+        let ip_display = if self.show_ips {
+            format!("[{}]:{}", call_info.ip, call_info.port)
+        } else {
+            format!("[{}]:{}", censor_ip(&call_info.ip), call_info.port)
+        };
+
+        let mut accept = false;
+        let mut reject = false;
+
+        egui::Window::new("Incoming Call")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.add_space(8.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new("Incoming Call")
+                            .size(20.0)
+                            .strong()
+                            .color(egui::Color32::from_rgb(80, 200, 80)),
+                    );
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new(&caller).size(16.0).strong());
+                    ui.colored_label(egui::Color32::GRAY, &ip_display);
+                    ui.add_space(12.0);
+                });
+                ui.horizontal(|ui| {
+                    let accept_btn = egui::Button::new(
+                        egui::RichText::new("Accept").size(16.0).color(egui::Color32::WHITE),
+                    )
+                    .min_size(egui::vec2(120.0, 38.0))
+                    .fill(egui::Color32::from_rgb(40, 140, 60));
+                    if ui.add(accept_btn).clicked() {
+                        accept = true;
+                    }
+
+                    let reject_btn = egui::Button::new(
+                        egui::RichText::new("Reject").size(16.0).color(egui::Color32::WHITE),
+                    )
+                    .min_size(egui::vec2(120.0, 38.0))
+                    .fill(egui::Color32::from_rgb(180, 40, 40));
+                    if ui.add(reject_btn).clicked() {
+                        reject = true;
+                    }
+                });
+                ui.add_space(4.0);
+            });
+
+        if accept {
+            if let Some(info) = self.incoming_call.take() {
+                self.peer_ip = info.ip;
+                self.peer_port = info.port;
+                self.active_tab = SidebarTab::Call;
+                self.start_call();
+            }
+        }
+        if reject {
+            self.incoming_call = None;
+        }
+
+        ctx.request_repaint_after(std::time::Duration::from_millis(200));
     }
 }
 
