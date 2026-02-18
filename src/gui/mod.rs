@@ -191,6 +191,73 @@ pub(crate) fn censor_ip(ip: &str) -> String {
     }
 }
 
+/// Start playing the ringtone in a loop on a background thread.
+/// Returns a stop flag; set it to true to stop playback.
+fn start_ringtone() -> Arc<AtomicBool> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_clone = stop.clone();
+    std::thread::spawn(move || {
+        let home = std::env::var("HOME").unwrap_or_default();
+        #[cfg(target_os = "linux")]
+        let path = format!("{}/.hostelD/ringtone.mp3", home);
+        #[cfg(target_os = "windows")]
+        let path = format!("{}\\.hostelD\\ringtone.mp3", std::env::var("USERPROFILE").unwrap_or_default());
+
+        if !std::path::Path::new(&path).exists() {
+            return;
+        }
+
+        while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
+            #[cfg(target_os = "linux")]
+            let mut child = match std::process::Command::new("gst-play-1.0")
+                .arg(&path)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(_) => break,
+            };
+
+            #[cfg(target_os = "windows")]
+            let mut child = match std::process::Command::new("powershell")
+                .args([
+                    "-WindowStyle", "Hidden", "-Command",
+                    &format!(
+                        "Add-Type -AssemblyName PresentationCore; \
+                         $p = New-Object System.Windows.Media.MediaPlayer; \
+                         $p.Open([Uri]::new('file:///{}')); $p.Play(); \
+                         while($p.NaturalDuration.HasTimeSpan -eq $false){{Start-Sleep -Milliseconds 100}}; \
+                         Start-Sleep -Seconds ([int]$p.NaturalDuration.TimeSpan.TotalSeconds + 1); \
+                         $p.Close()",
+                        path.replace('\\', "/")
+                    ),
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(_) => break,
+            };
+
+            loop {
+                if stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                    child.kill().ok();
+                    child.wait().ok();
+                    return;
+                }
+                match child.try_wait() {
+                    Ok(Some(_)) => break, // Finished playing, loop again
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                    Err(_) => return,
+                }
+            }
+        }
+    });
+    stop
+}
+
 /// Send an OS-level desktop notification (notify-send on Linux, PowerShell balloon on Windows).
 fn send_desktop_notification(title: &str, body: &str) {
     let t = title.to_string();
@@ -333,6 +400,9 @@ pub struct HostelApp {
     // Incoming call notification
     pub(crate) incoming_call: Option<IncomingCallInfo>,
     pub(crate) incoming_call_attention: bool,
+
+    // Ringtone playback (background thread)
+    pub(crate) ringtone_stop: Option<Arc<AtomicBool>>,
 }
 
 pub(crate) struct IncomingCallInfo {
@@ -450,6 +520,7 @@ impl HostelApp {
             show_ips: false,
             incoming_call: None,
             incoming_call_attention: false,
+            ringtone_stop: None,
         }
     }
 
@@ -768,6 +839,11 @@ impl eframe::App for HostelApp {
                             };
                             send_desktop_notification("hostelD — Incoming Call", &caller);
 
+                            // Play ringtone
+                            if self.ringtone_stop.is_none() {
+                                self.ringtone_stop = Some(start_ringtone());
+                            }
+
                             self.incoming_call = Some(IncomingCallInfo {
                                 nickname, fingerprint, ip, port,
                             });
@@ -910,6 +986,10 @@ impl HostelApp {
 
         if accept {
             if let Some(info) = self.incoming_call.take() {
+                // Stop ringtone
+                if let Some(stop) = self.ringtone_stop.take() {
+                    stop.store(true, Ordering::Relaxed);
+                }
                 // Clear cooldown (no reject — we're accepting)
                 if let Some(tx) = &self.msg_cmd_tx {
                     tx.send(MsgCommand::DismissIncomingCall { ip: info.ip.clone(), reject: false }).ok();
@@ -922,6 +1002,10 @@ impl HostelApp {
         }
         if reject {
             if let Some(info) = self.incoming_call.take() {
+                // Stop ringtone
+                if let Some(stop) = self.ringtone_stop.take() {
+                    stop.store(true, Ordering::Relaxed);
+                }
                 // Reject: daemon will complete handshake + send HANGUP to cut caller
                 if let Some(tx) = &self.msg_cmd_tx {
                     tx.send(MsgCommand::DismissIncomingCall { ip: info.ip, reject: true }).ok();
