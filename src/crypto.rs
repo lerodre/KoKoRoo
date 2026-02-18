@@ -19,6 +19,8 @@ pub const PKT_MSG_IDENTITY: u8 = 0x11; // msg identity exchange (encrypted)
 pub const PKT_MSG_CHAT: u8     = 0x12; // message: [4-byte seq][text]
 pub const PKT_MSG_ACK: u8      = 0x13; // delivery confirmation: [4-byte seq]
 pub const PKT_MSG_BYE: u8      = 0x14; // disconnect signal
+pub const PKT_MSG_REQUEST: u8  = 0x15; // contact request: encrypted [32-byte identity pubkey][nickname]
+pub const PKT_MSG_REQUEST_ACK: u8 = 0x16; // contact request accepted: encrypted [32-byte identity pubkey][nickname]
 
 /// Size of an X25519 public key.
 pub const PUBKEY_SIZE: usize = 32;

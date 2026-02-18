@@ -3,8 +3,11 @@ use std::net::{SocketAddr, UdpSocket};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use crate::crypto::{PKT_MSG_ACK, PKT_MSG_BYE, PKT_MSG_CHAT, PKT_MSG_HELLO, PKT_MSG_IDENTITY};
-use crate::identity::Identity;
+use crate::crypto::{
+    PKT_MSG_ACK, PKT_MSG_BYE, PKT_MSG_CHAT, PKT_MSG_HELLO, PKT_MSG_IDENTITY,
+    PKT_MSG_REQUEST, PKT_MSG_REQUEST_ACK,
+};
+use crate::identity::{self, Identity, Settings};
 
 use super::outbox::Outbox;
 use super::protocol;
@@ -45,6 +48,12 @@ pub struct MsgDaemon {
     hello_retries: HashMap<SocketAddr, u32>,
     /// Saved peer info for reconnection after voice call ends.
     saved_peers: Vec<(String, SocketAddr, [u8; 32])>,
+    /// Pending incoming requests: request_id -> (peer_addr, identity_pubkey, nickname, fingerprint)
+    pending_requests: HashMap<String, (SocketAddr, [u8; 32], String, String)>,
+    /// Outgoing request sessions (ephemeral handshakes before REQUEST is sent).
+    outgoing_requests: HashMap<SocketAddr, PeerSession>,
+    /// Settings snapshot for checking banned IPs / blocked contacts.
+    settings: Settings,
 }
 
 impl MsgDaemon {
@@ -69,6 +78,9 @@ impl MsgDaemon {
             last_keepalive: Instant::now(),
             hello_retries: HashMap::new(),
             saved_peers: Vec::new(),
+            pending_requests: HashMap::new(),
+            outgoing_requests: HashMap::new(),
+            settings: Settings::load(),
         }
     }
 
@@ -191,6 +203,122 @@ impl MsgDaemon {
                     }
                 }
 
+                MsgCommand::SendRequest { peer_addr } => {
+                    // Initiate ephemeral handshake for a contact request
+                    if self.outgoing_requests.contains_key(&peer_addr) {
+                        continue; // Already have a pending request to this address
+                    }
+                    if let Some(ref socket) = self.socket {
+                        let (our_secret, our_pubkey) = crate::crypto::generate_keypair();
+                        let hello = crate::crypto::build_msg_hello(&our_pubkey);
+                        if socket.send_to(&hello, peer_addr).is_ok() {
+                            let session = PeerSession {
+                                contact_id: String::new(),
+                                peer_pubkey: [0u8; 32],
+                                peer_nickname: String::new(),
+                                peer_addr,
+                                session: None,
+                                last_activity: Instant::now(),
+                                state: super::session::PeerState::AwaitingHello {
+                                    our_secret: Some(our_secret),
+                                    our_pubkey,
+                                    sent_at: Instant::now(),
+                                },
+                            };
+                            self.outgoing_requests.insert(peer_addr, session);
+                        } else {
+                            self.event_tx.send(MsgEvent::RequestFailed {
+                                peer_addr: peer_addr.to_string(),
+                                reason: "Failed to send".into(),
+                            }).ok();
+                        }
+                    } else {
+                        self.event_tx.send(MsgEvent::RequestFailed {
+                            peer_addr: peer_addr.to_string(),
+                            reason: "Socket not available".into(),
+                        }).ok();
+                    }
+                }
+
+                MsgCommand::AcceptRequest { request_id } => {
+                    if let Some((peer_addr, peer_id_pubkey, peer_nick, _fp)) =
+                        self.pending_requests.remove(&request_id)
+                    {
+                        // Send REQUEST_ACK to the peer
+                        // The peer session should still be in self.peers from the incoming hello
+                        if let Some(peer) = self.peers.get(&peer_addr) {
+                            if let Some(ref socket) = self.socket {
+                                protocol::send_request_accept(
+                                    peer, socket, &self.identity, &self.nickname,
+                                );
+                            }
+                        }
+
+                        // Save the contact locally
+                        let contact_id = identity::derive_contact_id(
+                            &self.identity.pubkey, &peer_id_pubkey,
+                        );
+                        let fingerprint = crate::crypto::fingerprint(&peer_id_pubkey);
+                        let contact = identity::Contact {
+                            fingerprint,
+                            pubkey: peer_id_pubkey,
+                            nickname: peer_nick,
+                            contact_id: contact_id.clone(),
+                            first_seen: identity::now_timestamp(),
+                            last_seen: identity::now_timestamp(),
+                            last_address: peer_addr.ip().to_string(),
+                            last_port: peer_addr.port().to_string(),
+                            call_count: 0,
+                        };
+                        identity::save_contact(&contact);
+
+                        // Update the peer session to Connected state with identity info
+                        if let Some(peer) = self.peers.get_mut(&peer_addr) {
+                            peer.contact_id = contact_id.clone();
+                            peer.peer_pubkey = peer_id_pubkey;
+                            peer.peer_nickname = contact.nickname.clone();
+                            peer.state = super::session::PeerState::Connected;
+                            peer.touch();
+                        }
+                        self.contact_addrs.insert(contact_id.clone(), peer_addr);
+
+                        self.event_tx.send(MsgEvent::RequestAccepted {
+                            contact_id,
+                        }).ok();
+                    }
+                }
+
+                MsgCommand::RejectRequest { request_id } => {
+                    if let Some((peer_addr, ..)) = self.pending_requests.remove(&request_id) {
+                        // Send BYE and clean up session
+                        if let Some(peer) = self.peers.get(&peer_addr) {
+                            if let Some(ref socket) = self.socket {
+                                protocol::send_bye(peer, socket);
+                            }
+                        }
+                        self.peers.remove(&peer_addr);
+                    }
+                }
+
+                MsgCommand::BlockRequest { request_id, ip } => {
+                    if let Some((peer_addr, peer_id_pubkey, ..)) =
+                        self.pending_requests.remove(&request_id)
+                    {
+                        // Ban IP and block pubkey
+                        self.settings.ban_ip(&ip);
+                        let hex = identity::pubkey_hex(&peer_id_pubkey);
+                        self.settings.block_contact(&hex);
+
+                        // Clean up session
+                        if let Some(peer) = self.peers.get(&peer_addr) {
+                            if let Some(ref socket) = self.socket {
+                                protocol::send_bye(peer, socket);
+                            }
+                        }
+                        self.peers.remove(&peer_addr);
+                    }
+                }
+
                 MsgCommand::SendMessage { contact_id, peer_addr, peer_pubkey, text } => {
                     // Ensure outbox exists
                     let outbox = self.outboxes.entry(contact_id.clone())
@@ -240,13 +368,43 @@ impl MsgDaemon {
 
             match pkt_type {
                 PKT_MSG_HELLO => {
-                    if let Some(peer) = self.peers.get_mut(&from) {
+                    if let Some(peer) = self.outgoing_requests.get_mut(&from) {
+                        // HELLO response for an outgoing contact request
+                        // Complete handshake but send REQUEST instead of IDENTITY
+                        let peer_ephemeral = match crate::crypto::parse_msg_hello(data) {
+                            Some(pk) => pk,
+                            None => continue,
+                        };
+                        let our_secret = match &mut peer.state {
+                            super::session::PeerState::AwaitingHello { our_secret, .. } => {
+                                our_secret.take()
+                            }
+                            _ => continue,
+                        };
+                        let our_secret = match our_secret {
+                            Some(s) => s,
+                            None => continue,
+                        };
+                        let session = crate::crypto::complete_handshake(our_secret, &peer_ephemeral);
+                        peer.session = Some(session);
+                        peer.state = super::session::PeerState::AwaitingIdentity {
+                            sent_at: Instant::now(),
+                        };
+                        peer.touch();
+                        // Send REQUEST (not IDENTITY)
+                        protocol::send_request(peer, socket, &self.identity, &self.nickname);
+                    } else if let Some(peer) = self.peers.get_mut(&from) {
                         // We have a pending session — this is a hello response
                         protocol::handle_hello_response(
                             data, peer, socket, &self.identity, &self.nickname,
                         );
                     } else {
                         // Incoming connection from unknown peer
+                        // Check if IP is banned before accepting
+                        let ip_str = from.ip().to_string();
+                        if self.settings.is_ip_banned(&ip_str) {
+                            continue;
+                        }
                         if let Some(session) = protocol::handle_incoming_hello(
                             data, from, socket, &self.identity, &self.nickname,
                         ) {
@@ -328,6 +486,87 @@ impl MsgDaemon {
                         self.contact_addrs.retain(|_, addr| *addr != from);
                         self.hello_retries.remove(&from);
                     }
+                    // Also clean up outgoing requests
+                    self.outgoing_requests.remove(&from);
+                }
+
+                PKT_MSG_REQUEST => {
+                    // Incoming contact request from a peer we already have a session with
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((pubkey, nickname)) = protocol::handle_request(data, peer) {
+                            let ip_str = from.ip().to_string();
+                            let hex = identity::pubkey_hex(&pubkey);
+
+                            // Check if blocked/banned
+                            if self.settings.is_ip_banned(&ip_str) || self.settings.is_blocked(&hex) {
+                                // Silently discard
+                                continue;
+                            }
+
+                            let fingerprint = crate::crypto::fingerprint(&pubkey);
+                            let request_id = from.to_string();
+
+                            // Check if we already have this contact
+                            if identity::load_contact(&pubkey).is_some() {
+                                // Already a contact, skip
+                                continue;
+                            }
+
+                            // Store as pending
+                            self.pending_requests.insert(
+                                request_id.clone(),
+                                (from, pubkey, nickname.clone(), fingerprint.clone()),
+                            );
+
+                            self.event_tx.send(MsgEvent::IncomingRequest {
+                                request_id,
+                                nickname,
+                                ip: ip_str,
+                                fingerprint,
+                            }).ok();
+                        }
+                    }
+                }
+
+                PKT_MSG_REQUEST_ACK => {
+                    // Our contact request was accepted
+                    if let Some(peer) = self.outgoing_requests.get(&from) {
+                        if let Some((pubkey, nickname)) = protocol::handle_request_accept(data, peer) {
+                            let contact_id = identity::derive_contact_id(
+                                &self.identity.pubkey, &pubkey,
+                            );
+                            let fingerprint = crate::crypto::fingerprint(&pubkey);
+
+                            // Save the new contact
+                            let contact = identity::Contact {
+                                fingerprint,
+                                pubkey,
+                                nickname,
+                                contact_id: contact_id.clone(),
+                                first_seen: identity::now_timestamp(),
+                                last_seen: identity::now_timestamp(),
+                                last_address: from.ip().to_string(),
+                                last_port: from.port().to_string(),
+                                call_count: 0,
+                            };
+                            identity::save_contact(&contact);
+
+                            // Move session from outgoing_requests to regular peers
+                            if let Some(mut peer_session) = self.outgoing_requests.remove(&from) {
+                                peer_session.contact_id = contact_id.clone();
+                                peer_session.peer_pubkey = pubkey;
+                                peer_session.peer_nickname = contact.nickname.clone();
+                                peer_session.state = super::session::PeerState::Connected;
+                                peer_session.touch();
+                                self.contact_addrs.insert(contact_id.clone(), from);
+                                self.peers.insert(from, peer_session);
+                            }
+
+                            self.event_tx.send(MsgEvent::RequestAccepted {
+                                contact_id,
+                            }).ok();
+                        }
+                    }
                 }
 
                 _ => {} // Ignore voice packets or unknown types
@@ -403,6 +642,47 @@ impl MsgDaemon {
                 self.peers.remove(&addr);
                 self.contact_addrs.retain(|_, a| *a != addr);
                 self.hello_retries.remove(&addr);
+            }
+        }
+
+        // Timeout outgoing requests (reuse PEER_TIMEOUT)
+        let timed_out_reqs: Vec<SocketAddr> = self.outgoing_requests.iter()
+            .filter(|(_, p)| p.is_timed_out(PEER_TIMEOUT))
+            .map(|(addr, _)| *addr)
+            .collect();
+        for addr in timed_out_reqs {
+            self.outgoing_requests.remove(&addr);
+            self.event_tx.send(MsgEvent::RequestFailed {
+                peer_addr: addr.to_string(),
+                reason: "Timed out".into(),
+            }).ok();
+        }
+
+        // Retry HELLO for outgoing requests in AwaitingHello state
+        if let Some(ref socket) = self.socket {
+            let mut req_remove = Vec::new();
+            for (addr, peer) in &mut self.outgoing_requests {
+                if let super::session::PeerState::AwaitingHello { our_pubkey, sent_at, .. } = &mut peer.state {
+                    if sent_at.elapsed() > HELLO_RETRY_INTERVAL {
+                        let retries = self.hello_retries.get(addr).copied().unwrap_or(0);
+                        if retries >= HELLO_MAX_RETRIES {
+                            req_remove.push(*addr);
+                        } else {
+                            let hello = crate::crypto::build_msg_hello(our_pubkey);
+                            socket.send_to(&hello, addr).ok();
+                            *sent_at = Instant::now();
+                            *self.hello_retries.entry(*addr).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+            for addr in req_remove {
+                self.outgoing_requests.remove(&addr);
+                self.hello_retries.remove(&addr);
+                self.event_tx.send(MsgEvent::RequestFailed {
+                    peer_addr: addr.to_string(),
+                    reason: "Peer unreachable".into(),
+                }).ok();
             }
         }
 

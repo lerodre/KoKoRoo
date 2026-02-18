@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use crate::crypto::{
     self, PKT_MSG_ACK, PKT_MSG_BYE, PKT_MSG_CHAT, PKT_MSG_IDENTITY,
+    PKT_MSG_REQUEST, PKT_MSG_REQUEST_ACK,
 };
 use crate::identity::Identity;
 
@@ -204,4 +205,62 @@ pub fn initiate_handshake(
             sent_at: Instant::now(),
         },
     })
+}
+
+/// Send a contact request (PKT_MSG_REQUEST) containing our identity pubkey + nickname.
+pub fn send_request(
+    peer: &PeerSession,
+    socket: &UdpSocket,
+    identity: &Identity,
+    nickname: &str,
+) {
+    if let Some(session) = &peer.session {
+        let mut payload = Vec::with_capacity(32 + nickname.len());
+        payload.extend_from_slice(&identity.pubkey);
+        payload.extend_from_slice(nickname.as_bytes());
+        let pkt = session.encrypt_packet(PKT_MSG_REQUEST, &payload);
+        socket.send_to(&pkt, peer.peer_addr).ok();
+    }
+}
+
+/// Handle an incoming PKT_MSG_REQUEST. Returns (identity_pubkey, nickname).
+pub fn handle_request(data: &[u8], peer: &PeerSession) -> Option<([u8; 32], String)> {
+    let session = peer.session.as_ref()?;
+    let (pkt_type, plain) = session.decrypt_packet(data)?;
+    if pkt_type != PKT_MSG_REQUEST || plain.len() < 32 {
+        return None;
+    }
+    let mut pubkey = [0u8; 32];
+    pubkey.copy_from_slice(&plain[..32]);
+    let nickname = String::from_utf8_lossy(&plain[32..]).to_string();
+    Some((pubkey, nickname))
+}
+
+/// Send a contact request acceptance (PKT_MSG_REQUEST_ACK) with our identity pubkey + nickname.
+pub fn send_request_accept(
+    peer: &PeerSession,
+    socket: &UdpSocket,
+    identity: &Identity,
+    nickname: &str,
+) {
+    if let Some(session) = &peer.session {
+        let mut payload = Vec::with_capacity(32 + nickname.len());
+        payload.extend_from_slice(&identity.pubkey);
+        payload.extend_from_slice(nickname.as_bytes());
+        let pkt = session.encrypt_packet(PKT_MSG_REQUEST_ACK, &payload);
+        socket.send_to(&pkt, peer.peer_addr).ok();
+    }
+}
+
+/// Handle an incoming PKT_MSG_REQUEST_ACK. Returns (identity_pubkey, nickname).
+pub fn handle_request_accept(data: &[u8], peer: &PeerSession) -> Option<([u8; 32], String)> {
+    let session = peer.session.as_ref()?;
+    let (pkt_type, plain) = session.decrypt_packet(data)?;
+    if pkt_type != PKT_MSG_REQUEST_ACK || plain.len() < 32 {
+        return None;
+    }
+    let mut pubkey = [0u8; 32];
+    pubkey.copy_from_slice(&plain[..32]);
+    let nickname = String::from_utf8_lossy(&plain[32..]).to_string();
+    Some((pubkey, nickname))
 }

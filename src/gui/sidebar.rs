@@ -7,9 +7,16 @@ impl HostelApp {
         ui.vertical_centered(|ui| {
             let total_unread: u32 = self.msg_unread.values().sum();
 
+            let incoming_count = self.req_incoming.len();
+
             let tabs: Vec<(SidebarTab, String)> = vec![
                 (SidebarTab::Profile, "Profile".to_string()),
                 (SidebarTab::Contacts, "Contacts".to_string()),
+                (SidebarTab::Requests, if incoming_count > 0 {
+                    format!("Requests ({})", incoming_count)
+                } else {
+                    "Requests".to_string()
+                }),
                 (SidebarTab::Messages, if total_unread > 0 {
                     format!("Messages ({})", total_unread)
                 } else {

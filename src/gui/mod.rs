@@ -5,6 +5,7 @@ mod call;
 mod settings;
 mod error;
 mod messages;
+mod requests;
 
 use cpal::traits::{DeviceTrait, HostTrait};
 use eframe::egui;
@@ -33,6 +34,7 @@ pub(crate) enum Screen {
 pub(crate) enum SidebarTab {
     Profile,
     Contacts,
+    Requests,
     Messages,
     Call,
     Settings,
@@ -233,6 +235,12 @@ pub struct HostelApp {
     pub(crate) msg_unread: HashMap<String, u32>,
     pub(crate) msg_peer_online: HashMap<String, bool>,
     pub(crate) msg_show_contact_picker: bool,
+
+    // Contact requests
+    pub(crate) req_incoming: Vec<(String, String, String, String)>, // (request_id, nickname, ip, fingerprint)
+    pub(crate) req_ip_input: String,
+    pub(crate) req_port_input: String,
+    pub(crate) req_status: String,
 }
 
 impl HostelApp {
@@ -335,6 +343,10 @@ impl HostelApp {
             msg_unread: HashMap::new(),
             msg_peer_online: HashMap::new(),
             msg_show_contact_picker: false,
+            req_incoming: Vec::new(),
+            req_ip_input: String::new(),
+            req_port_input: String::new(),
+            req_status: String::new(),
         }
     }
 
@@ -607,6 +619,7 @@ impl eframe::App for HostelApp {
         }
 
         // Poll messaging daemon events
+        let mut accepted_contact_id: Option<String> = None;
         if let Some(rx) = &self.msg_event_rx {
             while let Ok(evt) = rx.try_recv() {
                 match evt {
@@ -626,8 +639,27 @@ impl eframe::App for HostelApp {
                     MsgEvent::PeerStatus { contact_id, online } => {
                         self.msg_peer_online.insert(contact_id, online);
                     }
+                    MsgEvent::IncomingRequest { request_id, nickname, ip, fingerprint } => {
+                        // Add to incoming requests if not already present
+                        if !self.req_incoming.iter().any(|(rid, ..)| rid == &request_id) {
+                            self.req_incoming.push((request_id, nickname, ip, fingerprint));
+                        }
+                    }
+                    MsgEvent::RequestAccepted { contact_id } => {
+                        self.req_status = "Request accepted! Contact saved.".to_string();
+                        // Reload contacts to include the new one
+                        self.contacts = identity::load_all_contacts();
+                        accepted_contact_id = Some(contact_id);
+                    }
+                    MsgEvent::RequestFailed { peer_addr, reason } => {
+                        self.req_status = format!("Failed ({}): {}", peer_addr, reason);
+                    }
                 }
             }
+        }
+        // Deferred: open chat for newly accepted contact (after borrow of msg_event_rx ends)
+        if let Some(cid) = accepted_contact_id {
+            self.open_msg_chat(&cid);
         }
 
         // Style
@@ -676,6 +708,7 @@ impl eframe::App for HostelApp {
             match self.active_tab {
                 SidebarTab::Profile => self.draw_profile_tab(ui),
                 SidebarTab::Contacts => self.draw_contacts_tab(ui),
+                SidebarTab::Requests => self.draw_requests_tab(ui),
                 SidebarTab::Messages => self.draw_messages_tab(ui),
                 SidebarTab::Call => {
                     match &self.screen {
