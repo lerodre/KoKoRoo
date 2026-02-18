@@ -722,6 +722,13 @@ impl eframe::App for HostelApp {
         // Side panel for chat when video is active during a call
         let video_active = matches!(self.screen, Screen::InCall) && self.screen_texture.is_some();
         if video_active {
+            // Disable animation so chat panel appears instantly (no slide-in)
+            // and video adapts to available width immediately
+            let prev_style = (*ctx.style()).clone();
+            let mut instant_style = prev_style.clone();
+            instant_style.animation_time = 0.0;
+            ctx.set_style(instant_style);
+
             egui::SidePanel::right("chat_panel")
                 .default_width(280.0)
                 .resizable(true)
@@ -730,6 +737,8 @@ impl eframe::App for HostelApp {
                 .show(ctx, |ui| {
                     self.draw_chat(ui);
                 });
+
+            ctx.set_style(prev_style);
         }
 
         // ── Left sidebar ──
