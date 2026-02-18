@@ -24,15 +24,16 @@ impl HostelApp {
                 }),
                 (SidebarTab::Call, "Call".to_string()),
                 (SidebarTab::Settings, "Settings".to_string()),
+                (SidebarTab::Appearance, "Colors".to_string()),
             ];
             for (tab, label) in &tabs {
                 let tab = *tab;
                 let is_selected = self.active_tab == tab;
-                let enabled = !in_call || tab == SidebarTab::Call;
+                let enabled = !in_call || tab == SidebarTab::Call || tab == SidebarTab::Appearance;
 
                 let text = egui::RichText::new(label.as_str()).size(11.0);
                 let text = if !enabled {
-                    text.color(egui::Color32::from_gray(100))
+                    text.color(self.settings.theme.text_muted())
                 } else if is_selected {
                     text.strong()
                 } else {

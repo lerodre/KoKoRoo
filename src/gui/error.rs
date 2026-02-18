@@ -5,7 +5,7 @@ impl HostelApp {
     pub(crate) fn draw_error(&mut self, ui: &mut egui::Ui, message: &str) {
         ui.vertical_centered(|ui| {
             ui.add_space(60.0);
-            ui.colored_label(egui::Color32::from_rgb(220, 60, 60),
+            ui.colored_label(self.settings.theme.error(),
                 egui::RichText::new("Connection Failed").size(24.0));
             ui.add_space(15.0);
             ui.label(message);

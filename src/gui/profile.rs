@@ -52,7 +52,7 @@ impl HostelApp {
         if self.best_ipv6 == "::1" {
             ui.add_space(4.0);
             ui.colored_label(
-                egui::Color32::from_rgb(255, 200, 50),
+                self.settings.theme.warning(),
                 "Only loopback detected. Check your network connection.",
             );
         }

@@ -1,7 +1,7 @@
 use eframe::egui;
 use crate::chat::ChatHistory;
 use crate::identity;
-use super::{HostelApp, SidebarTab, format_peer_display, censor_ip};
+use super::{HostelApp, SidebarTab, format_peer_display, peer_display_job, censor_ip};
 
 impl HostelApp {
     pub(crate) fn draw_contacts_tab(&mut self, ui: &mut egui::Ui) {
@@ -24,7 +24,7 @@ impl HostelApp {
         ui.add_space(6.0);
 
         if self.contacts.is_empty() {
-            ui.colored_label(egui::Color32::GRAY, "No contacts yet. Make a call to add one.");
+            ui.colored_label(self.settings.theme.text_muted(), "No contacts yet. Make a call to add one.");
             return;
         }
 
@@ -50,17 +50,20 @@ impl HostelApp {
 
                     let hex = identity::pubkey_hex(&contact.pubkey);
                     let is_blocked = self.settings.is_blocked(&hex);
-                    let display = format_peer_display(&contact.nickname, &contact.fingerprint);
-
                     ui.horizontal(|ui| {
                         // Contact name (clickable)
-                        let text = if is_blocked {
-                            egui::RichText::new(&display).strikethrough().color(egui::Color32::GRAY)
+                        if is_blocked {
+                            let text = format_peer_display(&contact.nickname, &contact.fingerprint);
+                            if ui.add(egui::Button::new(
+                                egui::RichText::new(&text).strikethrough().color(self.settings.theme.text_muted())
+                            ).frame(false)).clicked() {
+                                click_contact = Some(i);
+                            }
                         } else {
-                            egui::RichText::new(&display)
-                        };
-                        if ui.add(egui::Button::new(text).frame(false)).clicked() {
-                            click_contact = Some(i);
+                            let job = peer_display_job(&contact.nickname, &contact.fingerprint, 13.0, self.settings.theme.text_primary(), self.settings.theme.text_dim());
+                            if ui.add(egui::Button::new(job).frame(false)).clicked() {
+                                click_contact = Some(i);
+                            }
                         }
 
                         // Push buttons to the right
@@ -128,8 +131,8 @@ impl HostelApp {
         }
 
         ui.add_space(6.0);
-        let display = format_peer_display(&contact.nickname, &contact.fingerprint);
-        ui.heading(&display);
+        let job = peer_display_job(&contact.nickname, &contact.fingerprint, 18.0, self.settings.theme.text_primary(), self.settings.theme.text_dim());
+        ui.label(job);
         ui.add_space(6.0);
 
         ui.horizontal(|ui| {
@@ -160,7 +163,7 @@ impl HostelApp {
         ui.horizontal(|ui| {
             let call_btn = egui::Button::new(
                 egui::RichText::new("Call").size(16.0).color(egui::Color32::WHITE)
-            ).min_size(egui::vec2(120.0, 34.0)).fill(egui::Color32::from_rgb(40, 140, 60));
+            ).min_size(egui::vec2(120.0, 34.0)).fill(self.settings.theme.btn_positive());
             if ui.add(call_btn).clicked() {
                 if !contact.last_address.is_empty() {
                     self.peer_ip = contact.last_address.clone();
@@ -175,7 +178,7 @@ impl HostelApp {
 
             let msg_btn = egui::Button::new(
                 egui::RichText::new("Message").size(16.0).color(egui::Color32::WHITE)
-            ).min_size(egui::vec2(120.0, 34.0)).fill(egui::Color32::from_rgb(40, 100, 180));
+            ).min_size(egui::vec2(120.0, 34.0)).fill(self.settings.theme.btn_primary());
             if ui.add(msg_btn).clicked() {
                 let cid = contact.contact_id.clone();
                 self.viewing_contact = None;
@@ -203,20 +206,20 @@ impl HostelApp {
             .show(ui, |ui| {
                 if let Some(history) = &self.viewing_chat {
                     if history.messages.is_empty() {
-                        ui.colored_label(egui::Color32::GRAY, "No messages.");
+                        ui.colored_label(self.settings.theme.text_muted(), "No messages.");
                     }
                     for msg in &history.messages {
                         let time = ChatHistory::format_time(msg.timestamp);
                         if msg.from_me {
                             ui.horizontal_wrapped(|ui| {
-                                ui.colored_label(egui::Color32::GRAY, &time);
-                                ui.colored_label(egui::Color32::from_rgb(100, 180, 255), "You:");
+                                ui.colored_label(self.settings.theme.text_muted(), &time);
+                                ui.colored_label(self.settings.theme.chat_self(), "You:");
                                 ui.label(&msg.text);
                             });
                         } else {
                             ui.horizontal_wrapped(|ui| {
-                                ui.colored_label(egui::Color32::GRAY, &time);
-                                ui.colored_label(egui::Color32::from_rgb(180, 255, 100), &peer_label);
+                                ui.colored_label(self.settings.theme.text_muted(), &time);
+                                ui.colored_label(self.settings.theme.chat_peer(), &peer_label);
                                 ui.label(&msg.text);
                             });
                         }

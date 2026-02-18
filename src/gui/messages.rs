@@ -18,31 +18,20 @@ impl HostelApp {
 
     fn draw_message_list(&mut self, ui: &mut egui::Ui) {
         ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            ui.heading("Messages");
-            if ui.button("+ New").clicked() {
-                self.msg_show_contact_picker = true;
-            }
-        });
+        ui.heading("Messages");
         ui.add_space(6.0);
 
-        // Contact picker overlay
-        if self.msg_show_contact_picker {
-            self.draw_contact_picker(ui);
-            return;
-        }
-
-        // Build sorted conversation list: contacts that have chat history or are online
+        // Build conversation list from ALL contacts (except blocked)
         let mut conversations: Vec<(String, String, String, bool, u32)> = Vec::new(); // (contact_id, nickname, preview, online, unread)
 
         for contact in &self.contacts {
+            let hex = identity::pubkey_hex(&contact.pubkey);
+            if self.settings.is_blocked(&hex) {
+                continue;
+            }
+
             let online = self.msg_peer_online.get(&contact.contact_id).copied().unwrap_or(false);
             let unread = self.msg_unread.get(&contact.contact_id).copied().unwrap_or(0);
-            let has_history = self.msg_chat_histories.contains_key(&contact.contact_id);
-
-            if !has_history && !online && unread == 0 {
-                continue; // Skip contacts with no conversation
-            }
 
             let preview = self.msg_chat_histories.get(&contact.contact_id)
                 .and_then(|h| h.messages.last())
@@ -63,12 +52,16 @@ impl HostelApp {
         }
 
         if conversations.is_empty() {
-            ui.colored_label(egui::Color32::GRAY, "No conversations yet. Tap '+ New' to start one.");
+            ui.colored_label(self.settings.theme.text_muted(), "No contacts yet. Make a call to add one.");
             return;
         }
 
-        // Sort by most recent message (use chat history last timestamp)
+        // Sort: online first, then by most recent message, then rest
         conversations.sort_by(|a, b| {
+            // Online first
+            let online_ord = b.3.cmp(&a.3);
+            if online_ord != std::cmp::Ordering::Equal { return online_ord; }
+            // Then by most recent message
             let ts_a = self.msg_chat_histories.get(&a.0)
                 .and_then(|h| h.messages.last().map(|m| m.timestamp))
                 .unwrap_or(0);
@@ -89,9 +82,9 @@ impl HostelApp {
                     ui.horizontal(|ui| {
                         // Online indicator
                         let color = if *online {
-                            egui::Color32::from_rgb(80, 200, 80)
+                            self.settings.theme.accent()
                         } else {
-                            egui::Color32::from_gray(100)
+                            self.settings.theme.text_muted()
                         };
                         let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
                         ui.painter().circle_filled(rect.center(), 4.0, color);
@@ -108,7 +101,7 @@ impl HostelApp {
                                 open_chat = Some(contact_id.clone());
                             }
                             if !preview.is_empty() {
-                                ui.colored_label(egui::Color32::GRAY,
+                                ui.colored_label(self.settings.theme.text_muted(),
                                     egui::RichText::new(preview.as_str()).small());
                             }
                         });
@@ -119,50 +112,6 @@ impl HostelApp {
 
         if let Some(cid) = open_chat {
             self.open_msg_chat(&cid);
-        }
-    }
-
-    fn draw_contact_picker(&mut self, ui: &mut egui::Ui) {
-        ui.label("Select a contact:");
-        ui.add_space(4.0);
-
-        let mut picked: Option<usize> = None;
-        let mut cancel = false;
-
-        let max_height = ui.available_height().max(80.0);
-        egui::ScrollArea::vertical()
-            .max_height(max_height - 40.0)
-            .id_salt("msg_contact_picker_scroll")
-            .show(ui, |ui| {
-                for (i, contact) in self.contacts.iter().enumerate() {
-                    let hex = identity::pubkey_hex(&contact.pubkey);
-                    if self.settings.is_blocked(&hex) {
-                        continue;
-                    }
-                    let name = if contact.nickname.is_empty() {
-                        contact.fingerprint.clone()
-                    } else {
-                        format!("{} #{}", contact.nickname, contact.fingerprint)
-                    };
-                    if ui.button(&name).clicked() {
-                        picked = Some(i);
-                    }
-                }
-            });
-
-        ui.add_space(4.0);
-        if ui.button("Cancel").clicked() {
-            cancel = true;
-        }
-
-        if let Some(i) = picked {
-            let contact = &self.contacts[i];
-            let cid = contact.contact_id.clone();
-            self.msg_show_contact_picker = false;
-            self.open_msg_chat(&cid);
-        }
-        if cancel {
-            self.msg_show_contact_picker = false;
         }
     }
 
@@ -189,9 +138,9 @@ impl HostelApp {
             }
             ui.heading(&peer_name);
             let status_color = if online {
-                egui::Color32::from_rgb(80, 200, 80)
+                self.settings.theme.accent()
             } else {
-                egui::Color32::from_gray(120)
+                self.settings.theme.text_muted()
             };
             let status_text = if online { "online" } else { "offline" };
             ui.colored_label(status_color, status_text);
@@ -216,21 +165,21 @@ impl HostelApp {
             .show(ui, |ui| {
                 if let Some(history) = self.msg_chat_histories.get(&contact_id) {
                     if history.messages.is_empty() {
-                        ui.colored_label(egui::Color32::GRAY, "No messages yet.");
+                        ui.colored_label(self.settings.theme.text_muted(), "No messages yet.");
                     }
                     for msg in &history.messages {
                         let time = ChatHistory::format_time(msg.timestamp);
                         if msg.from_me {
                             ui.horizontal_wrapped(|ui| {
-                                ui.colored_label(egui::Color32::GRAY, &time);
-                                ui.colored_label(egui::Color32::from_rgb(100, 180, 255), "You:");
+                                ui.colored_label(self.settings.theme.text_muted(), &time);
+                                ui.colored_label(self.settings.theme.chat_self(), "You:");
                                 ui.label(&msg.text);
                             });
                         } else {
                             ui.horizontal_wrapped(|ui| {
-                                ui.colored_label(egui::Color32::GRAY, &time);
+                                ui.colored_label(self.settings.theme.text_muted(), &time);
                                 ui.colored_label(
-                                    egui::Color32::from_rgb(180, 255, 100),
+                                    self.settings.theme.chat_peer(),
                                     format!("{}:", peer_name),
                                 );
                                 ui.label(&msg.text);

@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 
 use crate::messaging::MsgCommand;
 
-use super::{HostelApp, censor_ip};
+use super::{HostelApp, censor_ip, peer_display_job};
 
 impl HostelApp {
     pub(crate) fn draw_requests_tab(&mut self, ui: &mut egui::Ui) {
@@ -40,9 +40,9 @@ impl HostelApp {
         // Status message
         if !self.req_status.is_empty() {
             let color = if self.req_status.starts_with("Error") || self.req_status.starts_with("Failed") {
-                egui::Color32::from_rgb(255, 100, 100)
+                self.settings.theme.error()
             } else {
-                egui::Color32::from_rgb(100, 200, 100)
+                self.settings.theme.accent()
             };
             ui.colored_label(color, &self.req_status);
         }
@@ -60,7 +60,7 @@ impl HostelApp {
         ui.add_space(4.0);
 
         if self.req_incoming.is_empty() {
-            ui.colored_label(egui::Color32::GRAY, "No pending requests.");
+            ui.colored_label(self.settings.theme.text_muted(), "No pending requests.");
             return;
         }
 
@@ -75,17 +75,10 @@ impl HostelApp {
                     ui.group(|ui| {
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
-                                let display = if nickname.is_empty() {
-                                    format!("#{fingerprint}")
-                                } else {
-                                    format!("{nickname} #{fingerprint}")
-                                };
-                                ui.label(
-                                    egui::RichText::new(&display).strong(),
-                                );
+                                ui.label(peer_display_job(nickname, fingerprint, 14.0, self.settings.theme.text_primary(), self.settings.theme.text_dim()));
                                 let display_ip = if self.show_ips { ip.clone() } else { censor_ip(ip) };
                                 ui.colored_label(
-                                    egui::Color32::GRAY,
+                                    self.settings.theme.text_muted(),
                                     format!("IP: {display_ip}"),
                                 );
                             });
@@ -93,7 +86,7 @@ impl HostelApp {
                         ui.add_space(2.0);
                         ui.horizontal(|ui| {
                             if ui.add(egui::Button::new(
-                                egui::RichText::new("Accept").color(egui::Color32::from_rgb(80, 200, 80)),
+                                egui::RichText::new("Accept").color(self.settings.theme.accent()),
                             )).clicked() {
                                 action = Some((request_id.clone(), RequestAction::Accept));
                             }
@@ -101,7 +94,7 @@ impl HostelApp {
                                 action = Some((request_id.clone(), RequestAction::Reject));
                             }
                             if ui.add(egui::Button::new(
-                                egui::RichText::new("Block").color(egui::Color32::from_rgb(255, 80, 80)),
+                                egui::RichText::new("Block").color(self.settings.theme.error()),
                             )).clicked() {
                                 action = Some((request_id.clone(), RequestAction::Block));
                             }

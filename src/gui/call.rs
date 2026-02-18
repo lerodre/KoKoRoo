@@ -4,7 +4,7 @@ use std::time::Instant;
 use crate::chat::ChatHistory;
 use crate::identity;
 use crate::screen::{ScreenCommand, ScreenQuality};
-use super::{HostelApp, Screen, format_peer_display, censor_ip};
+use super::{HostelApp, Screen, format_peer_display, peer_display_job, censor_ip};
 
 impl HostelApp {
     pub(crate) fn draw_call_tab(&mut self, ui: &mut egui::Ui) {
@@ -14,33 +14,34 @@ impl HostelApp {
 
         ui.label("Peer IPv6:");
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.peer_ip)
+            let ip_edit = egui::TextEdit::singleline(&mut self.peer_ip)
                 .desired_width(300.0)
-                .password(!self.show_ips));
+                .password(!self.show_ips);
+            let ip_frame = egui::Frame::none()
+                .stroke(egui::Stroke::new(1.0, self.settings.theme.separator()))
+                .inner_margin(0.0);
+            ip_frame.show(ui, |ui| { ui.add(ip_edit); });
             let eye = if self.show_ips { "Hide" } else { "Show" };
             if ui.small_button(eye).clicked() {
                 self.show_ips = !self.show_ips;
             }
         });
         ui.label("Peer port:");
-        ui.add(egui::TextEdit::singleline(&mut self.peer_port).desired_width(120.0));
-
-        if self.settings.network_mode == 1 {
-            ui.add_space(4.0);
-            ui.colored_label(egui::Color32::YELLOW, "Internet mode: make sure port is open in firewall");
-        }
+        let port_edit = egui::TextEdit::singleline(&mut self.peer_port).desired_width(120.0);
+        egui::Frame::none()
+            .stroke(egui::Stroke::new(1.0, self.settings.theme.separator()))
+            .inner_margin(0.0)
+            .show(ui, |ui| { ui.add(port_edit); });
 
         ui.add_space(12.0);
-        ui.vertical_centered(|ui| {
-            let btn = egui::Button::new(
-                egui::RichText::new("Call").size(20.0).color(egui::Color32::WHITE)
-            )
-            .min_size(egui::vec2(200.0, 42.0))
-            .fill(egui::Color32::from_rgb(40, 140, 60));
-            if ui.add(btn).clicked() {
-                self.start_call();
-            }
-        });
+        let btn = egui::Button::new(
+            egui::RichText::new("Call").size(20.0).color(egui::Color32::WHITE)
+        )
+        .min_size(egui::vec2(200.0, 42.0))
+        .fill(self.settings.theme.btn_positive());
+        if ui.add(btn).clicked() {
+            self.start_call();
+        }
 
         // ── Contacts quick-dial ──
         ui.add_space(10.0);
@@ -58,7 +59,7 @@ impl HostelApp {
         ui.add_space(4.0);
 
         if self.contacts.is_empty() {
-            ui.colored_label(egui::Color32::GRAY, "No contacts yet. Make a call to add one.");
+            ui.colored_label(self.settings.theme.text_muted(), "No contacts yet. Make a call to add one.");
             return;
         }
 
@@ -78,31 +79,26 @@ impl HostelApp {
                         continue;
                     }
 
-                    let display = format_peer_display(&contact.nickname, &contact.fingerprint);
                     let has_addr = !contact.last_address.is_empty();
 
                     ui.horizontal(|ui| {
-                        let text = if has_addr {
-                            egui::RichText::new(&display)
+                        let btn_widget = if has_addr {
+                            egui::Button::new(peer_display_job(&contact.nickname, &contact.fingerprint, 13.0, self.settings.theme.text_primary(), self.settings.theme.text_dim())).frame(false)
                         } else {
-                            egui::RichText::new(&display).color(egui::Color32::GRAY)
+                            let text = format_peer_display(&contact.nickname, &contact.fingerprint);
+                            egui::Button::new(egui::RichText::new(&text).color(self.settings.theme.text_muted())).frame(false)
                         };
-                        if ui.add(egui::Button::new(text).frame(false)).clicked() && has_addr {
+                        if ui.add(btn_widget).clicked() && has_addr {
                             selected_contact = Some(i);
                         }
 
                         if has_addr {
-                            let addr_display = if self.show_ips {
-                                format!("[{}]:{}", contact.last_address, contact.last_port)
-                            } else {
-                                format!("[{}]:{}", censor_ip(&contact.last_address), contact.last_port)
-                            };
                             ui.colored_label(
-                                egui::Color32::from_gray(140),
-                                addr_display,
+                                self.settings.theme.text_dim(),
+                                format!("[{}]:{}", censor_ip(&contact.last_address), contact.last_port),
                             );
                         } else {
-                            ui.colored_label(egui::Color32::from_gray(100), "(no address)");
+                            ui.colored_label(self.settings.theme.text_muted(), "(no address)");
                         }
                     });
                     ui.separator();
@@ -131,7 +127,7 @@ impl HostelApp {
             ui.add_space(20.0);
             let btn = egui::Button::new(egui::RichText::new("Cancel").size(16.0))
                 .min_size(egui::vec2(120.0, 34.0))
-                .fill(egui::Color32::from_rgb(160, 50, 50));
+                .fill(self.settings.theme.btn_negative());
             if ui.add(btn).clicked() {
                 self.running.store(false, Ordering::Relaxed);
                 self.cleanup_call();
@@ -141,13 +137,12 @@ impl HostelApp {
     }
 
     pub(crate) fn draw_key_warning(&mut self, ui: &mut egui::Ui) {
-        let peer_display = format_peer_display(&self.peer_nickname, &self.peer_fingerprint);
         let warning_text = self.key_change_warning.clone().unwrap_or_default();
 
         ui.vertical_centered(|ui| {
             ui.add_space(30.0);
             ui.colored_label(
-                egui::Color32::from_rgb(255, 60, 60),
+                self.settings.theme.error(),
                 egui::RichText::new("SECURITY WARNING").size(28.0).strong(),
             );
             ui.add_space(15.0);
@@ -155,7 +150,7 @@ impl HostelApp {
 
         ui.add_space(5.0);
         ui.colored_label(
-            egui::Color32::from_rgb(255, 100, 100),
+            self.settings.theme.error(),
             egui::RichText::new(&warning_text).size(15.0).strong(),
         );
 
@@ -165,12 +160,12 @@ impl HostelApp {
 
         ui.horizontal(|ui| {
             ui.label("Peer:");
-            ui.strong(&peer_display);
+            ui.label(peer_display_job(&self.peer_nickname, &self.peer_fingerprint, 14.0, self.settings.theme.text_primary(), self.settings.theme.text_dim()));
         });
         ui.horizontal(|ui| {
             ui.label("Verify code:");
             ui.colored_label(
-                egui::Color32::from_rgb(255, 200, 50),
+                self.settings.theme.warning(),
                 egui::RichText::new(&self.verification_code).size(18.0).strong(),
             );
         });
@@ -181,7 +176,7 @@ impl HostelApp {
         ui.label("  - Someone is impersonating the peer (MITM attack)");
         ui.add_space(5.0);
         ui.colored_label(
-            egui::Color32::from_rgb(255, 200, 100),
+            self.settings.theme.warning(),
             "Verify the code above with your peer through a trusted channel.",
         );
 
@@ -192,7 +187,7 @@ impl HostelApp {
                     egui::RichText::new("Proceed (Trust)").size(18.0).color(egui::Color32::WHITE),
                 )
                 .min_size(egui::vec2(180.0, 44.0))
-                .fill(egui::Color32::from_rgb(40, 140, 60));
+                .fill(self.settings.theme.btn_positive());
 
                 if ui.add(proceed_btn).clicked() {
                     if let Some(contact) = self.pending_contact.take() {
@@ -208,7 +203,7 @@ impl HostelApp {
                     egui::RichText::new("Reject (Hang Up)").size(18.0).color(egui::Color32::WHITE),
                 )
                 .min_size(egui::vec2(180.0, 44.0))
-                .fill(egui::Color32::from_rgb(180, 40, 40));
+                .fill(self.settings.theme.btn_negative());
 
                 if ui.add(reject_btn).clicked() {
                     self.pending_contact = None;
@@ -220,16 +215,16 @@ impl HostelApp {
 
     pub(crate) fn draw_call(&mut self, ui: &mut egui::Ui) {
         let mic_on = self.mic_active.load(Ordering::Relaxed);
-        let peer_display = format_peer_display(&self.peer_nickname, &self.peer_fingerprint);
         let has_video = self.screen_texture.is_some();
 
         // ── Top bar: status ──
         ui.horizontal(|ui| {
             ui.heading("hostelD");
             ui.separator();
-            ui.colored_label(egui::Color32::from_rgb(80, 200, 80), "ENCRYPTED");
+            ui.colored_label(self.settings.theme.accent(), "ENCRYPTED");
             ui.separator();
-            ui.label(format!("Peer: {peer_display}"));
+            ui.label("Peer:");
+            ui.label(peer_display_job(&self.peer_nickname, &self.peer_fingerprint, 13.0, self.settings.theme.text_primary(), self.settings.theme.text_dim()));
         });
 
         ui.separator();
@@ -238,13 +233,12 @@ impl HostelApp {
         ui.horizontal(|ui| {
             ui.label("Verify:");
             ui.colored_label(
-                egui::Color32::from_rgb(255, 200, 50),
+                self.settings.theme.warning(),
                 egui::RichText::new(&self.verification_code).size(18.0).strong(),
             );
             ui.separator();
             ui.label("Opus 64kbps");
             ui.separator();
-            ui.label(if self.settings.network_mode == 0 { "LAN" } else { "Internet" });
         });
 
         ui.add_space(4.0);
@@ -252,9 +246,9 @@ impl HostelApp {
         // ── Controls row ──
         ui.horizontal(|ui| {
             let (btn_text, btn_color) = if mic_on {
-                ("Mic: ON", egui::Color32::from_rgb(40, 140, 60))
+                ("Mic: ON", self.settings.theme.btn_positive())
             } else {
-                ("Mic: MUTED", egui::Color32::from_rgb(180, 40, 40))
+                ("Mic: MUTED", self.settings.theme.btn_negative())
             };
             let mic_btn = egui::Button::new(
                 egui::RichText::new(btn_text).size(16.0).color(egui::Color32::WHITE)
@@ -264,9 +258,9 @@ impl HostelApp {
             }
 
             let (scr_text, scr_color) = if self.screen_sharing {
-                ("Screen: ON", egui::Color32::from_rgb(40, 100, 180))
+                ("Screen: ON", self.settings.theme.btn_primary())
             } else {
-                ("Screen: OFF", egui::Color32::from_rgb(100, 100, 100))
+                ("Screen: OFF", self.settings.theme.btn_neutral())
             };
             let scr_btn = egui::Button::new(
                 egui::RichText::new(scr_text).size(16.0).color(egui::Color32::WHITE)
@@ -294,9 +288,9 @@ impl HostelApp {
             }
 
             let (cam_text, cam_color) = if self.webcam_sharing {
-                ("Cam: ON", egui::Color32::from_rgb(40, 160, 100))
+                ("Cam: ON", self.settings.theme.btn_positive())
             } else {
-                ("Cam: OFF", egui::Color32::from_rgb(100, 100, 100))
+                ("Cam: OFF", self.settings.theme.btn_neutral())
             };
             let cam_btn = egui::Button::new(
                 egui::RichText::new(cam_text).size(16.0).color(egui::Color32::WHITE)
@@ -322,7 +316,7 @@ impl HostelApp {
 
             let hangup_btn = egui::Button::new(
                 egui::RichText::new("Hang Up").size(16.0).color(egui::Color32::WHITE)
-            ).min_size(egui::vec2(100.0, 35.0)).fill(egui::Color32::from_rgb(180, 40, 40));
+            ).min_size(egui::vec2(100.0, 35.0)).fill(self.settings.theme.btn_negative());
             if ui.add(hangup_btn).clicked() {
                 self.show_hangup_confirm = true;
             }
@@ -413,7 +407,7 @@ impl HostelApp {
                     ui.add_space(8.0);
                     let share_btn = egui::Button::new(
                         egui::RichText::new("Share Screen").size(16.0).color(egui::Color32::WHITE)
-                    ).min_size(egui::vec2(160.0, 35.0)).fill(egui::Color32::from_rgb(40, 100, 180));
+                    ).min_size(egui::vec2(160.0, 35.0)).fill(self.settings.theme.btn_primary());
                     if ui.add(share_btn).clicked() {
                         let quality = ScreenQuality::ALL[self.selected_screen_quality];
                         let audio_device = match self.selected_audio_device {
@@ -444,7 +438,7 @@ impl HostelApp {
                 .show(ui.ctx(), |ui| {
                     ui.label("Camera:");
                     if self.camera_names.is_empty() {
-                        ui.colored_label(egui::Color32::from_rgb(255, 100, 100), "No cameras found");
+                        ui.colored_label(self.settings.theme.error(), "No cameras found");
                     } else {
                         let cam_label = self.camera_names.get(self.selected_camera)
                             .cloned().unwrap_or_else(|| "Camera 0".to_string());
@@ -475,8 +469,8 @@ impl HostelApp {
                     let start_btn = egui::Button::new(
                         egui::RichText::new("Start Camera").size(16.0).color(egui::Color32::WHITE)
                     ).min_size(egui::vec2(160.0, 35.0)).fill(
-                        if can_start { egui::Color32::from_rgb(40, 160, 100) }
-                        else { egui::Color32::from_rgb(80, 80, 80) }
+                        if can_start { self.settings.theme.btn_positive() }
+                        else { self.settings.theme.btn_neutral() }
                     );
                     if ui.add_enabled(can_start, start_btn).clicked() {
                         let quality = ScreenQuality::ALL[self.selected_screen_quality];
@@ -507,7 +501,7 @@ impl HostelApp {
                     ui.horizontal(|ui| {
                         let yes_btn = egui::Button::new(
                             egui::RichText::new("Yes").size(15.0).color(egui::Color32::WHITE)
-                        ).min_size(egui::vec2(80.0, 32.0)).fill(egui::Color32::from_rgb(180, 40, 40));
+                        ).min_size(egui::vec2(80.0, 32.0)).fill(self.settings.theme.btn_negative());
                         if ui.add(yes_btn).clicked() {
                             self.show_hangup_confirm = false;
                             if self.is_fullscreen || self.video_fullscreen {
@@ -702,20 +696,20 @@ impl HostelApp {
             .show(ui, |ui| {
                 if let Some(history) = &self.chat_history {
                     if history.messages.is_empty() {
-                        ui.colored_label(egui::Color32::GRAY, "No messages yet. Type below.");
+                        ui.colored_label(self.settings.theme.text_muted(), "No messages yet. Type below.");
                     }
                     for msg in &history.messages {
                         let time = ChatHistory::format_time(msg.timestamp);
                         if msg.from_me {
                             ui.horizontal_wrapped(|ui| {
-                                ui.colored_label(egui::Color32::GRAY, &time);
-                                ui.colored_label(egui::Color32::from_rgb(100, 180, 255), "You:");
+                                ui.colored_label(self.settings.theme.text_muted(), &time);
+                                ui.colored_label(self.settings.theme.chat_self(), "You:");
                                 ui.label(&msg.text);
                             });
                         } else {
                             ui.horizontal_wrapped(|ui| {
-                                ui.colored_label(egui::Color32::GRAY, &time);
-                                ui.colored_label(egui::Color32::from_rgb(180, 255, 100), &peer_label);
+                                ui.colored_label(self.settings.theme.text_muted(), &time);
+                                ui.colored_label(self.settings.theme.chat_peer(), &peer_label);
                                 ui.label(&msg.text);
                             });
                         }

@@ -9,6 +9,7 @@ mod crypto;
 mod firewall;
 mod gui;
 mod identity;
+pub mod theme;
 mod messaging;
 mod screen;
 mod sysaudio;
