@@ -829,6 +829,9 @@ impl eframe::App for HostelApp {
                         self.req_status = format!("Failed ({}): {}", peer_addr, reason);
                     }
                     MsgEvent::IncomingCall { nickname, fingerprint, ip, port } => {
+                        log_fmt!("[gui] IncomingCall event: nick='{}' fp='{}' ip='{}' port='{}' screen={}",
+                            nickname, fingerprint, ip, port,
+                            match &self.screen { Screen::Setup => "Setup", Screen::Connecting => "Connecting", Screen::InCall => "InCall", Screen::KeyWarning => "KeyWarning", Screen::Error(_) => "Error" });
                         // Only show if not already in a call
                         if matches!(self.screen, Screen::Setup) {
                             // OS-level desktop notification

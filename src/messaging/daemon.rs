@@ -137,9 +137,12 @@ impl MsgDaemon {
                 MsgCommand::Shutdown => return false,
 
                 MsgCommand::DismissIncomingCall { ip, reject } => {
+                    log_fmt!("[daemon] DismissIncomingCall ip={} reject={}", ip, reject);
+                    log_fmt!("[daemon]   notified_calls keys: {:?}", self.notified_calls.keys().collect::<Vec<_>>());
                     if reject {
                         // Complete voice handshake and send HANGUP to cut the caller's attempt
                         if let Some((_, peer_addr, peer_ephemeral)) = self.notified_calls.remove(&ip) {
+                            log_fmt!("[daemon]   found entry, sending HELLO+HANGUP to {}", peer_addr);
                             if let Some(ref socket) = self.socket {
                                 let (our_secret, our_pubkey) = crypto::generate_keypair();
                                 let hello_reply = crypto::build_hello(&our_pubkey);
@@ -148,13 +151,15 @@ impl MsgDaemon {
                                 let hangup = session.encrypt_packet(PKT_HANGUP, &[]);
                                 socket.send_to(&hangup, peer_addr).ok();
                             }
+                        } else {
+                            log_fmt!("[daemon]   NO entry found for ip={}", ip);
                         }
                         // Suppress extra HELLOs the caller sends after completing handshake
-                        // (voice.rs sends ~10 extra HELLOs). Short TTL so new calls still work.
                         self.rejected_ips.insert(ip, Instant::now());
                     } else {
                         self.notified_calls.remove(&ip);
                     }
+                    log_fmt!("[daemon]   after: notified_calls={} rejected_ips={}", self.notified_calls.len(), self.rejected_ips.len());
                 }
 
                 MsgCommand::YieldSocket => {
@@ -604,26 +609,42 @@ impl MsgDaemon {
                 PKT_HELLO => {
                     // Voice HELLO (0x01) — detect incoming calls from known contacts
                     let ip_str = from.ip().to_string();
+                    log_fmt!("[daemon] PKT_HELLO from {} (ip={})", from, ip_str);
                     if self.settings.is_ip_banned(&ip_str) {
+                        log_fmt!("[daemon]   SKIP: ip banned");
                         continue;
                     }
                     // Suppress extra HELLOs after a recent reject (short window)
                     if let Some(t) = self.rejected_ips.get(&ip_str) {
                         if t.elapsed() < Duration::from_secs(5) {
+                            log_fmt!("[daemon]   SKIP: rejected_ips cooldown ({}ms ago)", t.elapsed().as_millis());
                             continue;
                         }
                     }
                     // Parse ephemeral pubkey from HELLO
                     let peer_ephemeral = match crypto::parse_hello(data) {
                         Some(pk) => pk,
-                        None => continue,
+                        None => {
+                            log_fmt!("[daemon]   SKIP: parse_hello failed (len={}, type=0x{:02x})", data.len(), data[0]);
+                            continue;
+                        }
                     };
+                    let pk_short = format!("{:02x}{:02x}{:02x}{:02x}", peer_ephemeral[0], peer_ephemeral[1], peer_ephemeral[2], peer_ephemeral[3]);
+                    log_fmt!("[daemon]   ephemeral_pk={}...", pk_short);
                     // Suppress retries from the SAME call (same ephemeral key).
                     // A NEW call uses a different key, so it always gets through.
                     if let Some((t, _, stored_pk)) = self.notified_calls.get(&ip_str) {
-                        if *stored_pk == peer_ephemeral && t.elapsed() < Duration::from_secs(60) {
+                        let stored_short = format!("{:02x}{:02x}{:02x}{:02x}", stored_pk[0], stored_pk[1], stored_pk[2], stored_pk[3]);
+                        let same_key = *stored_pk == peer_ephemeral;
+                        log_fmt!("[daemon]   notified_calls entry: stored_pk={}... same_key={} age={}ms",
+                            stored_short, same_key, t.elapsed().as_millis());
+                        if same_key && t.elapsed() < Duration::from_secs(60) {
+                            log_fmt!("[daemon]   SKIP: same call retry");
                             continue;
                         }
+                        log_fmt!("[daemon]   PASS: different key or expired");
+                    } else {
+                        log_fmt!("[daemon]   no notified_calls entry for this IP");
                     }
 
                     // Try to identify caller:
@@ -632,6 +653,9 @@ impl MsgDaemon {
                     if let Some(peer) = self.peers.get(&from) {
                         if peer.is_connected() && !peer.contact_id.is_empty() {
                             found_contact = identity::load_contact(&peer.peer_pubkey);
+                            if found_contact.is_some() {
+                                log_fmt!("[daemon]   matched via active messaging peer");
+                            }
                         }
                     }
                     // 2. Check contacts by exact last_address
@@ -639,15 +663,22 @@ impl MsgDaemon {
                         let contacts = identity::load_all_contacts();
                         found_contact = contacts.into_iter()
                             .find(|c| c.last_address == ip_str);
+                        if found_contact.is_some() {
+                            log_fmt!("[daemon]   matched via exact last_address");
+                        }
                     }
                     // 3. Check contacts by /64 prefix match (IPv6 privacy addresses)
                     if found_contact.is_none() {
                         let contacts = identity::load_all_contacts();
                         found_contact = contacts.into_iter()
                             .find(|c| ipv6_prefix_match(&c.last_address, &ip_str));
+                        if found_contact.is_some() {
+                            log_fmt!("[daemon]   matched via /64 prefix");
+                        }
                     }
 
                     if let Some(contact) = found_contact {
+                        log_fmt!("[daemon]   => EMITTING IncomingCall for '{}' ({})", contact.nickname, contact.fingerprint);
                         self.notified_calls.insert(
                             ip_str.clone(),
                             (Instant::now(), from, peer_ephemeral),
@@ -658,6 +689,8 @@ impl MsgDaemon {
                             ip: ip_str,
                             port: from.port().to_string(),
                         }).ok();
+                    } else {
+                        log_fmt!("[daemon]   NO contact match found (checked {} contacts)", identity::load_all_contacts().len());
                     }
                 }
 
