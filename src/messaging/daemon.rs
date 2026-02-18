@@ -556,7 +556,12 @@ impl MsgDaemon {
 
                             // Check if we already have this contact
                             if identity::load_contact(&pubkey).is_some() {
-                                // Already a contact, skip
+                                // Already a contact — auto-accept so the other side completes too
+                                if let Some(ref socket) = self.socket {
+                                    protocol::send_request_accept(
+                                        peer, socket, &self.identity, &self.nickname,
+                                    );
+                                }
                                 continue;
                             }
 
