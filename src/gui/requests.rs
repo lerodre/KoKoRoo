@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 
 use crate::messaging::MsgCommand;
 
-use super::HostelApp;
+use super::{HostelApp, censor_ip};
 
 impl HostelApp {
     pub(crate) fn draw_requests_tab(&mut self, ui: &mut egui::Ui) {
@@ -20,8 +20,13 @@ impl HostelApp {
             ui.add(
                 egui::TextEdit::singleline(&mut self.req_ip_input)
                     .hint_text("e.g. ::1 or 2001:db8::1")
-                    .desired_width(200.0),
+                    .desired_width(200.0)
+                    .password(!self.show_ips),
             );
+            let eye = if self.show_ips { "Hide" } else { "Show" };
+            if ui.small_button(eye).clicked() {
+                self.show_ips = !self.show_ips;
+            }
             ui.label("Port:");
             ui.add(
                 egui::TextEdit::singleline(&mut self.req_port_input)
@@ -78,9 +83,10 @@ impl HostelApp {
                                 ui.label(
                                     egui::RichText::new(&display).strong(),
                                 );
+                                let display_ip = if self.show_ips { ip.clone() } else { censor_ip(ip) };
                                 ui.colored_label(
                                     egui::Color32::GRAY,
-                                    format!("IP: {ip}"),
+                                    format!("IP: {display_ip}"),
                                 );
                             });
                         });

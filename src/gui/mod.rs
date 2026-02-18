@@ -174,6 +174,23 @@ pub(crate) fn format_peer_display(nickname: &str, fingerprint: &str) -> String {
     }
 }
 
+/// Censor an IP address: show first group, mask the rest.
+/// e.g. "2803:c600:d310:..." → "2803:****"
+pub(crate) fn censor_ip(ip: &str) -> String {
+    if ip == "::1" || ip.is_empty() {
+        return ip.to_string();
+    }
+    // Find the first ':' and keep everything before it
+    if let Some(pos) = ip.find(':') {
+        format!("{}:****", &ip[..pos])
+    } else if let Some(pos) = ip.find('.') {
+        // IPv4: show first octet
+        format!("{}.***.***", &ip[..pos])
+    } else {
+        "****".to_string()
+    }
+}
+
 // ── Connection result sent from background thread ──
 
 pub(crate) struct CallInfo {
@@ -277,6 +294,9 @@ pub struct HostelApp {
     pub(crate) req_ip_input: String,
     pub(crate) req_port_input: String,
     pub(crate) req_status: String,
+
+    // IP privacy: censored by default
+    pub(crate) show_ips: bool,
 }
 
 impl HostelApp {
@@ -384,6 +404,7 @@ impl HostelApp {
             req_ip_input: String::new(),
             req_port_input: String::new(),
             req_status: String::new(),
+            show_ips: false,
         }
     }
 

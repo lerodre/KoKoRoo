@@ -1,7 +1,7 @@
 use eframe::egui;
 use crate::chat::ChatHistory;
 use crate::identity;
-use super::{HostelApp, SidebarTab, format_peer_display};
+use super::{HostelApp, SidebarTab, format_peer_display, censor_ip};
 
 impl HostelApp {
     pub(crate) fn draw_contacts_tab(&mut self, ui: &mut egui::Ui) {
@@ -139,7 +139,16 @@ impl HostelApp {
         if !contact.last_address.is_empty() {
             ui.horizontal(|ui| {
                 ui.label("Last address:");
-                ui.monospace(format!("[{}]:{}", contact.last_address, contact.last_port));
+                let addr_display = if self.show_ips {
+                    format!("[{}]:{}", contact.last_address, contact.last_port)
+                } else {
+                    format!("[{}]:{}", censor_ip(&contact.last_address), contact.last_port)
+                };
+                ui.monospace(&addr_display);
+                let eye = if self.show_ips { "Hide" } else { "Show" };
+                if ui.small_button(eye).clicked() {
+                    self.show_ips = !self.show_ips;
+                }
             });
         }
         ui.horizontal(|ui| {

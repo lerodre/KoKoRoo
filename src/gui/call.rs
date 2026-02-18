@@ -4,7 +4,7 @@ use std::time::Instant;
 use crate::chat::ChatHistory;
 use crate::identity;
 use crate::screen::{ScreenCommand, ScreenQuality};
-use super::{HostelApp, Screen, format_peer_display};
+use super::{HostelApp, Screen, format_peer_display, censor_ip};
 
 impl HostelApp {
     pub(crate) fn draw_call_tab(&mut self, ui: &mut egui::Ui) {
@@ -13,7 +13,15 @@ impl HostelApp {
         ui.add_space(10.0);
 
         ui.label("Peer IPv6:");
-        ui.add(egui::TextEdit::singleline(&mut self.peer_ip).desired_width(300.0));
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.peer_ip)
+                .desired_width(300.0)
+                .password(!self.show_ips));
+            let eye = if self.show_ips { "Hide" } else { "Show" };
+            if ui.small_button(eye).clicked() {
+                self.show_ips = !self.show_ips;
+            }
+        });
         ui.label("Peer port:");
         ui.add(egui::TextEdit::singleline(&mut self.peer_port).desired_width(120.0));
 
@@ -84,9 +92,14 @@ impl HostelApp {
                         }
 
                         if has_addr {
+                            let addr_display = if self.show_ips {
+                                format!("[{}]:{}", contact.last_address, contact.last_port)
+                            } else {
+                                format!("[{}]:{}", censor_ip(&contact.last_address), contact.last_port)
+                            };
                             ui.colored_label(
                                 egui::Color32::from_gray(140),
-                                format!("[{}]:{}", contact.last_address, contact.last_port),
+                                addr_display,
                             );
                         } else {
                             ui.colored_label(egui::Color32::from_gray(100), "(no address)");
@@ -113,7 +126,8 @@ impl HostelApp {
             ui.spinner();
             ui.add_space(15.0);
             ui.label("Key exchange + identity verification");
-            ui.label(format!("Peer: [{}]:{}", self.peer_ip, self.peer_port));
+            let conn_ip = if self.show_ips { self.peer_ip.clone() } else { censor_ip(&self.peer_ip) };
+            ui.label(format!("Peer: [{}]:{}", conn_ip, self.peer_port));
             ui.add_space(20.0);
             let btn = egui::Button::new(egui::RichText::new("Cancel").size(16.0))
                 .min_size(egui::vec2(120.0, 34.0))

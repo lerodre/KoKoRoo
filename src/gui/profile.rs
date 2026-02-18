@@ -1,5 +1,5 @@
 use eframe::egui;
-use super::{HostelApp, get_best_ipv6};
+use super::{HostelApp, get_best_ipv6, censor_ip};
 
 impl HostelApp {
     pub(crate) fn draw_profile_tab(&mut self, ui: &mut egui::Ui) {
@@ -35,7 +35,12 @@ impl HostelApp {
 
         ui.horizontal(|ui| {
             ui.label("Your IPv6:");
-            ui.monospace(&self.best_ipv6);
+            let display_ip = if self.show_ips { self.best_ipv6.clone() } else { censor_ip(&self.best_ipv6) };
+            ui.monospace(&display_ip);
+            let eye_label = if self.show_ips { "Hide" } else { "Show" };
+            if ui.small_button(eye_label).clicked() {
+                self.show_ips = !self.show_ips;
+            }
             if ui.small_button("Copy").clicked() {
                 ui.ctx().copy_text(self.best_ipv6.clone());
             }

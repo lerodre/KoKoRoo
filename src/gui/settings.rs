@@ -1,6 +1,6 @@
 use eframe::egui;
 use crate::identity;
-use super::{HostelApp, list_audio_devices, get_adapter_names, get_best_ipv6};
+use super::{HostelApp, list_audio_devices, get_adapter_names, get_best_ipv6, censor_ip};
 
 impl HostelApp {
     pub(crate) fn draw_settings_tab(&mut self, ui: &mut egui::Ui) {
@@ -194,7 +194,8 @@ impl HostelApp {
             let mut unban_ip: Option<String> = None;
             for ip in &all_ips {
                 ui.horizontal(|ui| {
-                    ui.monospace(ip);
+                    let display_ip = if self.show_ips { ip.clone() } else { censor_ip(ip) };
+                    ui.monospace(&display_ip);
                     if ui.small_button("Unban").clicked() {
                         unban_ip = Some(ip.clone());
                     }
