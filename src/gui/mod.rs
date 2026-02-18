@@ -38,6 +38,7 @@ pub(crate) enum SidebarTab {
     Messages,
     Call,
     Settings,
+    Appearance,
 }
 
 pub(crate) struct DeviceList {
@@ -174,6 +175,42 @@ pub(crate) fn format_peer_display(nickname: &str, fingerprint: &str) -> String {
     }
 }
 
+/// Build a LayoutJob with nickname bold/large and #fingerprint smaller/gray.
+pub(crate) fn peer_display_job(nickname: &str, fingerprint: &str, base_size: f32, name_color: egui::Color32, dim_color: egui::Color32) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    if nickname.is_empty() {
+        job.append(
+            fingerprint,
+            0.0,
+            egui::TextFormat {
+                font_id: egui::FontId::proportional(base_size),
+                color: name_color,
+                ..Default::default()
+            },
+        );
+    } else {
+        job.append(
+            nickname,
+            0.0,
+            egui::TextFormat {
+                font_id: egui::FontId::proportional(base_size + 1.0),
+                color: name_color,
+                ..Default::default()
+            },
+        );
+        job.append(
+            &format!(" #{fingerprint}"),
+            0.0,
+            egui::TextFormat {
+                font_id: egui::FontId::proportional(base_size - 2.0),
+                color: dim_color,
+                ..Default::default()
+            },
+        );
+    }
+    job
+}
+
 /// Censor an IP address: show first group, mask the rest.
 /// e.g. "2803:c600:d310:..." → "2803:****"
 pub(crate) fn censor_ip(ip: &str) -> String {
@@ -224,12 +261,12 @@ fn start_ringtone() -> Arc<AtomicBool> {
                 .args([
                     "-WindowStyle", "Hidden", "-Command",
                     &format!(
-                        "Add-Type -AssemblyName PresentationCore; \
-                         $p = New-Object System.Windows.Media.MediaPlayer; \
-                         $p.Open([Uri]::new('file:///{}')); $p.Play(); \
-                         while($p.NaturalDuration.HasTimeSpan -eq $false){{Start-Sleep -Milliseconds 100}}; \
-                         Start-Sleep -Seconds ([int]$p.NaturalDuration.TimeSpan.TotalSeconds + 1); \
-                         $p.Close()",
+                        "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; \
+                         public class WinMM {{ [DllImport(\"winmm.dll\")] \
+                         public static extern int mciSendString(string cmd, System.Text.StringBuilder buf, int sz, IntPtr cb); }}'; \
+                         $null=[WinMM]::mciSendString('open \"{}\" alias hostelring', $null, 0, [IntPtr]::Zero); \
+                         $null=[WinMM]::mciSendString('play hostelring wait', $null, 0, [IntPtr]::Zero); \
+                         $null=[WinMM]::mciSendString('close hostelring', $null, 0, [IntPtr]::Zero)",
                         path.replace('\\', "/")
                     ),
                 ])
@@ -386,7 +423,6 @@ pub struct HostelApp {
     pub(crate) msg_chat_histories: HashMap<String, ChatHistory>,
     pub(crate) msg_unread: HashMap<String, u32>,
     pub(crate) msg_peer_online: HashMap<String, bool>,
-    pub(crate) msg_show_contact_picker: bool,
 
     // Contact requests
     pub(crate) req_incoming: Vec<(String, String, String, String)>, // (request_id, nickname, ip, fingerprint)
@@ -403,6 +439,17 @@ pub struct HostelApp {
 
     // Ringtone playback (background thread)
     pub(crate) ringtone_stop: Option<Arc<AtomicBool>>,
+
+    // Color palette editor
+    pub(crate) color_hex_inputs: HashMap<String, String>,
+    pub(crate) color_locks: std::collections::HashSet<String>,
+
+    // Firewall prompt
+    pub(crate) show_firewall_prompt: bool,
+    pub(crate) firewall_old_port: String,
+
+    // Settings feedback
+    pub(crate) port_saved_at: Option<Instant>,
 }
 
 pub(crate) struct IncomingCallInfo {
@@ -452,6 +499,8 @@ impl HostelApp {
             );
             daemon.run();
         });
+
+        let needs_firewall_prompt = settings.firewall_port != local_port;
 
         Self {
             screen: Screen::Setup,
@@ -512,7 +561,6 @@ impl HostelApp {
             msg_chat_histories: HashMap::new(),
             msg_unread: HashMap::new(),
             msg_peer_online: HashMap::new(),
-            msg_show_contact_picker: false,
             req_incoming: Vec::new(),
             req_ip_input: String::new(),
             req_port_input: String::new(),
@@ -521,6 +569,11 @@ impl HostelApp {
             incoming_call: None,
             incoming_call_attention: false,
             ringtone_stop: None,
+            color_hex_inputs: HashMap::new(),
+            color_locks: std::collections::HashSet::new(),
+            show_firewall_prompt: needs_firewall_prompt,
+            firewall_old_port: String::new(),
+            port_saved_at: None,
         }
     }
 
@@ -581,14 +634,6 @@ impl HostelApp {
                     pubkey: identity_pubkey,
                     fingerprint: identity_fingerprint,
                 };
-
-                if let Ok(port_num) = local_port.parse::<u16>() {
-                    match crate::sysfirewall::ensure_udp_port_open(port_num) {
-                        Ok(true) => log_fmt!("[firewall] Added rule for UDP port {}", port_num),
-                        Ok(false) => log_fmt!("[firewall] Rule already exists for UDP port {}", port_num),
-                        Err(e) => log_fmt!("[firewall] WARNING: {}", e),
-                    }
-                }
 
                 let (screen_cmd_tx, screen_cmd_rx) = mpsc::channel::<ScreenCommand>();
 
@@ -835,12 +880,10 @@ impl eframe::App for HostelApp {
                         // Only show if not already in a call
                         if matches!(self.screen, Screen::Setup) {
                             // OS-level desktop notification
-                            let caller = if nickname.is_empty() {
-                                format!("#{}", fingerprint)
-                            } else {
-                                format!("{} #{}", nickname, fingerprint)
-                            };
-                            send_desktop_notification("hostelD — Incoming Call", &caller);
+                            send_desktop_notification(
+                                "hostelD — Incoming Call",
+                                &format_peer_display(&nickname, &fingerprint),
+                            );
 
                             // Play ringtone
                             if self.ringtone_stop.is_none() {
@@ -869,10 +912,28 @@ impl eframe::App for HostelApp {
             ));
         }
 
-        // Style
+        // Style + theme visuals
         let mut style = (*ctx.style()).clone();
         style.spacing.item_spacing = egui::vec2(8.0, 6.0);
         style.spacing.button_padding = egui::vec2(14.0, 6.0);
+        let t = &self.settings.theme;
+        style.visuals.panel_fill = t.panel_bg();
+        style.visuals.window_fill = t.panel_bg();
+        style.visuals.extreme_bg_color = t.panel_bg();
+        style.visuals.faint_bg_color = t.panel_bg();
+        style.visuals.widgets.noninteractive.fg_stroke.color = t.text_primary();
+        style.visuals.widgets.noninteractive.bg_stroke.color = t.separator();
+        style.visuals.widgets.inactive.weak_bg_fill = t.widget_bg();
+        style.visuals.widgets.inactive.bg_fill = t.widget_bg();
+        style.visuals.widgets.inactive.fg_stroke.color = t.text_primary();
+        style.visuals.widgets.hovered.weak_bg_fill = t.widget_hovered();
+        style.visuals.widgets.hovered.bg_fill = t.widget_hovered();
+        style.visuals.widgets.hovered.fg_stroke.color = t.text_primary();
+        style.visuals.widgets.active.weak_bg_fill = t.widget_active();
+        style.visuals.widgets.active.bg_fill = t.widget_active();
+        style.visuals.widgets.active.fg_stroke.color = t.text_primary();
+        style.visuals.selection.bg_fill = t.widget_active();
+        style.visuals.selection.stroke.color = t.text_primary();
         ctx.set_style(style);
 
         // Force Call tab when call is active
@@ -890,9 +951,14 @@ impl eframe::App for HostelApp {
         }
 
         // ── Left sidebar ──
+        let sidebar_frame = egui::Frame::none()
+            .fill(self.settings.theme.sidebar_bg())
+            .inner_margin(egui::Margin::same(4.0));
         egui::SidePanel::left("sidebar")
             .exact_width(84.0)
             .resizable(false)
+            .frame(sidebar_frame)
+            .show_separator_line(false)
             .show(ctx, |ui| {
                 self.draw_sidebar(ui, in_call);
             });
@@ -917,12 +983,18 @@ impl eframe::App for HostelApp {
                     }
                 }
                 SidebarTab::Settings => self.draw_settings_tab(ui),
+                SidebarTab::Appearance => self.draw_appearance_tab(ui),
             }
         });
 
         // ── Incoming call popup (overlay on top of everything) ──
         if self.incoming_call.is_some() {
             self.draw_incoming_call_popup(ctx);
+        }
+
+        // ── Firewall prompt popup ──
+        if self.show_firewall_prompt {
+            self.draw_firewall_prompt(ctx);
         }
 
         // Always schedule periodic repaints so we detect daemon events
@@ -937,11 +1009,7 @@ impl HostelApp {
             Some(info) => info,
             None => return,
         };
-        let caller = if call_info.nickname.is_empty() {
-            format!("#{}", call_info.fingerprint)
-        } else {
-            format!("{} #{}", call_info.nickname, call_info.fingerprint)
-        };
+        let caller_job = peer_display_job(&call_info.nickname, &call_info.fingerprint, 16.0, self.settings.theme.text_primary(), self.settings.theme.text_dim());
         let ip_display = if self.show_ips {
             format!("[{}]:{}", call_info.ip, call_info.port)
         } else {
@@ -962,11 +1030,11 @@ impl HostelApp {
                         egui::RichText::new("Incoming Call")
                             .size(20.0)
                             .strong()
-                            .color(egui::Color32::from_rgb(80, 200, 80)),
+                            .color(self.settings.theme.accent()),
                     );
                     ui.add_space(8.0);
-                    ui.label(egui::RichText::new(&caller).size(16.0).strong());
-                    ui.colored_label(egui::Color32::GRAY, &ip_display);
+                    ui.label(caller_job);
+                    ui.colored_label(self.settings.theme.text_muted(), &ip_display);
                     ui.add_space(12.0);
                 });
                 ui.horizontal(|ui| {
@@ -974,7 +1042,7 @@ impl HostelApp {
                         egui::RichText::new("Accept").size(16.0).color(egui::Color32::WHITE),
                     )
                     .min_size(egui::vec2(120.0, 38.0))
-                    .fill(egui::Color32::from_rgb(40, 140, 60));
+                    .fill(self.settings.theme.btn_positive());
                     if ui.add(accept_btn).clicked() {
                         accept = true;
                     }
@@ -983,7 +1051,7 @@ impl HostelApp {
                         egui::RichText::new("Reject").size(16.0).color(egui::Color32::WHITE),
                     )
                     .min_size(egui::vec2(120.0, 38.0))
-                    .fill(egui::Color32::from_rgb(180, 40, 40));
+                    .fill(self.settings.theme.btn_negative());
                     if ui.add(reject_btn).clicked() {
                         reject = true;
                     }
@@ -1021,6 +1089,101 @@ impl HostelApp {
         }
 
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
+    }
+
+    fn draw_firewall_prompt(&mut self, ctx: &egui::Context) {
+        let is_port_change = !self.firewall_old_port.is_empty();
+        let port = self.local_port.clone();
+
+        let mut action = false;
+        let mut skip = false;
+
+        egui::Window::new("Firewall")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.add_space(8.0);
+                ui.vertical_centered(|ui| {
+                    if is_port_change {
+                        ui.label(
+                            egui::RichText::new(format!("Port changed to {}.", port))
+                                .size(15.0),
+                        );
+                        ui.label(
+                            egui::RichText::new("The old firewall rule will be replaced.")
+                                .size(14.0),
+                        );
+                    } else {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "hostelD needs to open UDP port {} in the firewall", port
+                            ))
+                            .size(15.0),
+                        );
+                        ui.label(
+                            egui::RichText::new("for calls and messages to work.")
+                                .size(14.0),
+                        );
+                    }
+                    ui.add_space(2.0);
+                    ui.colored_label(
+                        self.settings.theme.text_muted(),
+                        "This requires admin permission.",
+                    );
+                    ui.add_space(12.0);
+                });
+                ui.horizontal(|ui| {
+                    let action_label = if is_port_change { "Update" } else { "Open Port" };
+                    let action_btn = egui::Button::new(
+                        egui::RichText::new(action_label).size(15.0).color(egui::Color32::WHITE),
+                    )
+                    .min_size(egui::vec2(120.0, 36.0))
+                    .fill(self.settings.theme.btn_positive());
+                    if ui.add(action_btn).clicked() {
+                        action = true;
+                    }
+
+                    let skip_btn = egui::Button::new(
+                        egui::RichText::new("Skip").size(15.0),
+                    )
+                    .min_size(egui::vec2(120.0, 36.0));
+                    if ui.add(skip_btn).clicked() {
+                        skip = true;
+                    }
+                });
+                ui.add_space(4.0);
+            });
+
+        if action {
+            // Remove old rule if port changed
+            if is_port_change {
+                if let Ok(old_port) = self.firewall_old_port.parse::<u16>() {
+                    match crate::sysfirewall::remove_udp_port_rule(old_port) {
+                        Ok(true) => log_fmt!("[firewall] Removed old rule for UDP port {}", old_port),
+                        Ok(false) => log_fmt!("[firewall] No old rule found for UDP port {}", old_port),
+                        Err(e) => log_fmt!("[firewall] WARNING removing old rule: {}", e),
+                    }
+                }
+            }
+            // Add new rule
+            if let Ok(port_num) = port.parse::<u16>() {
+                match crate::sysfirewall::ensure_udp_port_open(port_num) {
+                    Ok(true) => log_fmt!("[firewall] Added rule for UDP port {}", port_num),
+                    Ok(false) => log_fmt!("[firewall] Rule already exists for UDP port {}", port_num),
+                    Err(e) => log_fmt!("[firewall] WARNING: {}", e),
+                }
+            }
+            // Update tracked port
+            self.settings.firewall_port = self.local_port.clone();
+            self.settings.save();
+            self.firewall_old_port.clear();
+            self.show_firewall_prompt = false;
+        }
+        if skip {
+            self.firewall_old_port.clear();
+            self.show_firewall_prompt = false;
+        }
     }
 }
 

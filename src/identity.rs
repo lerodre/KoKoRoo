@@ -4,6 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::crypto;
+use crate::theme::Theme;
 
 /// Where hostelD stores its data.
 fn data_dir() -> PathBuf {
@@ -187,10 +188,11 @@ pub struct Settings {
     #[serde(default)] pub mic: String,
     #[serde(default)] pub speakers: String,
     #[serde(default)] pub local_port: String,
-    #[serde(default)] pub network_mode: usize,
     #[serde(default)] pub network_adapter: String,
     #[serde(default)] pub blocked: Vec<String>,
     #[serde(default)] pub banned_ips: Vec<String>,
+    #[serde(default)] pub theme: Theme,
+    #[serde(default)] pub firewall_port: String,
 }
 
 impl Settings {

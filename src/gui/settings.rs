@@ -1,6 +1,7 @@
 use eframe::egui;
 use crate::identity;
-use super::{HostelApp, list_audio_devices, get_adapter_names, get_best_ipv6, censor_ip};
+use crate::theme::Theme;
+use super::{HostelApp, list_audio_devices, get_adapter_names, get_best_ipv6, censor_ip, peer_display_job};
 
 impl HostelApp {
     pub(crate) fn draw_settings_tab(&mut self, ui: &mut egui::Ui) {
@@ -9,19 +10,6 @@ impl HostelApp {
         ui.add_space(10.0);
         ui.heading("Settings");
         ui.add_space(10.0);
-
-        // Network mode
-        ui.label("Network mode:");
-        let prev_mode = self.settings.network_mode;
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.settings.network_mode, 0, "LAN");
-            ui.selectable_value(&mut self.settings.network_mode, 1, "Internet");
-        });
-        if self.settings.network_mode != prev_mode {
-            self.settings.save();
-        }
-
-        ui.add_space(8.0);
 
         // Network adapter — use cached list, only refresh on demand
         ui.label("Network adapter:");
@@ -94,15 +82,37 @@ impl HostelApp {
         ui.add_space(4.0);
 
         // Local port
-        ui.label("Local port:");
-        let resp = ui.add(egui::TextEdit::singleline(&mut self.local_port).desired_width(120.0));
-        if resp.lost_focus() {
-            self.settings.local_port = self.local_port.clone();
-            self.settings.save();
-        }
+        ui.label("Local port (UDP):");
+        ui.horizontal(|ui| {
+            let resp = ui.add(egui::TextEdit::singleline(&mut self.local_port).desired_width(120.0));
+
+            let save_clicked = ui.button("Save Port").clicked();
+
+            if save_clicked || resp.lost_focus() {
+                let changed = self.settings.local_port != self.local_port;
+                self.settings.local_port = self.local_port.clone();
+                self.settings.save();
+                self.port_saved_at = Some(std::time::Instant::now());
+                // Trigger firewall prompt if port changed from what the rule covers
+                if changed && self.local_port != self.settings.firewall_port {
+                    self.firewall_old_port = self.settings.firewall_port.clone();
+                    self.show_firewall_prompt = true;
+                }
+            }
+
+            // Show "Saved" feedback for 3 seconds
+            if let Some(saved_at) = self.port_saved_at {
+                if saved_at.elapsed().as_secs_f32() < 3.0 {
+                    ui.colored_label(self.settings.theme.accent(), "Saved");
+                    ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
+                } else {
+                    self.port_saved_at = None;
+                }
+            }
+        });
 
         ui.add_space(10.0);
-        if ui.button("Refresh Devices").clicked() {
+        if ui.button("Refresh Audio Devices").clicked() {
             let t = std::time::Instant::now();
             self.devices = list_audio_devices();
             log_fmt!("[settings] list_audio_devices() took {}ms", t.elapsed().as_millis());
@@ -129,28 +139,22 @@ impl HostelApp {
         ui.label(egui::RichText::new("Blocked Contacts").strong());
 
         if self.settings.blocked.is_empty() {
-            ui.colored_label(egui::Color32::GRAY, "No blocked contacts.");
+            ui.colored_label(self.settings.theme.text_muted(), "No blocked contacts.");
         } else {
             let contacts = identity::load_all_contacts();
             let mut unblock_hex: Option<String> = None;
             let mut unblock_ip: Option<String> = None;
 
             for hex in &self.settings.blocked {
-                let (display, ip) = if let Some(c) = contacts.iter().find(|c| identity::pubkey_hex(&c.pubkey) == *hex) {
-                    let name = if c.nickname.is_empty() {
-                        c.fingerprint.clone()
-                    } else {
-                        format!("{} #{}", c.nickname, c.fingerprint)
-                    };
-                    (name, c.last_address.clone())
+                let (nick, fp, ip) = if let Some(c) = contacts.iter().find(|c| identity::pubkey_hex(&c.pubkey) == *hex) {
+                    (c.nickname.clone(), c.fingerprint.clone(), c.last_address.clone())
                 } else {
-                    // Contact file deleted but hex still in blocked list
                     let short = if hex.len() > 16 { &hex[..16] } else { hex.as_str() };
-                    (format!("{}...", short), String::new())
+                    (String::new(), format!("{}...", short), String::new())
                 };
 
                 ui.horizontal(|ui| {
-                    ui.label(&display);
+                    ui.label(peer_display_job(&nick, &fp, 13.0, self.settings.theme.text_primary(), self.settings.theme.text_dim()));
                     if ui.small_button("Unblock").clicked() {
                         unblock_hex = Some(hex.clone());
                         if !ip.is_empty() {
@@ -189,7 +193,7 @@ impl HostelApp {
         }
 
         if all_ips.is_empty() {
-            ui.colored_label(egui::Color32::GRAY, "No banned IPs.");
+            ui.colored_label(self.settings.theme.text_muted(), "No banned IPs.");
         } else {
             let mut unban_ip: Option<String> = None;
             for ip in &all_ips {
@@ -209,6 +213,112 @@ impl HostelApp {
         let total_ms = settings_start.elapsed().as_millis();
         if total_ms > 16 {
             log_fmt!("[settings] draw_settings_tab took {}ms (slow!)", total_ms);
+        }
+    }
+
+    pub(crate) fn draw_appearance_tab(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(10.0);
+        ui.heading("Colors");
+        ui.add_space(10.0);
+
+        // Initialize hex inputs if needed
+        if self.color_hex_inputs.is_empty() {
+            for (name, _, rgb) in self.settings.theme.all_entries() {
+                self.color_hex_inputs.insert(name.to_string(), Theme::to_hex(rgb));
+            }
+        }
+
+        let mut updates: Vec<(&'static str, [u8; 3])> = Vec::new();
+        let mut randomize = false;
+        let mut reset = false;
+
+        ui.horizontal(|ui| {
+            if ui.button("Randomize").clicked() {
+                randomize = true;
+            }
+            if ui.button("Reset to Defaults").clicked() {
+                reset = true;
+            }
+        });
+
+        ui.add_space(8.0);
+
+        let entries = self.settings.theme.all_entries();
+        let max_height = ui.available_height().max(80.0);
+        egui::ScrollArea::vertical()
+            .max_height(max_height)
+            .id_salt("appearance_colors_scroll")
+            .show(ui, |ui| {
+                for (name, label, rgb) in &entries {
+                    ui.horizontal(|ui| {
+                        // Lock/Unlock button
+                        let locked = self.color_locks.contains(*name);
+                        if ui.small_button(if locked { "Unlock" } else { "Lock  " }).clicked() {
+                            if locked {
+                                self.color_locks.remove(*name);
+                            } else {
+                                self.color_locks.insert(name.to_string());
+                            }
+                        }
+
+                        // Color picker (click to open color wheel)
+                        let mut c = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+                        let prev = c;
+                        egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::Opaque);
+                        if c != prev {
+                            updates.push((*name, [c.r(), c.g(), c.b()]));
+                        }
+
+                        // Label
+                        ui.label(*label);
+
+                        // Hex input
+                        let hex = self.color_hex_inputs.entry(name.to_string())
+                            .or_insert_with(|| Theme::to_hex(*rgb));
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(hex)
+                                .desired_width(80.0)
+                                .char_limit(7),
+                        );
+                        if resp.lost_focus() {
+                            if let Some(new_rgb) = Theme::from_hex(hex) {
+                                updates.push((*name, new_rgb));
+                            } else {
+                                *hex = Theme::to_hex(*rgb);
+                            }
+                        }
+                    });
+                    ui.add_space(2.0);
+                }
+            });
+
+        // Apply smart randomize
+        if randomize {
+            self.settings.theme.smart_randomize(&self.color_locks);
+            for (name, _, rgb) in self.settings.theme.all_entries() {
+                self.color_hex_inputs.insert(name.to_string(), Theme::to_hex(rgb));
+            }
+        }
+
+        // Apply deferred updates
+        for (name, rgb) in &updates {
+            self.settings.theme.set_by_name(name, *rgb);
+            self.color_hex_inputs.insert(name.to_string(), Theme::to_hex(*rgb));
+        }
+
+        // Apply reset (respects locks)
+        if reset {
+            let default_theme = Theme::default();
+            for (name, _, rgb) in default_theme.all_entries() {
+                if !self.color_locks.contains(name) {
+                    self.settings.theme.set_by_name(name, rgb);
+                    self.color_hex_inputs.insert(name.to_string(), Theme::to_hex(rgb));
+                }
+            }
+        }
+
+        if !updates.is_empty() || reset || randomize {
+            self.settings.save();
         }
     }
 }
