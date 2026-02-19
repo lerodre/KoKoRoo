@@ -26,6 +26,8 @@ impl HostelApp {
             load_icon_texture_sized(ui.ctx(), "icon-settings", include_bytes!("../../assets/settings.png"), 48)
         }).clone();
 
+        let badge_color = self.settings.theme.btn_negative();
+
         ui.vertical_centered(|ui| {
             let total_unread: u32 = self.msg_unread.values().sum();
             let incoming_count = self.req_incoming.len();
@@ -41,6 +43,10 @@ impl HostelApp {
                 (SidebarTab::Settings, "Settings".to_string(), 0),
                 (SidebarTab::Appearance, "Colors".to_string(), 0),
             ];
+
+            // Collect badge positions to draw on top after all buttons
+            let mut badges: Vec<(egui::Rect, u32)> = Vec::new();
+
             for (tab, label, badge_count) in &tabs {
                 let tab = *tab;
                 let badge_count = *badge_count;
@@ -76,33 +82,36 @@ impl HostelApp {
                     ui.add_enabled(enabled, btn)
                 };
 
-                // Draw badge bubble for unread counts
                 if badge_count > 0 {
-                    let badge_text = format!("{}", badge_count);
-                    let font = egui::FontId::proportional(10.0);
-                    let text_color = egui::Color32::WHITE;
-                    let bg_color = self.settings.theme.btn_negative();
-                    let painter = ui.painter();
-
-                    // Position badge at top-right of button
-                    let badge_center = egui::pos2(
-                        resp.rect.right() - 10.0,
-                        resp.rect.top() + 10.0,
-                    );
-                    let text_galley = painter.layout_no_wrap(badge_text, font, text_color);
-                    let text_w = text_galley.size().x;
-                    let radius = (text_w / 2.0 + 4.0).max(8.0);
-                    painter.circle_filled(badge_center, radius, bg_color);
-                    painter.galley(
-                        badge_center - egui::vec2(text_galley.size().x / 2.0, text_galley.size().y / 2.0),
-                        text_galley,
-                        text_color,
-                    );
+                    badges.push((resp.rect, badge_count));
                 }
 
                 if resp.clicked() {
                     self.active_tab = tab;
                 }
+            }
+
+            // Draw badge bubbles on top of all buttons
+            let painter = ui.painter();
+            for (rect, count) in badges {
+                let badge_text = format!("{}", count);
+                let font = egui::FontId::proportional(10.0);
+                let text_galley = painter.layout_no_wrap(badge_text, font, egui::Color32::WHITE);
+                let text_w = text_galley.size().x;
+                let text_h = text_galley.size().y;
+                let radius = (text_w / 2.0 + 4.0).max(8.0);
+
+                let badge_center = egui::pos2(
+                    rect.right() - 12.0,
+                    rect.top() + 12.0,
+                );
+
+                painter.circle_filled(badge_center, radius, badge_color);
+                painter.galley(
+                    egui::pos2(badge_center.x - text_w / 2.0, badge_center.y - text_h / 2.0),
+                    text_galley,
+                    egui::Color32::WHITE,
+                );
             }
         });
     }
