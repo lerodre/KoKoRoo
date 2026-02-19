@@ -570,7 +570,7 @@ impl HostelApp {
                     self.screen_texture = Some(
                         ui.ctx().load_texture("screen_share", image, Default::default())
                     );
-                } else if v.latest_frame.is_none() && self.screen_texture.is_some() {
+                } else if v.stopped && self.screen_texture.is_some() {
                     // Peer stopped sharing — clear stale texture
                     self.screen_texture = None;
                     self.last_frame_time = None;

@@ -856,10 +856,10 @@ pub fn start_engine(
                             }
                         }
                         Some((PKT_SCREEN_STOP, _)) => {
-                            // Remote peer stopped screen sharing — clear viewer
+                            // Remote peer stopped screen sharing
                             log_fmt!("[voice] screen: peer stopped sharing");
                             if let Ok(mut viewer) = screen_viewer_r.lock() {
-                                viewer.latest_frame = None;
+                                viewer.stopped = true;
                             }
                         }
                         Some((PKT_HANGUP, _)) => {

@@ -587,6 +587,8 @@ pub struct ScreenViewer {
     pub latest_frame: Option<Vec<u8>>, // RGBA pixels
     pub frame_width: u32,
     pub frame_height: u32,
+    /// Set to true when peer sends PKT_SCREEN_STOP; cleared on next receive_chunk.
+    pub stopped: bool,
 }
 
 impl ScreenViewer {
@@ -597,6 +599,7 @@ impl ScreenViewer {
             latest_frame: None,
             frame_width: 1280,
             frame_height: 720,
+            stopped: false,
         }
     }
 
@@ -605,6 +608,7 @@ impl ScreenViewer {
         if payload.len() < CHUNK_HEADER_SIZE {
             return;
         }
+        self.stopped = false;
         let frame_id = u16::from_be_bytes([payload[0], payload[1]]);
         let chunk_index = u16::from_be_bytes([payload[2], payload[3]]);
         let total_chunks = u16::from_be_bytes([payload[4], payload[5]]);
