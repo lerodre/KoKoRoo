@@ -7,6 +7,14 @@ pub use daemon::MsgDaemon;
 
 use std::net::SocketAddr;
 
+/// Presence status for a contact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresenceStatus {
+    Online,
+    Away,
+    Offline,
+}
+
 /// Commands sent from GUI to the messaging daemon.
 pub enum MsgCommand {
     /// Send a text message to a contact. Daemon handles connection if needed.
@@ -24,6 +32,10 @@ pub enum MsgCommand {
     /// User dismissed an incoming call notification — clear cooldown so re-calls work.
     /// If reject=true, daemon will complete voice handshake + send HANGUP to cut the caller.
     DismissIncomingCall { ip: String, reject: bool },
+    /// Connect to all contacts at startup (staggered to avoid burst).
+    ConnectAll { contacts: Vec<(String, SocketAddr, [u8; 32])> },
+    /// Update our local presence status (Online/Away) — daemon broadcasts to peers.
+    UpdatePresence { status: PresenceStatus },
     /// Ask connected peers for a contact's current address (IP relay).
     QueryPeer { target_pubkey: [u8; 32] },
     /// Voice call starting — daemon must release the UDP socket.
@@ -50,4 +62,6 @@ pub enum MsgEvent {
     IncomingCall { nickname: String, fingerprint: String, ip: String, port: String },
     /// A contact's address was updated via IP relay (announce or peer response).
     PeerAddressUpdate { contact_id: String, ip: String, port: String },
+    /// A peer's presence status changed (Online/Away).
+    PresenceUpdate { contact_id: String, status: PresenceStatus },
 }

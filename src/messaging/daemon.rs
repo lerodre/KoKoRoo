@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -8,6 +8,7 @@ use crate::crypto::{
     PKT_MSG_ACK, PKT_MSG_BYE, PKT_MSG_CHAT, PKT_MSG_HELLO, PKT_MSG_IDENTITY,
     PKT_MSG_REQUEST, PKT_MSG_REQUEST_ACK,
     PKT_MSG_IP_ANNOUNCE, PKT_MSG_PEER_QUERY, PKT_MSG_PEER_RESPONSE,
+    PKT_MSG_PRESENCE,
 };
 use crate::identity::{self, Identity, Settings};
 
@@ -28,6 +29,7 @@ const PEER_QUERY_COOLDOWN: Duration = Duration::from_secs(5 * 60); // 5 min per 
 const QUERY_RATE_WINDOW: Duration = Duration::from_secs(60);       // 1 minute window
 const QUERY_RATE_MAX: u32 = 6;                                     // max 6 queries per window per peer
 const ANNOUNCE_MAX_AGE: Duration = Duration::from_secs(2 * 60 * 60); // 2 hours
+const BEACON_INTERVAL: Duration = Duration::from_secs(10 * 60);     // 10 minutes — reconnect disconnected contacts
 
 /// Retry backoff tiers: 10s, 30s, 1m, 5m, 15m cap
 const RETRY_BACKOFFS: &[Duration] = &[
@@ -79,6 +81,16 @@ pub struct MsgDaemon {
     peer_query_cooldowns: HashMap<[u8; 32], Instant>,
     /// Rate limiting for incoming PEER_QUERY: peer addr → (window_start, count).
     query_counts: HashMap<SocketAddr, (Instant, u32)>,
+    /// Staggered connect queue for ConnectAll.
+    connect_queue: VecDeque<(String, SocketAddr, [u8; 32])>,
+    /// Last time a contact was popped from the connect queue.
+    last_queue_pop: Instant,
+    /// Our current presence status.
+    our_presence: super::PresenceStatus,
+    /// Last time we ran the periodic reconnect beacon.
+    last_beacon: Instant,
+    /// All known contacts (for periodic reconnect). Populated by ConnectAll.
+    all_contacts: Vec<(String, SocketAddr, [u8; 32])>,
 }
 
 impl MsgDaemon {
@@ -113,6 +125,11 @@ impl MsgDaemon {
             last_announced_ip: String::new(),
             peer_query_cooldowns: HashMap::new(),
             query_counts: HashMap::new(),
+            connect_queue: VecDeque::new(),
+            last_queue_pop: Instant::now(),
+            our_presence: super::PresenceStatus::Online,
+            last_beacon: Instant::now(),
+            all_contacts: Vec::new(),
         }
     }
 
@@ -395,6 +412,28 @@ impl MsgDaemon {
                     }
                 }
 
+                MsgCommand::ConnectAll { contacts } => {
+                    log_fmt!("[daemon] ConnectAll: queuing {} contacts", contacts.len());
+                    self.all_contacts = contacts.clone();
+                    for entry in contacts {
+                        self.connect_queue.push_back(entry);
+                    }
+                }
+
+                MsgCommand::UpdatePresence { status } => {
+                    if status != self.our_presence {
+                        self.our_presence = status;
+                        // Broadcast presence to all connected peers
+                        if let Some(ref socket) = self.socket {
+                            for peer in self.peers.values() {
+                                if peer.is_connected() {
+                                    protocol::send_presence(peer, socket, status);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 MsgCommand::QueryPeer { target_pubkey } => {
                     // Ask all connected peers for the target's current address
                     // Respect cooldown per target pubkey
@@ -525,6 +564,8 @@ impl MsgDaemon {
                             }
                             // Reset retry state
                             self.retry_state.insert(contact_id, (Instant::now(), 0));
+                            // Send our presence to the newly connected peer
+                            protocol::send_presence(peer, socket, self.our_presence);
                         }
                     }
                 }
@@ -749,6 +790,20 @@ impl MsgDaemon {
                     }
                 }
 
+                PKT_MSG_PRESENCE => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some(status) = protocol::handle_presence(data, peer) {
+                            peer.touch();
+                            if !peer.contact_id.is_empty() {
+                                self.event_tx.send(MsgEvent::PresenceUpdate {
+                                    contact_id: peer.contact_id.clone(),
+                                    status,
+                                }).ok();
+                            }
+                        }
+                    }
+                }
+
                 PKT_HELLO => {
                     // Voice HELLO (0x01) — detect incoming calls from known contacts
                     let ip_str = from.ip().to_string();
@@ -848,6 +903,34 @@ impl MsgDaemon {
     fn housekeep(&mut self) {
         let now = Instant::now();
 
+        // Process staggered connect queue (1 contact every 100ms)
+        if !self.connect_queue.is_empty()
+            && now.duration_since(self.last_queue_pop) >= Duration::from_millis(100)
+        {
+            if let Some((contact_id, peer_addr, peer_pubkey)) = self.connect_queue.pop_front() {
+                self.last_queue_pop = now;
+                if !self.contact_addrs.contains_key(&contact_id) {
+                    if let Some(ref socket) = self.socket {
+                        if let Some(session) = protocol::initiate_handshake(
+                            socket, &contact_id, peer_addr, peer_pubkey,
+                        ) {
+                            log_fmt!("[daemon] auto-connect: {} -> {}", contact_id, peer_addr);
+                            self.contact_addrs.insert(contact_id.clone(), peer_addr);
+                            self.hello_retries.insert(peer_addr, 0);
+                            self.peers.insert(peer_addr, session);
+                        }
+                    }
+                    // Ensure outbox is loaded
+                    if !self.outboxes.contains_key(&contact_id) {
+                        self.outboxes.insert(
+                            contact_id.clone(),
+                            Outbox::load(&contact_id, &self.identity.secret),
+                        );
+                    }
+                }
+            }
+        }
+
         // Clean up expired incoming call notifications
         self.notified_calls.retain(|_, (t, ..)| t.elapsed() < Duration::from_secs(60));
         self.rejected_ips.retain(|_, t| t.elapsed() < Duration::from_secs(5));
@@ -879,6 +962,33 @@ impl MsgDaemon {
                         }
                     }
                 }
+            }
+        }
+
+        // Periodic beacon: re-queue disconnected contacts every BEACON_INTERVAL
+        // Reload contacts from disk to pick up IP changes from IP_ANNOUNCE / PEER_RESPONSE
+        if now.duration_since(self.last_beacon) >= BEACON_INTERVAL {
+            self.last_beacon = now;
+            let fresh_contacts = identity::load_all_contacts();
+            self.all_contacts = fresh_contacts.iter()
+                .filter_map(|c| {
+                    if c.last_address.is_empty() || c.last_port.is_empty() {
+                        return None;
+                    }
+                    let addr_str = format!("[{}]:{}", c.last_address, c.last_port);
+                    let addr: std::net::SocketAddr = addr_str.parse().ok()?;
+                    Some((c.contact_id.clone(), addr, c.pubkey))
+                })
+                .collect();
+            let mut queued = 0;
+            for (cid, addr, pk) in &self.all_contacts {
+                if !self.contact_addrs.contains_key(cid) {
+                    self.connect_queue.push_back((cid.clone(), *addr, *pk));
+                    queued += 1;
+                }
+            }
+            if queued > 0 {
+                log_fmt!("[daemon] beacon: re-queued {} disconnected contacts (refreshed from disk)", queued);
             }
         }
 
