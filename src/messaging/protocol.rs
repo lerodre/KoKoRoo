@@ -5,6 +5,7 @@ use crate::crypto::{
     self, PKT_MSG_ACK, PKT_MSG_BYE, PKT_MSG_CHAT, PKT_MSG_IDENTITY,
     PKT_MSG_REQUEST, PKT_MSG_REQUEST_ACK,
     PKT_MSG_IP_ANNOUNCE, PKT_MSG_PEER_QUERY, PKT_MSG_PEER_RESPONSE,
+    PKT_MSG_PRESENCE,
 };
 use crate::identity::Identity;
 
@@ -391,4 +392,37 @@ pub fn handle_peer_response(data: &[u8], peer: &PeerSession) -> Option<([u8; 32]
     ts_bytes.copy_from_slice(&ts_data[..8]);
     let timestamp = u64::from_le_bytes(ts_bytes);
     Some((pubkey, ip, port, timestamp))
+}
+
+// ── Presence protocol ──
+
+/// Send a PRESENCE packet to a peer. Payload: 1 byte (0x01=Online, 0x02=Away).
+pub fn send_presence(
+    peer: &PeerSession,
+    socket: &UdpSocket,
+    status: super::PresenceStatus,
+) {
+    if let Some(session) = &peer.session {
+        let byte = match status {
+            super::PresenceStatus::Online => 0x01,
+            super::PresenceStatus::Away => 0x02,
+            super::PresenceStatus::Offline => return, // never sent, inferred from disconnect
+        };
+        let pkt = session.encrypt_packet(PKT_MSG_PRESENCE, &[byte]);
+        socket.send_to(&pkt, peer.peer_addr).ok();
+    }
+}
+
+/// Handle an incoming PRESENCE packet. Returns the presence status.
+pub fn handle_presence(data: &[u8], peer: &PeerSession) -> Option<super::PresenceStatus> {
+    let session = peer.session.as_ref()?;
+    let (pkt_type, plain) = session.decrypt_packet(data)?;
+    if pkt_type != PKT_MSG_PRESENCE || plain.is_empty() {
+        return None;
+    }
+    match plain[0] {
+        0x01 => Some(super::PresenceStatus::Online),
+        0x02 => Some(super::PresenceStatus::Away),
+        _ => None,
+    }
 }

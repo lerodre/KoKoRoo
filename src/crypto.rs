@@ -24,6 +24,7 @@ pub const PKT_MSG_REQUEST_ACK: u8 = 0x16; // contact request accepted: encrypted
 pub const PKT_MSG_IP_ANNOUNCE: u8  = 0x17; // IP relay: encrypted [ip_str][0x00][port_str][0x00][8-byte timestamp LE]
 pub const PKT_MSG_PEER_QUERY: u8   = 0x18; // peer lookup: encrypted [32-byte target pubkey]
 pub const PKT_MSG_PEER_RESPONSE: u8 = 0x19; // peer lookup reply: encrypted [32-byte pubkey][ip_str][0x00][port_str][0x00][8-byte timestamp LE]
+pub const PKT_MSG_PRESENCE: u8 = 0x1A;      // presence status: encrypted [1 byte: 0x01=Online, 0x02=Away]
 
 /// Size of an X25519 public key.
 pub const PUBKEY_SIZE: usize = 32;

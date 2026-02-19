@@ -80,11 +80,18 @@ impl HostelApp {
             .show(ui, |ui| {
                 for (contact_id, name, preview, online, unread) in &conversations {
                     ui.horizontal(|ui| {
-                        // Online indicator
-                        let color = if *online {
-                            self.settings.theme.accent()
-                        } else {
-                            self.settings.theme.text_muted()
+                        // Presence indicator: green=online, yellow=away, grey=offline
+                        let presence = self.msg_peer_presence.get(contact_id)
+                            .copied()
+                            .unwrap_or(if *online {
+                                crate::messaging::PresenceStatus::Online
+                            } else {
+                                crate::messaging::PresenceStatus::Offline
+                            });
+                        let color = match presence {
+                            crate::messaging::PresenceStatus::Online => egui::Color32::from_rgb(0x4C, 0xAF, 0x50), // green
+                            crate::messaging::PresenceStatus::Away => egui::Color32::from_rgb(0xFF, 0xC1, 0x07),   // yellow/amber
+                            crate::messaging::PresenceStatus::Offline => self.settings.theme.text_muted(),
                         };
                         let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
                         ui.painter().circle_filled(rect.center(), 4.0, color);
@@ -137,12 +144,18 @@ impl HostelApp {
                 go_back = true;
             }
             ui.heading(&peer_name);
-            let status_color = if online {
-                self.settings.theme.accent()
-            } else {
-                self.settings.theme.text_muted()
+            let presence = self.msg_peer_presence.get(&contact_id)
+                .copied()
+                .unwrap_or(if online {
+                    crate::messaging::PresenceStatus::Online
+                } else {
+                    crate::messaging::PresenceStatus::Offline
+                });
+            let (status_color, status_text) = match presence {
+                crate::messaging::PresenceStatus::Online => (egui::Color32::from_rgb(0x4C, 0xAF, 0x50), "online"),
+                crate::messaging::PresenceStatus::Away => (egui::Color32::from_rgb(0xFF, 0xC1, 0x07), "away"),
+                crate::messaging::PresenceStatus::Offline => (self.settings.theme.text_muted(), "offline"),
             };
-            let status_text = if online { "online" } else { "offline" };
             ui.colored_label(status_color, status_text);
         });
 
