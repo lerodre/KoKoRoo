@@ -57,11 +57,13 @@ impl HostelApp {
 
         ui.horizontal(|ui| {
             ui.heading("Contacts");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.contact_search)
-                    .hint_text("Search...")
-                    .desired_width(150.0)
-            );
+            let search_edit = egui::TextEdit::singleline(&mut self.contact_search)
+                .hint_text("Search...")
+                .desired_width(150.0);
+            egui::Frame::none()
+                .stroke(egui::Stroke::new(1.0, self.settings.theme.separator()))
+                .inner_margin(2.0)
+                .show(ui, |ui| { ui.add(search_edit); });
         });
         ui.add_space(4.0);
 
@@ -89,6 +91,24 @@ impl HostelApp {
                     let has_addr = !contact.last_address.is_empty();
 
                     ui.horizontal(|ui| {
+                        // Presence indicator
+                        let presence = self.msg_peer_presence.get(&contact.contact_id)
+                            .copied()
+                            .unwrap_or_else(|| {
+                                if self.msg_peer_online.get(&contact.contact_id).copied().unwrap_or(false) {
+                                    crate::messaging::PresenceStatus::Online
+                                } else {
+                                    crate::messaging::PresenceStatus::Offline
+                                }
+                            });
+                        let dot_color = match presence {
+                            crate::messaging::PresenceStatus::Online => egui::Color32::from_rgb(0x4C, 0xAF, 0x50),
+                            crate::messaging::PresenceStatus::Away => egui::Color32::from_rgb(0xFF, 0xC1, 0x07),
+                            crate::messaging::PresenceStatus::Offline => self.settings.theme.text_muted(),
+                        };
+                        let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                        ui.painter().circle_filled(rect.center(), 4.0, dot_color);
+
                         let btn_widget = if has_addr {
                             egui::Button::new(peer_display_job(&contact.nickname, &contact.fingerprint, 13.0, self.settings.theme.text_primary(), self.settings.theme.text_dim())).frame(false)
                         } else {
@@ -97,15 +117,6 @@ impl HostelApp {
                         };
                         if ui.add(btn_widget).clicked() && has_addr {
                             selected_contact = Some(i);
-                        }
-
-                        if has_addr {
-                            ui.colored_label(
-                                self.settings.theme.text_dim(),
-                                format!("[{}]:{}", censor_ip(&contact.last_address), contact.last_port),
-                            );
-                        } else {
-                            ui.colored_label(self.settings.theme.text_muted(), "(no address)");
                         }
                     });
                     ui.separator();

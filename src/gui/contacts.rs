@@ -16,11 +16,13 @@ impl HostelApp {
         ui.add_space(10.0);
         ui.horizontal(|ui| {
             ui.heading("Contacts");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.contact_search)
-                    .hint_text("Search...")
-                    .desired_width(150.0)
-            );
+            let search_edit = egui::TextEdit::singleline(&mut self.contact_search)
+                .hint_text("Search...")
+                .desired_width(150.0);
+            egui::Frame::none()
+                .stroke(egui::Stroke::new(1.0, self.settings.theme.separator()))
+                .inner_margin(2.0)
+                .show(ui, |ui| { ui.add(search_edit); });
         });
         ui.add_space(6.0);
 
