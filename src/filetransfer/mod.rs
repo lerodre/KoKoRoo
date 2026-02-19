@@ -7,9 +7,9 @@ pub mod receiver;
 pub const CHUNK_DATA_SIZE: usize = 1200;
 
 /// Max chunks to send per daemon tick.
-/// 1024 × 1200 ≈ 1.2 MB per tick. At 20 ticks/s ≈ 24 MB/s.
+/// 1300 × 1200 ≈ 1.5 MB per tick. At 20 ticks/s ≈ 30 MB/s.
 /// Combined with 16 MB socket buffers this avoids packet loss.
-pub const CHUNKS_PER_TICK: usize = 1024;
+pub const CHUNKS_PER_TICK: usize = 1300;
 
 /// Offer timeout: cancel if no accept/reject within 30 seconds.
 pub const OFFER_TIMEOUT_SECS: u64 = 30;
