@@ -15,6 +15,9 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
 use crate::chat::ChatHistory;
 use crate::identity::{self, Contact, Identity, Settings};
 use crate::messaging::{MsgCommand, MsgDaemon, MsgEvent};
@@ -136,6 +139,7 @@ fn get_network_interfaces() -> Vec<(String, String, String)> {
         // Use PowerShell CSV output to handle adapter names with spaces (e.g. "Ethernet 2", "vEthernet (WSL)")
         if let Ok(output) = std::process::Command::new("powershell")
             .args(["-Command", "Get-NetIPAddress -AddressFamily IPv6 | Where-Object { $_.SuffixOrigin -ne 'Random' -and $_.IPAddress -ne '::1' -and $_.AddressState -eq 'Preferred' } | Select-Object InterfaceAlias, IPAddress | ConvertTo-Csv -NoTypeInformation"])
+            .creation_flags(0x08000000)
             .output()
         {
             let text = String::from_utf8_lossy(&output.stdout);
@@ -305,6 +309,7 @@ fn start_ringtone() -> Arc<AtomicBool> {
                 ])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
+                .creation_flags(0x08000000)
                 .spawn()
             {
                 Ok(c) => c,
@@ -382,6 +387,7 @@ fn play_notification_sound() {
                 ])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
+                .creation_flags(0x08000000)
                 .spawn().ok();
         }
 
@@ -440,6 +446,7 @@ fn send_desktop_notification(title: &str, body: &str) {
             );
             std::process::Command::new("powershell")
                 .args(["-WindowStyle", "Hidden", "-Command", &script])
+                .creation_flags(0x08000000)
                 .spawn()
                 .ok();
         }

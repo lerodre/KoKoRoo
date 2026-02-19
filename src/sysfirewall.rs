@@ -1,5 +1,7 @@
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use std::process::Command;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 
 /// Remove the hostelD UDP firewall rule for the given port.
 /// Returns `Ok(true)` if a rule was removed, `Ok(false)` if none existed,
@@ -58,6 +60,7 @@ fn ensure_windows(port: u16) -> Result<bool, String> {
     // Check if rule already exists
     let check = Command::new("netsh")
         .args(["advfirewall", "firewall", "show", "rule", &format!("name={rule_name}")])
+        .creation_flags(0x08000000)
         .output()
         .map_err(|e| format!("Failed to run netsh: {e}"))?;
 
@@ -81,6 +84,7 @@ fn ensure_windows(port: u16) -> Result<bool, String> {
             "-Command",
             &format!("Start-Process -FilePath 'cmd.exe' -ArgumentList '/c {netsh_cmd}' -Verb RunAs -Wait"),
         ])
+        .creation_flags(0x08000000)
         .output()
         .map_err(|e| format!("Failed to launch UAC prompt: {e}"))?;
 
@@ -92,6 +96,7 @@ fn ensure_windows(port: u16) -> Result<bool, String> {
     // Verify the rule was actually added
     let verify = Command::new("netsh")
         .args(["advfirewall", "firewall", "show", "rule", &format!("name={rule_name}")])
+        .creation_flags(0x08000000)
         .output()
         .map_err(|e| format!("Failed to verify rule: {e}"))?;
 
@@ -150,6 +155,7 @@ fn remove_windows(port: u16) -> Result<bool, String> {
     // Check if rule exists
     let check = Command::new("netsh")
         .args(["advfirewall", "firewall", "show", "rule", &format!("name={rule_name}")])
+        .creation_flags(0x08000000)
         .output()
         .map_err(|e| format!("Failed to run netsh: {e}"))?;
 
@@ -167,6 +173,7 @@ fn remove_windows(port: u16) -> Result<bool, String> {
             "-Command",
             &format!("Start-Process -FilePath 'cmd.exe' -ArgumentList '/c {netsh_cmd}' -Verb RunAs -Wait"),
         ])
+        .creation_flags(0x08000000)
         .output()
         .map_err(|e| format!("Failed to launch UAC prompt: {e}"))?;
 
