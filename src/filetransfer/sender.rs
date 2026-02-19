@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::time::Instant;
 
 use super::{CHUNK_DATA_SIZE, WINDOW_SIZE, ACK_TIMEOUT_MS};
@@ -24,6 +24,10 @@ pub struct SenderState {
     pub bytes_confirmed: u64,
     /// Whether FILE_COMPLETE has been sent.
     pub complete_sent: bool,
+    /// Cached file handle for sequential reads.
+    file_reader: Option<BufReader<File>>,
+    /// The chunk index that the cached reader is positioned at.
+    reader_pos: u32,
 }
 
 impl SenderState {
@@ -46,6 +50,8 @@ impl SenderState {
             last_chunk_sent: now,
             bytes_confirmed: 0,
             complete_sent: false,
+            file_reader: None,
+            reader_pos: 0,
         }
     }
 
@@ -68,15 +74,29 @@ impl SenderState {
         }
     }
 
-    /// Read a chunk from the file at the given index.
-    pub fn read_chunk(&self, chunk_index: u32) -> Option<Vec<u8>> {
-        let mut file = File::open(&self.file_path).ok()?;
+    /// Read a chunk from the file at the given index using a cached reader.
+    pub fn read_chunk(&mut self, chunk_index: u32) -> Option<Vec<u8>> {
         let offset = chunk_index as u64 * CHUNK_DATA_SIZE as u64;
-        file.seek(SeekFrom::Start(offset)).ok()?;
         let remaining = self.file_size.saturating_sub(offset);
         let to_read = (remaining as usize).min(CHUNK_DATA_SIZE);
+
+        // Open or reuse the cached file reader
+        let needs_seek = if self.file_reader.is_none() {
+            let file = File::open(&self.file_path).ok()?;
+            self.file_reader = Some(BufReader::with_capacity(64 * 1024, file));
+            true
+        } else {
+            chunk_index != self.reader_pos
+        };
+
+        let reader = self.file_reader.as_mut()?;
+        if needs_seek {
+            reader.seek(SeekFrom::Start(offset)).ok()?;
+        }
+
         let mut buf = vec![0u8; to_read];
-        file.read_exact(&mut buf).ok()?;
+        reader.read_exact(&mut buf).ok()?;
+        self.reader_pos = chunk_index + 1;
         Some(buf)
     }
 

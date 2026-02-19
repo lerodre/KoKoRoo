@@ -1436,17 +1436,18 @@ impl MsgDaemon {
             // Tick senders: send chunks within window with pacing
             let mut chunks_to_send: Vec<(String, u32, u32, Vec<u8>)> = Vec::new();
 
-            for ((cid, tid), ft) in &mut self.file_transfers {
+            for ((cid, _tid), ft) in &mut self.file_transfers {
                 if let FileTransfer::Sending(ref mut sender) = ft {
                     // Check retransmit timeout
                     if sender.should_retransmit() {
                         sender.retransmit();
                     }
-                    // Send chunks within pacing constraint
-                    let elapsed_us = sender.last_chunk_sent.elapsed().as_micros();
-                    if elapsed_us >= filetransfer::CHUNK_PACING_US as u128 {
+                    // Send all available chunks within the window
+                    while sender.window_available() > 0 {
                         if let Some((chunk_idx, chunk_data)) = sender.next_chunk() {
                             chunks_to_send.push((cid.clone(), sender.transfer_id, chunk_idx, chunk_data));
+                        } else {
+                            break;
                         }
                     }
                 }

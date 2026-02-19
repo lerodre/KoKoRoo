@@ -94,9 +94,9 @@ impl ReceiverState {
         false
     }
 
-    /// Should we send an ACK now? (Every 16 chunks or when all chunks received.)
+    /// Should we send an ACK now? (Every 32 chunks or when all chunks received.)
     pub fn should_ack(&self) -> bool {
-        self.chunks_since_ack >= 16 || self.is_complete()
+        self.chunks_since_ack >= 32 || self.is_complete()
     }
 
     /// Get the ack_through value for the ACK packet and reset counter.

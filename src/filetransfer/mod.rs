@@ -2,17 +2,19 @@ pub mod protocol;
 pub mod sender;
 pub mod receiver;
 
-/// Maximum data bytes per FILE_CHUNK packet (matches screen sharing chunk size).
+/// Maximum data bytes per FILE_CHUNK packet.
+/// UDP-safe size: 1200 payload + headers stays well under typical 1280 IPv6 MTU.
 pub const CHUNK_DATA_SIZE: usize = 1200;
 
 /// Sliding window size: max chunks in flight before requiring an ACK.
-pub const WINDOW_SIZE: u32 = 32;
+/// 128 chunks × 1200 bytes = ~150 KB in flight.
+pub const WINDOW_SIZE: u32 = 128;
 
-/// Interval between chunks (microseconds) — same pacing as screen sharing.
+/// Interval between chunks (microseconds) — not used for burst sending.
 pub const CHUNK_PACING_US: u64 = 200;
 
 /// ACK timeout: retransmit if no ACK received within this duration.
-pub const ACK_TIMEOUT_MS: u64 = 2000;
+pub const ACK_TIMEOUT_MS: u64 = 1000;
 
 /// Offer timeout: cancel if no accept/reject within 30 seconds.
 pub const OFFER_TIMEOUT_SECS: u64 = 30;

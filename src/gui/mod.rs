@@ -555,6 +555,7 @@ pub struct HostelApp {
     pub(crate) msg_unread: HashMap<String, u32>,
     pub(crate) msg_peer_online: HashMap<String, bool>,
     pub(crate) msg_peer_presence: HashMap<String, crate::messaging::PresenceStatus>,
+    pub(crate) msg_confirm_delete_chat: Option<String>,
     pub(crate) last_key_press: Instant,
     pub(crate) last_presence_sent: crate::messaging::PresenceStatus,
 
@@ -726,6 +727,7 @@ impl HostelApp {
             msg_unread: HashMap::new(),
             msg_peer_online: HashMap::new(),
             msg_peer_presence: HashMap::new(),
+            msg_confirm_delete_chat: None,
             last_key_press: Instant::now(),
             last_presence_sent: crate::messaging::PresenceStatus::Online,
             file_transfer_progress: HashMap::new(),

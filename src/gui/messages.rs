@@ -212,7 +212,30 @@ impl HostelApp {
                 crate::messaging::PresenceStatus::Offline => (self.settings.theme.text_muted(), "offline"),
             };
             ui.colored_label(status_color, status_text);
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("Clear chat").clicked() {
+                    self.msg_confirm_delete_chat = Some(contact_id.clone());
+                }
+            });
         });
+
+        // Confirmation dialog for deleting chat
+        if self.msg_confirm_delete_chat.as_deref() == Some(contact_id.as_str()) {
+            ui.horizontal(|ui| {
+                ui.colored_label(egui::Color32::from_rgb(0xFF, 0x80, 0x80), "Delete all messages?");
+                if ui.small_button("Yes, delete").clicked() {
+                    crate::chat::delete_chat_history(&contact_id);
+                    if let Some(history) = self.msg_chat_histories.get_mut(&contact_id) {
+                        history.messages.clear();
+                    }
+                    self.msg_confirm_delete_chat = None;
+                }
+                if ui.small_button("Cancel").clicked() {
+                    self.msg_confirm_delete_chat = None;
+                }
+            });
+        }
 
         ui.separator();
 
