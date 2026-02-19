@@ -554,6 +554,9 @@ pub struct HostelApp {
     pub(crate) msg_chat_histories: HashMap<String, ChatHistory>,
     pub(crate) msg_unread: HashMap<String, u32>,
     pub(crate) msg_peer_online: HashMap<String, bool>,
+    pub(crate) msg_peer_presence: HashMap<String, crate::messaging::PresenceStatus>,
+    pub(crate) last_key_press: Instant,
+    pub(crate) last_presence_sent: crate::messaging::PresenceStatus,
 
     // Contact requests
     pub(crate) req_incoming: Vec<(String, String, String, String)>, // (request_id, nickname, ip, fingerprint)
@@ -640,6 +643,21 @@ impl HostelApp {
             daemon.run();
         });
 
+        // Auto-connect all contacts that have a known address
+        let connect_contacts: Vec<_> = contacts.iter()
+            .filter_map(|c| {
+                if c.last_address.is_empty() || c.last_port.is_empty() {
+                    return None;
+                }
+                let addr_str = format!("[{}]:{}", c.last_address, c.last_port);
+                let addr: std::net::SocketAddr = addr_str.parse().ok()?;
+                Some((c.contact_id.clone(), addr, c.pubkey))
+            })
+            .collect();
+        if !connect_contacts.is_empty() {
+            cmd_tx.send(MsgCommand::ConnectAll { contacts: connect_contacts }).ok();
+        }
+
         let needs_firewall_prompt = settings.firewall_port != local_port;
 
         // Write embedded notification sound to ~/.hostelD/ if missing
@@ -704,6 +722,9 @@ impl HostelApp {
             msg_chat_histories: HashMap::new(),
             msg_unread: HashMap::new(),
             msg_peer_online: HashMap::new(),
+            msg_peer_presence: HashMap::new(),
+            last_key_press: Instant::now(),
+            last_presence_sent: crate::messaging::PresenceStatus::Online,
             req_incoming: Vec::new(),
             req_ip_input: String::new(),
             req_port_input: String::new(),
@@ -981,6 +1002,27 @@ impl eframe::App for HostelApp {
                 self.last_mouse_move = Instant::now();
             }
 
+            let any_key = ctx.input(|i| !i.events.is_empty());
+            if any_key {
+                self.last_key_press = Instant::now();
+            }
+
+            // Away detection: inactive >15 min = Away, otherwise Online
+            {
+                let last_activity = self.last_mouse_move.max(self.last_key_press);
+                let current_presence = if last_activity.elapsed().as_secs() > 15 * 60 {
+                    crate::messaging::PresenceStatus::Away
+                } else {
+                    crate::messaging::PresenceStatus::Online
+                };
+                if current_presence != self.last_presence_sent {
+                    self.last_presence_sent = current_presence;
+                    if let Some(tx) = &self.msg_cmd_tx {
+                        tx.send(MsgCommand::UpdatePresence { status: current_presence }).ok();
+                    }
+                }
+            }
+
             let repaint_ms = if self.screen_texture.is_some() { 33 } else { 200 };
             ctx.request_repaint_after(std::time::Duration::from_millis(repaint_ms));
         }
@@ -995,14 +1037,17 @@ impl eframe::App for HostelApp {
                         let history = self.msg_chat_histories.entry(contact_id.clone())
                             .or_insert_with(|| ChatHistory::load(&contact_id, &self.identity.secret));
                         history.add_message(false, text);
-                        // Increment unread if not viewing this chat
-                        if self.msg_active_chat.as_deref() != Some(&contact_id) {
+
+                        let viewing_this_chat = self.active_tab == SidebarTab::Messages
+                            && self.msg_active_chat.as_deref() == Some(contact_id.as_str());
+
+                        // Increment unread if not viewing this specific chat
+                        if !viewing_this_chat {
                             *self.msg_unread.entry(contact_id).or_insert(0) += 1;
                         }
-                        // Play notification sound if not in a call and not viewing messages (3s cooldown)
-                        let in_messages = self.active_tab == SidebarTab::Messages;
+                        // Play notification sound if not in a call and not viewing this chat (3s cooldown)
                         if !matches!(self.screen, Screen::InCall | Screen::Connecting | Screen::KeyWarning)
-                            && !in_messages
+                            && !viewing_this_chat
                         {
                             let should_play = self.last_notification_sound
                                 .map_or(true, |t| t.elapsed().as_secs_f32() > 3.0);
@@ -1016,7 +1061,13 @@ impl eframe::App for HostelApp {
                         // Could update delivery status UI here
                     }
                     MsgEvent::PeerStatus { contact_id, online } => {
-                        self.msg_peer_online.insert(contact_id, online);
+                        self.msg_peer_online.insert(contact_id.clone(), online);
+                        if !online {
+                            self.msg_peer_presence.insert(contact_id, crate::messaging::PresenceStatus::Offline);
+                        }
+                    }
+                    MsgEvent::PresenceUpdate { contact_id, status } => {
+                        self.msg_peer_presence.insert(contact_id, status);
                     }
                     MsgEvent::IncomingRequest { request_id, nickname, ip, fingerprint } => {
                         // Add to incoming requests if not already present
