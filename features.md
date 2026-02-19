@@ -1,13 +1,15 @@
 # hostelD — Features
 
-P2P encrypted voice + chat + screen sharing. No servers. No accounts. Direct IPv6 UDP.
+P2P encrypted voice + chat + file transfer + screen sharing. No servers. No accounts. Direct IPv6 UDP.
 
 ---
 
 ## Encryption & Security
 
-- **E2E encryption on everything** — Voice, chat, screen sharing, and file data encrypted with ChaCha20-Poly1305. Nothing travels in plaintext.
+- **E2E encryption on everything** — Voice, chat, files, screen sharing encrypted with ChaCha20-Poly1305. Nothing travels in plaintext.
 - **X25519 key exchange** — Ephemeral keypairs per session. Shared secret derived via Diffie-Hellman.
+- **Identity-bound authentication** — For known contacts, session key upgraded with identity DH: `SHA-256(ephemeral_DH || identity_DH || "hostelD-msg-key")`. Proves private key ownership. Prevents impersonation even if attacker knows a contact's public key.
+- **PKT_MSG_CONFIRM handshake** — After IDENTITY exchange, both peers send CONFIRM encrypted with the upgraded key. Successful decrypt = identity verified. New contacts (TOFU) stay on ephemeral-only key.
 - **Per-packet counter nonce** — Each packet gets a unique nonce. Prevents replay attacks.
 - **TOFU trust model** — Trust peer on first contact. If their key changes later, show a warning.
 - **Key change detection** — Different pubkey from same contact triggers red warning screen.
@@ -59,6 +61,19 @@ P2P encrypted voice + chat + screen sharing. No servers. No accounts. Direct IPv
 - **Delivery acknowledgement (ACK)** — Sent messages confirmed as received by peer.
 - **Outbox with retry** — Failed messages queued and retried with exponential backoff (10s, 30s, 1m, 5m, 15m cap).
 - **In-call chat** — Send and receive text during active voice calls.
+- **Address auto-update** — When a contact connects from a new IP, `last_address` is updated on disk so reconnection always uses the latest known address.
+
+## File Transfer
+
+- **Drag & drop file send** — Drop a file onto a chat conversation to send it to the contact.
+- **Offer/Accept/Reject workflow** — Recipient chooses to accept or reject each file.
+- **Chunked UDP transfer** — Files split into 1200-byte encrypted chunks for UDP transmission.
+- **SHA-256 integrity verification** — File hash verified on completion to ensure no corruption.
+- **Missing chunk retransmission (NACK)** — Receiver detects gaps and requests retransmission of specific chunks.
+- **Transfer cancel** — Either side can cancel mid-transfer.
+- **Progress tracking** — Real-time progress updates (bytes transferred / total) shown in UI.
+- **Chat integration** — File transfer messages appear inline in chat history with filename and size.
+- **Drop zone indicator** — Visual feedback when dragging a file over the conversation.
 
 ## Contact Requests
 
@@ -78,6 +93,7 @@ P2P encrypted voice + chat + screen sharing. No servers. No accounts. Direct IPv
 - **Socket yield/reclaim** — Voice calls and messaging share the same UDP port. Daemon releases the socket during a call and reconnects all peers when the call ends.
 - **Session resumption after call** — Daemon remembers who was connected before the call and reconnects them automatically.
 - **HELLO retry with backoff** — Handshake retried up to 20 times (every 3 seconds) before giving up.
+- **IP migration cleanup** — When a contact reconnects from a new address, the stale session at the old address is removed.
 
 ## Presence
 
@@ -123,19 +139,21 @@ P2P encrypted voice + chat + screen sharing. No servers. No accounts. Direct IPv
 - **Desktop GUI** — eframe/egui. Works on Windows, macOS, Linux.
 - **Terminal UI (TUI)** — Crossterm-based. Arrow-key navigation, text input. For headless or terminal-only systems.
 - **Sidebar tabs** — Profile, Contacts, Requests, Messages, Call, Settings, Appearance.
+- **Unread badge bubbles** — Red circular badges with count on sidebar tabs and contact list entries.
 - **In-call UI** — Verification code, peer info, mute button, screen share controls, video preview, chat panel.
-- **Theme system** — 17 customizable color properties. Smart randomize generates harmonious palettes.
+- **Theme system** — 18 customizable color properties. Smart randomize generates harmonious palettes.
 - **Video fullscreen** — Toggle screen share viewer to fullscreen.
 - **Error screen** — Shows error message with return-to-setup button.
 - **Desktop notifications** — OS-native notifications for incoming calls (notify-send on Linux, osascript on macOS, PowerShell on Windows).
 - **Notification sound** — Plays sound on incoming message. 3-second cooldown to avoid spam.
 - **Ringtone** — Plays ringtone loop on incoming call. Stops on accept/reject/dismiss.
+- **Drag & drop files** — Drop files onto conversation to send. Visual drop zone indicator on hover.
 
 ## Cross-Platform
 
-- **Windows** — WASAPI audio, MediaFoundation webcam, DXGI screen capture, netsh firewall, PowerShell notifications, winmm ringtone.
+- **Windows** — WASAPI audio, MediaFoundation webcam, DXGI screen capture, netsh firewall, PowerShell notifications, winmm ringtone. Console flash hidden with CREATE_NO_WINDOW flag.
 - **Linux** — ALSA/PipeWire audio, V4L2 webcam, X11/Wayland screen capture, ufw firewall, notify-send notifications, gst-play ringtone.
-- **macOS** — CoreAudio, AVFoundation webcam, CGDisplayStream screen capture, app-based firewall, osascript notifications, afplay ringtone.
+- **macOS** — CoreAudio, AVFoundation webcam, CGDisplayStream screen capture, app-based firewall, osascript notifications, afplay ringtone. ScreenCaptureKit for system audio (macOS 13+).
 - **Per-platform Cargo.toml** — Three variants (`.linux`, `.macos`, `.windows`) with correct dependencies for each OS.
 
 ## CLI Modes
@@ -148,6 +166,40 @@ P2P encrypted voice + chat + screen sharing. No servers. No accounts. Direct IPv
 - `hostelD listen <port>` — UDP echo server (network debug).
 - `hostelD send <ip> <port> <msg>` — Send UDP packet and wait for reply (network debug).
 
+## Packet Protocol
+
+23 packet types across voice, messaging, and file transfer:
+
+| Type | Name | Use |
+|------|------|-----|
+| `0x01` | HELLO | Voice key exchange |
+| `0x02` | VOICE | Encrypted Opus audio |
+| `0x03` | IDENTITY | Identity pubkey + nickname (voice) |
+| `0x04` | CHAT | In-call chat message |
+| `0x05` | HANGUP | Call disconnect |
+| `0x06` | SCREEN | VP8 screen share chunk |
+| `0x07` | SCREEN_STOP | Screen share ended |
+| `0x10` | MSG_HELLO | Messaging key exchange |
+| `0x11` | MSG_IDENTITY | Identity exchange (messaging) |
+| `0x12` | MSG_CHAT | Text message |
+| `0x13` | MSG_ACK | Delivery confirmation |
+| `0x14` | MSG_BYE | Messaging disconnect |
+| `0x15` | MSG_REQUEST | Contact request |
+| `0x16` | MSG_REQUEST_ACK | Request accepted |
+| `0x17` | MSG_IP_ANNOUNCE | IP relay announcement |
+| `0x18` | MSG_PEER_QUERY | Peer address lookup |
+| `0x19` | MSG_PEER_RESPONSE | Peer address reply |
+| `0x1A` | MSG_PRESENCE | Online/Away status |
+| `0x1B` | FILE_OFFER | File transfer offer |
+| `0x1C` | FILE_ACCEPT | Accept file |
+| `0x1D` | FILE_REJECT | Reject file |
+| `0x1E` | FILE_CHUNK | File data chunk |
+| `0x1F` | FILE_ACK | All chunks received |
+| `0x20` | FILE_COMPLETE | Sender done |
+| `0x21` | FILE_CANCEL | Cancel transfer |
+| `0x22` | FILE_NACK | Request missing chunks |
+| `0x23` | MSG_CONFIRM | Identity-bound key upgrade confirmation |
+
 ## Data Layout
 
 ```
@@ -157,5 +209,6 @@ P2P encrypted voice + chat + screen sharing. No servers. No accounts. Direct IPv
   contacts/{pubkey_hex}.json  # One file per contact
   chats/{contact_id}.enc    # Encrypted chat history per contact
   hostelD_log.txt           # Debug log
-  notification.ogg          # Notification sound (embedded on first run)
+  notification.mp3          # Notification sound (embedded on first run)
+  ringtone.mp3              # Ringtone sound
 ```
