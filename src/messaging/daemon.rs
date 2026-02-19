@@ -317,6 +317,7 @@ impl MsgDaemon {
                                     our_pubkey,
                                     sent_at: Instant::now(),
                                 },
+                                seen_seqs: std::collections::HashSet::new(),
                             };
                             self.outgoing_requests.insert(peer_addr, session);
                         } else {
@@ -598,13 +599,16 @@ impl MsgDaemon {
                     if let Some(peer) = self.peers.get_mut(&from) {
                         if let Some((seq, text)) = protocol::handle_chat(data, peer) {
                             peer.touch();
-                            // Send ACK
+                            // Always ACK (so sender stops retrying)
                             protocol::send_ack(peer, socket, seq);
 
-                            self.event_tx.send(MsgEvent::IncomingMessage {
-                                contact_id: peer.contact_id.clone(),
-                                text,
-                            }).ok();
+                            // Only deliver to GUI if not a duplicate
+                            if peer.seen_seqs.insert(seq) {
+                                self.event_tx.send(MsgEvent::IncomingMessage {
+                                    contact_id: peer.contact_id.clone(),
+                                    text,
+                                }).ok();
+                            }
                         }
                     }
                 }

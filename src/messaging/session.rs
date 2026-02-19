@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use x25519_dalek::EphemeralSecret;
@@ -25,6 +26,8 @@ pub struct PeerSession {
     pub session: Option<Session>,
     pub last_activity: Instant,
     pub state: PeerState,
+    /// Sequence numbers already received (dedup retries).
+    pub seen_seqs: HashSet<u32>,
 }
 
 impl PeerSession {

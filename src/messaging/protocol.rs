@@ -45,6 +45,7 @@ pub fn handle_incoming_hello(
         session: Some(session),
         last_activity: Instant::now(),
         state: PeerState::AwaitingIdentity,
+        seen_seqs: std::collections::HashSet::new(),
     })
 }
 
@@ -204,6 +205,7 @@ pub fn initiate_handshake(
             our_pubkey,
             sent_at: Instant::now(),
         },
+        seen_seqs: std::collections::HashSet::new(),
     })
 }
 
