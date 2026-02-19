@@ -1112,10 +1112,21 @@ impl eframe::App for HostelApp {
                         }
                     }
                     MsgEvent::FileTransferProgress { contact_id, transfer_id, bytes_transferred, total_bytes } => {
+                        let is_new = !self.file_transfer_progress.contains_key(&(contact_id.clone(), transfer_id));
                         self.file_transfer_progress.insert(
-                            (contact_id, transfer_id),
+                            (contact_id.clone(), transfer_id),
                             (bytes_transferred, total_bytes),
                         );
+                        // Transition Offered → Accepted on first progress event (sender side)
+                        if is_new {
+                            if let Some(history) = self.msg_chat_histories.get_mut(&contact_id) {
+                                history.update_file_status(
+                                    transfer_id,
+                                    crate::chat::FileTransferStatus::Accepted,
+                                    None,
+                                );
+                            }
+                        }
                     }
                     MsgEvent::FileTransferComplete { contact_id, transfer_id, saved_path } => {
                         self.file_transfer_progress.remove(&(contact_id.clone(), transfer_id));

@@ -138,19 +138,42 @@ impl ChatHistory {
     }
 
     /// Update the status of a file transfer message by transfer_id.
+    /// If no exact match is found, falls back to matching the most recent
+    /// outgoing Offered message with transfer_id=0 (placeholder assigned by GUI
+    /// before daemon generates the real ID).
     pub fn update_file_status(&mut self, transfer_id: u32, status: FileTransferStatus, saved_path: Option<String>) {
-        for msg in self.messages.iter_mut().rev() {
-            if let Some(ref mut ft) = msg.file_transfer {
+        // Find index: exact transfer_id match first, then fallback to
+        // outgoing Offered with transfer_id=0 (GUI placeholder before daemon assigns real ID).
+        let mut idx = None;
+        for i in (0..self.messages.len()).rev() {
+            if let Some(ref ft) = self.messages[i].file_transfer {
                 if ft.transfer_id == transfer_id {
-                    ft.status = status;
-                    if saved_path.is_some() {
-                        ft.saved_path = saved_path;
-                    }
+                    idx = Some(i);
                     break;
                 }
             }
         }
-        self.save();
+        if idx.is_none() {
+            for i in (0..self.messages.len()).rev() {
+                let msg = &self.messages[i];
+                if let Some(ref ft) = msg.file_transfer {
+                    if ft.transfer_id == 0 && msg.from_me && matches!(ft.status, FileTransferStatus::Offered) {
+                        idx = Some(i);
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some(i) = idx {
+            if let Some(ref mut ft) = self.messages[i].file_transfer {
+                ft.transfer_id = transfer_id;
+                ft.status = status;
+                if saved_path.is_some() {
+                    ft.saved_path = saved_path;
+                }
+            }
+            self.save();
+        }
     }
 
     /// Format a timestamp as HH:MM.

@@ -1086,6 +1086,13 @@ impl MsgDaemon {
                                 if let FileTransfer::OfferedWaiting { file_path, file_size, sha256, .. } = ft {
                                     let sender = SenderState::new(transfer_id, file_path, file_size, sha256);
                                     self.file_transfers.insert(key, FileTransfer::Sending(sender));
+                                    // Notify GUI that transfer started (transitions Offered → Accepted)
+                                    self.event_tx.send(MsgEvent::FileTransferProgress {
+                                        contact_id,
+                                        transfer_id,
+                                        bytes_transferred: 0,
+                                        total_bytes: file_size,
+                                    }).ok();
                                 }
                             }
                         }
