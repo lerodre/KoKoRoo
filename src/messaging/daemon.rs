@@ -524,10 +524,34 @@ impl MsgDaemon {
                         // Send REQUEST (not IDENTITY)
                         protocol::send_request(peer, socket, &self.identity, &self.nickname);
                     } else if let Some(peer) = self.peers.get_mut(&from) {
-                        // We have a pending session — this is a hello response
-                        protocol::handle_hello_response(
-                            data, peer, socket, &self.identity, &self.nickname,
-                        );
+                        if peer.is_connected() {
+                            // Peer restarted — they sent a fresh HELLO but we still
+                            // have a stale Connected session. Tear it down and accept
+                            // the new handshake as an incoming connection.
+                            log_fmt!("[daemon] HELLO from already-connected {} — peer restarted, resetting session", from);
+                            let old_cid = peer.contact_id.clone();
+                            self.event_tx.send(MsgEvent::PeerStatus {
+                                contact_id: old_cid.clone(),
+                                online: false,
+                            }).ok();
+                            self.peers.remove(&from);
+                            self.contact_addrs.remove(&old_cid);
+                            self.hello_retries.remove(&from);
+                            // Handle as new incoming connection
+                            let ip_str = from.ip().to_string();
+                            if !self.settings.is_ip_banned(&ip_str) {
+                                if let Some(session) = protocol::handle_incoming_hello(
+                                    data, from, socket, &self.identity, &self.nickname,
+                                ) {
+                                    self.peers.insert(from, session);
+                                }
+                            }
+                        } else {
+                            // Pending session (AwaitingHello) — this is a hello response
+                            protocol::handle_hello_response(
+                                data, peer, socket, &self.identity, &self.nickname,
+                            );
+                        }
                     } else {
                         // Incoming connection from unknown peer
                         // Check if IP is banned before accepting
