@@ -21,9 +21,55 @@ sudo apt install build-essential pkg-config cmake libasound2-dev libopus-dev \
     libxkbcommon-dev libgtk-3-dev libgl1-mesa-dev libegl1-mesa-dev
 ```
 
+### System dependencies (macOS)
+
+```bash
+xcode-select --install
+brew install opus cmake yasm pkg-config
+```
+
+If libopus is not found during build:
+```bash
+# Apple Silicon
+export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:$PKG_CONFIG_PATH"
+# Intel
+export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH"
+```
+
+Build: `cp Cargo.toml.macos Cargo.toml && cargo build --release`
+
 ### System dependencies (Windows)
 
 Visual Studio Build Tools ("Desktop development with C++") and CMake (added to PATH).
+
+## Per-platform Cargo.toml
+
+The `Cargo.toml` file is `.gitignore`d and managed per-OS. Copy the right variant before building:
+
+- **Linux**: `cp Cargo.toml.linux Cargo.toml`
+- **macOS**: `cp Cargo.toml.macos Cargo.toml`
+- **Windows**: `copy Cargo.toml.windows Cargo.toml`
+
+### Platform-specific dependencies
+
+| Dependency | Linux | macOS | Windows | Notes |
+|-----------|-------|-------|---------|-------|
+| `cpal` | ALSA/PipeWire | CoreAudio | WASAPI | Audio I/O |
+| `nokhwa` | V4L2 | AVFoundation | MediaFoundation | Webcam |
+| `pipewire`/`libspa`/`ashpd` | yes | excluded | excluded | Wayland screen capture |
+| `scrap` | X11/DXGI | CGDisplayStream | DXGI | Screen capture |
+| `winresource` | excluded | excluded | yes | Windows icon embedding |
+
+### macOS-specific notes
+
+- **Firewall**: macOS uses app-based firewall (not port-based). The app returns `Ok(false)` and lets macOS prompt the user.
+- **IPv6 discovery**: Uses `ifconfig` output parsing (Linux uses `ip -6 addr show`, Windows uses PowerShell).
+- **Ringtone**: Uses `afplay` (Linux uses `gst-play-1.0`, Windows uses `winmm.dll`).
+- **Notifications**: Uses `osascript` AppleScript (Linux uses `notify-send`, Windows uses PowerShell).
+- **System audio capture**: Uses ScreenCaptureKit (macOS 13+) for native loopback — no virtual audio drivers needed. Requires Screen Recording permission.
+- **Webcam**: Uses `nokhwa` with AVFoundation backend. Requires Camera permission.
+- **Screen capture**: Works natively via `scrap` (CGDisplayStream). Requires Screen Recording permission.
+- **Permissions**: macOS will prompt for Microphone, Camera, and Screen Recording permissions on first use. Grant in System Settings > Privacy & Security. After rebuilding, permissions may need to be re-granted (`tccutil reset ScreenCapture`).
 
 ## Architecture
 
@@ -34,7 +80,7 @@ hostelD is a P2P encrypted voice + chat application over IPv6 UDP with no centra
 - **`main.rs`** — CLI entry point, command routing (gui/tui/call/devices/mic-test)
 - **`voice.rs`** — Core engine orchestrating the entire session: handshake, identity exchange, sender/receiver threads, audio streams, and chat message handling. All other modules are driven from here.
 - **`crypto.rs`** — E2E encryption: X25519 key exchange → shared secret → ChaCha20-Poly1305 session cipher. Also handles local-storage encryption for chat history at rest.
-- **`audio.rs`** — Cross-platform audio via cpal (ALSA/PipeWire on Linux, WASAPI on Windows). Mono 48kHz f32 samples through a lock-free ring buffer.
+- **`audio.rs`** — Cross-platform audio via cpal (ALSA/PipeWire on Linux, CoreAudio on macOS, WASAPI on Windows). Mono 48kHz f32 samples through a lock-free ring buffer.
 - **`identity.rs`** — Persistent X25519 keypair (`~/.hostelD/identity.key`), fingerprints (`hD-XXXXXXXX`), and JSON contact management.
 - **`chat.rs`** — Encrypted chat history stored per-contact at `~/.hostelD/chats/{contact_id}.enc`.
 - **`firewall.rs`** — Per-IP rate limiting (>200 pkt/sec = strike) and auto-blacklist (5 strikes).
