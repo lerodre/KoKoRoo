@@ -6,8 +6,9 @@ pub mod receiver;
 /// UDP-safe size: 1200 payload + headers stays well under typical 1280 IPv6 MTU.
 pub const CHUNK_DATA_SIZE: usize = 1200;
 
-/// Max chunks to send per daemon tick (prevents starving message processing).
-pub const CHUNKS_PER_TICK: usize = 64;
+/// Max chunks to send per daemon tick.
+/// 8192 × 1200 ≈ 10 MB per tick. At 20 ticks/s ≈ 200 MB/s theoretical max.
+pub const CHUNKS_PER_TICK: usize = 8192;
 
 /// Offer timeout: cancel if no accept/reject within 30 seconds.
 pub const OFFER_TIMEOUT_SECS: u64 = 30;
