@@ -339,6 +339,81 @@ fn start_ringtone() -> Arc<AtomicBool> {
     stop
 }
 
+/// Play the notification sound once in a background thread.
+fn play_notification_sound() {
+    std::thread::spawn(|| {
+        #[cfg(target_os = "linux")]
+        let home = std::env::var("HOME").unwrap_or_default();
+        #[cfg(target_os = "windows")]
+        let home = std::env::var("USERPROFILE").unwrap_or_default();
+        #[cfg(target_os = "macos")]
+        let home = std::env::var("HOME").unwrap_or_default();
+
+        let sep = if cfg!(windows) { "\\" } else { "/" };
+        let path = format!("{home}{sep}.hostelD{sep}notification.mp3");
+
+        if !std::path::Path::new(&path).exists() {
+            return;
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            std::process::Command::new("gst-play-1.0")
+                .arg(&path)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn().ok();
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            std::process::Command::new("powershell")
+                .args([
+                    "-WindowStyle", "Hidden", "-Command",
+                    &format!(
+                        "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; \
+                         public class WinMM {{ [DllImport(\"winmm.dll\")] \
+                         public static extern int mciSendString(string cmd, System.Text.StringBuilder buf, int sz, IntPtr cb); }}'; \
+                         $null=[WinMM]::mciSendString('open \"{}\" alias hostelnotif', $null, 0, [IntPtr]::Zero); \
+                         $null=[WinMM]::mciSendString('play hostelnotif wait', $null, 0, [IntPtr]::Zero); \
+                         $null=[WinMM]::mciSendString('close hostelnotif', $null, 0, [IntPtr]::Zero)",
+                        path.replace('\\', "/")
+                    ),
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn().ok();
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("afplay")
+                .arg(&path)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn().ok();
+        }
+    });
+}
+
+/// Write the embedded notification sound to ~/.hostelD/ if it doesn't exist yet.
+fn ensure_notification_sound() {
+    #[cfg(target_os = "linux")]
+    let home = std::env::var("HOME").unwrap_or_default();
+    #[cfg(target_os = "windows")]
+    let home = std::env::var("USERPROFILE").unwrap_or_default();
+    #[cfg(target_os = "macos")]
+    let home = std::env::var("HOME").unwrap_or_default();
+
+    let sep = if cfg!(windows) { "\\" } else { "/" };
+    let path = format!("{home}{sep}.hostelD{sep}notification.mp3");
+
+    if !std::path::Path::new(&path).exists() {
+        let bytes = include_bytes!("../../assets/notification.mp3");
+        std::fs::write(&path, bytes).ok();
+    }
+}
+
 /// Send an OS-level desktop notification (notify-send on Linux, PowerShell balloon on Windows).
 fn send_desktop_notification(title: &str, body: &str) {
     let t = title.to_string();
@@ -496,6 +571,9 @@ pub struct HostelApp {
     // Ringtone playback (background thread)
     pub(crate) ringtone_stop: Option<Arc<AtomicBool>>,
 
+    // Notification sound cooldown
+    pub(crate) last_notification_sound: Option<Instant>,
+
     // Icon textures (loaded once from embedded PNGs, cropped + LINEAR filtered)
     pub(crate) logo_texture: Option<egui::TextureHandle>,
     pub(crate) call_icon_texture: Option<egui::TextureHandle>,
@@ -564,6 +642,9 @@ impl HostelApp {
 
         let needs_firewall_prompt = settings.firewall_port != local_port;
 
+        // Write embedded notification sound to ~/.hostelD/ if missing
+        ensure_notification_sound();
+
         Self {
             screen: Screen::Setup,
             identity,
@@ -631,6 +712,7 @@ impl HostelApp {
             incoming_call: None,
             incoming_call_attention: false,
             ringtone_stop: None,
+            last_notification_sound: None,
             logo_texture: None,
             call_icon_texture: None,
             settings_icon_texture: None,
@@ -916,6 +998,15 @@ impl eframe::App for HostelApp {
                         // Increment unread if not viewing this chat
                         if self.msg_active_chat.as_deref() != Some(&contact_id) {
                             *self.msg_unread.entry(contact_id).or_insert(0) += 1;
+                        }
+                        // Play notification sound if not in a call (3s cooldown)
+                        if !matches!(self.screen, Screen::InCall | Screen::Connecting | Screen::KeyWarning) {
+                            let should_play = self.last_notification_sound
+                                .map_or(true, |t| t.elapsed().as_secs_f32() > 3.0);
+                            if should_play {
+                                self.last_notification_sound = Some(Instant::now());
+                                play_notification_sound();
+                            }
                         }
                     }
                     MsgEvent::MessageDelivered => {
