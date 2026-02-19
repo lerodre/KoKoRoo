@@ -1757,10 +1757,14 @@ fn set_socket_buffers(socket: &UdpSocket, size: usize) {
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
+        extern "C" {
+            fn setsockopt(sockfd: i32, level: i32, optname: i32, optval: *const u8, optlen: u32) -> i32;
+        }
         let raw = socket.as_raw_fd();
+        // Linux: SOL_SOCKET=1, SO_RCVBUF=8, SO_SNDBUF=7
         unsafe {
-            libc::setsockopt(raw, libc::SOL_SOCKET, libc::SO_RCVBUF, size_ptr as *const _, size_len);
-            libc::setsockopt(raw, libc::SOL_SOCKET, libc::SO_SNDBUF, size_ptr as *const _, size_len);
+            setsockopt(raw, 1, 8, size_ptr, size_len as u32);
+            setsockopt(raw, 1, 7, size_ptr, size_len as u32);
         }
     }
 
