@@ -32,9 +32,10 @@ pub const PKT_MSG_FILE_OFFER: u8    = 0x1B; // file offer: encrypted [4B transfe
 pub const PKT_MSG_FILE_ACCEPT: u8   = 0x1C; // file accept: encrypted [4B transfer_id]
 pub const PKT_MSG_FILE_REJECT: u8   = 0x1D; // file reject: encrypted [4B transfer_id]
 pub const PKT_MSG_FILE_CHUNK: u8    = 0x1E; // file chunk: encrypted [4B transfer_id][4B chunk_index LE][data: up to 1200 bytes]
-pub const PKT_MSG_FILE_ACK: u8      = 0x1F; // file ack: encrypted [4B transfer_id][4B ack_through LE]
-pub const PKT_MSG_FILE_COMPLETE: u8 = 0x20; // file complete: encrypted [4B transfer_id][32B sha256]
+pub const PKT_MSG_FILE_ACK: u8      = 0x1F; // file ack (all received): encrypted [4B transfer_id]
+pub const PKT_MSG_FILE_COMPLETE: u8 = 0x20; // file complete (sender done): encrypted [4B transfer_id][32B sha256]
 pub const PKT_MSG_FILE_CANCEL: u8   = 0x21; // file cancel: encrypted [4B transfer_id][1B reason]
+pub const PKT_MSG_FILE_NACK: u8     = 0x22; // file nack (missing chunks): encrypted [4B transfer_id][4B missing_count LE][4B idx LE ...]
 
 /// Size of an X25519 public key.
 pub const PUBKEY_SIZE: usize = 32;

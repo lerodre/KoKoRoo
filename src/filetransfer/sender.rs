@@ -2,41 +2,48 @@ use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::time::Instant;
 
-use super::{CHUNK_DATA_SIZE, WINDOW_SIZE, ACK_TIMEOUT_MS};
+use super::CHUNK_DATA_SIZE;
 
-/// Tracks the state of an outgoing file transfer (sender side).
+/// ACK-on-Error sender state.
+///
+/// The sender blasts all chunks as fast as possible, then sends FILE_COMPLETE.
+/// If the receiver reports missing chunks (NACK), only those are retransmitted.
 pub struct SenderState {
     pub transfer_id: u32,
     pub file_path: String,
     pub file_size: u64,
     pub sha256: [u8; 32],
     pub total_chunks: u32,
-    /// Next chunk index to send.
-    pub next_to_send: u32,
-    /// Highest ACK received (all chunks up to and including this index are confirmed).
-    /// Starts at u32::MAX to indicate no ACKs yet.
-    pub ack_through: Option<u32>,
-    /// Time of last ACK received (or transfer start).
-    pub last_ack_time: Instant,
-    /// Time of last chunk sent (for pacing).
-    pub last_chunk_sent: Instant,
-    /// Bytes confirmed delivered.
-    pub bytes_confirmed: u64,
-    /// Whether FILE_COMPLETE has been sent.
+    /// Chunks queued for sending (initially 0..total_chunks, then only missing on retransmit).
+    send_queue: Vec<u32>,
+    /// Index into send_queue for the next chunk to send.
+    queue_pos: usize,
+    /// Whether we've finished sending all queued chunks (ready to send COMPLETE).
+    pub all_sent: bool,
+    /// Whether FILE_COMPLETE has been sent (waiting for ACK/NACK).
     pub complete_sent: bool,
+    /// Time of last FILE_COMPLETE sent (for retry).
+    pub complete_sent_at: Instant,
+    /// Bytes confirmed delivered (updated on final ACK).
+    pub bytes_confirmed: u64,
+    /// Total bytes sent so far (for progress display).
+    pub bytes_sent: u64,
+    /// Whether transfer is fully done (ACK received).
+    pub done: bool,
     /// Cached file handle for sequential reads.
     file_reader: Option<BufReader<File>>,
-    /// The chunk index that the cached reader is positioned at.
+    /// The chunk index that the cached reader is positioned at next.
     reader_pos: u32,
 }
 
 impl SenderState {
     pub fn new(transfer_id: u32, file_path: String, file_size: u64, sha256: [u8; 32]) -> Self {
         let total_chunks = if file_size == 0 {
-            1 // Send at least one empty chunk for zero-byte files
+            1
         } else {
             ((file_size + CHUNK_DATA_SIZE as u64 - 1) / CHUNK_DATA_SIZE as u64) as u32
         };
+        let send_queue: Vec<u32> = (0..total_chunks).collect();
         let now = Instant::now();
         SenderState {
             transfer_id,
@@ -44,33 +51,16 @@ impl SenderState {
             file_size,
             sha256,
             total_chunks,
-            next_to_send: 0,
-            ack_through: None,
-            last_ack_time: now,
-            last_chunk_sent: now,
-            bytes_confirmed: 0,
+            send_queue,
+            queue_pos: 0,
+            all_sent: false,
             complete_sent: false,
+            complete_sent_at: now,
+            bytes_confirmed: 0,
+            bytes_sent: 0,
+            done: false,
             file_reader: None,
             reader_pos: 0,
-        }
-    }
-
-    /// Returns the base of the send window (first unacked chunk).
-    fn window_base(&self) -> u32 {
-        match self.ack_through {
-            Some(ack) => ack + 1,
-            None => 0,
-        }
-    }
-
-    /// Returns how many chunks can still be sent in the current window.
-    pub fn window_available(&self) -> u32 {
-        let base = self.window_base();
-        let window_end = (base + WINDOW_SIZE).min(self.total_chunks);
-        if self.next_to_send < window_end {
-            window_end - self.next_to_send
-        } else {
-            0
         }
     }
 
@@ -80,7 +70,6 @@ impl SenderState {
         let remaining = self.file_size.saturating_sub(offset);
         let to_read = (remaining as usize).min(CHUNK_DATA_SIZE);
 
-        // Open or reuse the cached file reader
         let needs_seek = if self.file_reader.is_none() {
             let file = File::open(&self.file_path).ok()?;
             self.file_reader = Some(BufReader::with_capacity(64 * 1024, file));
@@ -100,49 +89,47 @@ impl SenderState {
         Some(buf)
     }
 
-    /// Get the next chunk to send (if within window). Advances next_to_send.
-    /// Returns (chunk_index, chunk_data).
-    pub fn next_chunk(&mut self) -> Option<(u32, Vec<u8>)> {
-        if self.window_available() == 0 || self.next_to_send >= self.total_chunks {
-            return None;
+    /// Get the next batch of chunks to send (up to `max` chunks).
+    /// Returns Vec<(chunk_index, chunk_data)>.
+    pub fn next_chunks(&mut self, max: usize) -> Vec<(u32, Vec<u8>)> {
+        let mut result = Vec::new();
+        while result.len() < max && self.queue_pos < self.send_queue.len() {
+            let idx = self.send_queue[self.queue_pos];
+            self.queue_pos += 1;
+            if let Some(data) = self.read_chunk(idx) {
+                let chunk_bytes = data.len() as u64;
+                result.push((idx, data));
+                self.bytes_sent += chunk_bytes;
+            }
         }
-        let idx = self.next_to_send;
-        let data = self.read_chunk(idx)?;
-        self.next_to_send = idx + 1;
-        self.last_chunk_sent = Instant::now();
-        Some((idx, data))
-    }
-
-    /// Handle an ACK. Returns true if all chunks are now confirmed.
-    pub fn on_ack(&mut self, ack_through: u32) -> bool {
-        let prev = self.ack_through.unwrap_or(0);
-        if self.ack_through.is_none() || ack_through > prev {
-            self.ack_through = Some(ack_through);
-            self.last_ack_time = Instant::now();
-            // Update confirmed bytes
-            let confirmed_chunks = ack_through as u64 + 1;
-            self.bytes_confirmed = (confirmed_chunks * CHUNK_DATA_SIZE as u64).min(self.file_size);
+        if self.queue_pos >= self.send_queue.len() {
+            self.all_sent = true;
         }
-        self.is_fully_acked()
+        result
     }
 
-    /// Check if all chunks have been ACKed.
-    pub fn is_fully_acked(&self) -> bool {
-        match self.ack_through {
-            Some(ack) => ack + 1 >= self.total_chunks,
-            None => false,
-        }
+    /// Handle a NACK: queue the missing chunks for retransmission.
+    pub fn on_nack(&mut self, missing: Vec<u32>) {
+        self.send_queue = missing;
+        self.queue_pos = 0;
+        self.all_sent = false;
+        self.complete_sent = false;
     }
 
-    /// Check if we should retransmit (ACK timeout expired).
-    pub fn should_retransmit(&self) -> bool {
-        self.last_ack_time.elapsed().as_millis() >= ACK_TIMEOUT_MS as u128
-            && !self.is_fully_acked()
+    /// Handle a final ACK: transfer is complete.
+    pub fn on_ack(&mut self) {
+        self.bytes_confirmed = self.file_size;
+        self.done = true;
     }
 
-    /// Reset next_to_send to retransmit from the window base.
-    pub fn retransmit(&mut self) {
-        self.next_to_send = self.window_base();
-        self.last_ack_time = Instant::now();
+    /// Should we resend FILE_COMPLETE? (timeout after 2 seconds with no response)
+    pub fn should_resend_complete(&self) -> bool {
+        self.complete_sent && !self.done && self.complete_sent_at.elapsed().as_secs() >= 2
+    }
+
+    /// Mark FILE_COMPLETE as sent.
+    pub fn mark_complete_sent(&mut self) {
+        self.complete_sent = true;
+        self.complete_sent_at = Instant::now();
     }
 }

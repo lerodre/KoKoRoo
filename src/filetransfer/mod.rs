@@ -6,26 +6,20 @@ pub mod receiver;
 /// UDP-safe size: 1200 payload + headers stays well under typical 1280 IPv6 MTU.
 pub const CHUNK_DATA_SIZE: usize = 1200;
 
-/// Sliding window size: max chunks in flight before requiring an ACK.
-/// 128 chunks × 1200 bytes = ~150 KB in flight.
-pub const WINDOW_SIZE: u32 = 128;
-
-/// Interval between chunks (microseconds) — not used for burst sending.
-pub const CHUNK_PACING_US: u64 = 200;
-
-/// ACK timeout: retransmit if no ACK received within this duration.
-pub const ACK_TIMEOUT_MS: u64 = 1000;
+/// Max chunks to send per daemon tick (prevents starving message processing).
+pub const CHUNKS_PER_TICK: usize = 64;
 
 /// Offer timeout: cancel if no accept/reject within 30 seconds.
 pub const OFFER_TIMEOUT_SECS: u64 = 30;
+
+/// Stale transfer timeout: cancel if no progress for this many seconds.
+pub const STALE_TIMEOUT_SECS: u64 = 30;
 
 /// How often to emit progress events to the GUI (milliseconds).
 pub const PROGRESS_INTERVAL_MS: u64 = 500;
 
 /// Cancel reason codes.
 pub const CANCEL_USER: u8 = 0x01;
-pub const CANCEL_ERROR: u8 = 0x02;
-pub const CANCEL_TIMEOUT: u8 = 0x03;
 
 /// Format a byte size as a human-readable string.
 pub fn format_size(bytes: u64) -> String {

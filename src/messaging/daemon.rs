@@ -11,6 +11,7 @@ use crate::crypto::{
     PKT_MSG_PRESENCE,
     PKT_MSG_FILE_OFFER, PKT_MSG_FILE_ACCEPT, PKT_MSG_FILE_REJECT,
     PKT_MSG_FILE_CHUNK, PKT_MSG_FILE_ACK, PKT_MSG_FILE_COMPLETE, PKT_MSG_FILE_CANCEL,
+    PKT_MSG_FILE_NACK,
 };
 use crate::identity::{self, Identity, Settings};
 use crate::filetransfer;
@@ -1121,104 +1122,118 @@ impl MsgDaemon {
                 }
 
                 PKT_MSG_FILE_CHUNK => {
+                    // ACK-on-Error: just store the chunk, no ACK needed per-chunk.
                     if let Some(peer) = self.peers.get_mut(&from) {
                         if let Some((transfer_id, chunk_index, chunk_data)) =
                             filetransfer::protocol::handle_file_chunk(data, peer)
                         {
                             peer.touch();
                             let contact_id = peer.contact_id.clone();
-                            let key = (contact_id.clone(), transfer_id);
-                            let mut should_ack = false;
-                            let mut ack_value = None;
+                            let key = (contact_id, transfer_id);
                             if let Some(FileTransfer::Receiving(ref mut recv)) = self.file_transfers.get_mut(&key) {
                                 recv.on_chunk(chunk_index, &chunk_data);
-                                if recv.should_ack() {
-                                    ack_value = recv.ack_value();
-                                    should_ack = true;
-                                }
-                            }
-                            if should_ack {
-                                if let Some(ack_val) = ack_value {
-                                    if let Some(ref socket) = self.socket {
-                                        filetransfer::protocol::send_file_ack(peer, socket, transfer_id, ack_val);
-                                    }
-                                }
                             }
                         }
                     }
                 }
 
                 PKT_MSG_FILE_ACK => {
+                    // Final ACK from receiver: all chunks received, transfer done.
                     if let Some(peer) = self.peers.get_mut(&from) {
-                        if let Some((transfer_id, ack_through)) =
+                        if let Some(transfer_id) =
                             filetransfer::protocol::handle_file_ack(data, peer)
                         {
                             peer.touch();
                             let contact_id = peer.contact_id.clone();
                             let key = (contact_id.clone(), transfer_id);
-                            let mut all_acked = false;
                             if let Some(FileTransfer::Sending(ref mut sender)) = self.file_transfers.get_mut(&key) {
-                                all_acked = sender.on_ack(ack_through);
+                                sender.on_ack();
                             }
-                            if all_acked {
-                                // Send FILE_COMPLETE
-                                if let Some(FileTransfer::Sending(ref sender)) = self.file_transfers.get(&key) {
-                                    if !sender.complete_sent {
-                                        if let Some(ref socket) = self.socket {
-                                            filetransfer::protocol::send_file_complete(
-                                                peer, socket, transfer_id, &sender.sha256,
-                                            );
-                                        }
-                                    }
-                                }
-                                if let Some(FileTransfer::Sending(ref mut sender)) = self.file_transfers.get_mut(&key) {
-                                    sender.complete_sent = true;
-                                }
-                                // Emit completion for sender side
-                                self.file_transfers.remove(&key);
-                                self.event_tx.send(MsgEvent::FileTransferComplete {
-                                    contact_id,
-                                    transfer_id,
-                                    saved_path: String::new(), // sender doesn't save
-                                }).ok();
+                            self.file_transfers.remove(&key);
+                            self.event_tx.send(MsgEvent::FileTransferComplete {
+                                contact_id,
+                                transfer_id,
+                                saved_path: String::new(),
+                            }).ok();
+                        }
+                    }
+                }
+
+                PKT_MSG_FILE_NACK => {
+                    // Receiver reports missing chunks — retransmit only those.
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((transfer_id, missing)) =
+                            filetransfer::protocol::handle_file_nack(data, peer)
+                        {
+                            peer.touch();
+                            let contact_id = peer.contact_id.clone();
+                            let key = (contact_id, transfer_id);
+                            if let Some(FileTransfer::Sending(ref mut sender)) = self.file_transfers.get_mut(&key) {
+                                sender.on_nack(missing);
                             }
                         }
                     }
                 }
 
                 PKT_MSG_FILE_COMPLETE => {
+                    // Sender says all chunks sent. Check for missing, respond with ACK or NACK.
                     if let Some(peer) = self.peers.get_mut(&from) {
-                        if let Some((transfer_id, sha256)) =
+                        if let Some((transfer_id, _sha256)) =
                             filetransfer::protocol::handle_file_complete(data, peer)
                         {
                             peer.touch();
                             let contact_id = peer.contact_id.clone();
                             let key = (contact_id.clone(), transfer_id);
-                            if let Some(ft) = self.file_transfers.remove(&key) {
-                                if let FileTransfer::Receiving(recv) = ft {
-                                    // Verify hash
-                                    if recv.verify_hash() && sha256 == recv.expected_sha256 {
-                                        if let Some(saved_path) = recv.finalize() {
-                                            self.event_tx.send(MsgEvent::FileTransferComplete {
-                                                contact_id,
-                                                transfer_id,
-                                                saved_path,
-                                            }).ok();
-                                        } else {
-                                            recv.cleanup();
-                                            self.event_tx.send(MsgEvent::FileTransferFailed {
-                                                contact_id,
-                                                transfer_id,
-                                                reason: "Failed to save file".into(),
-                                            }).ok();
+
+                            // Check if receiver has all chunks
+                            let action = if let Some(FileTransfer::Receiving(ref recv)) = self.file_transfers.get(&key) {
+                                let missing = recv.missing_chunks();
+                                if missing.is_empty() {
+                                    Some(("complete".to_string(), missing))
+                                } else {
+                                    Some(("nack".to_string(), missing))
+                                }
+                            } else {
+                                None
+                            };
+
+                            if let Some((action_type, missing)) = action {
+                                if action_type == "nack" {
+                                    // Send NACK with missing chunk list
+                                    if let Some(ref socket) = self.socket {
+                                        filetransfer::protocol::send_file_nack(
+                                            peer, socket, transfer_id, &missing,
+                                        );
+                                    }
+                                } else {
+                                    // All received — verify and finalize
+                                    if let Some(ref socket) = self.socket {
+                                        filetransfer::protocol::send_file_ack(peer, socket, transfer_id);
+                                    }
+                                    if let Some(ft) = self.file_transfers.remove(&key) {
+                                        if let FileTransfer::Receiving(recv) = ft {
+                                            if recv.verify_hash() {
+                                                if let Some(saved_path) = recv.finalize() {
+                                                    self.event_tx.send(MsgEvent::FileTransferComplete {
+                                                        contact_id,
+                                                        transfer_id,
+                                                        saved_path,
+                                                    }).ok();
+                                                } else {
+                                                    recv.cleanup();
+                                                    self.event_tx.send(MsgEvent::FileTransferFailed {
+                                                        contact_id, transfer_id,
+                                                        reason: "Failed to save file".into(),
+                                                    }).ok();
+                                                }
+                                            } else {
+                                                recv.cleanup();
+                                                self.event_tx.send(MsgEvent::FileTransferFailed {
+                                                    contact_id, transfer_id,
+                                                    reason: "Hash verification failed".into(),
+                                                }).ok();
+                                            }
                                         }
-                                    } else {
-                                        recv.cleanup();
-                                        self.event_tx.send(MsgEvent::FileTransferFailed {
-                                            contact_id,
-                                            transfer_id,
-                                            reason: "Hash verification failed".into(),
-                                        }).ok();
                                     }
                                 }
                             }
@@ -1436,54 +1451,56 @@ impl MsgDaemon {
             }
         }
 
-        // ── File transfer ticking ──
+        // ── File transfer ticking (ACK-on-Error) ──
         if let Some(ref socket) = self.socket {
-            // Tick senders: send chunks within window with pacing
-            let mut chunks_to_send: Vec<(String, u32, u32, Vec<u8>)> = Vec::new();
+            // Tick senders: blast chunks + send COMPLETE when done
+            let mut chunks_to_send: Vec<(String, u32, Vec<(u32, Vec<u8>)>)> = Vec::new();
+            let mut completes_to_send: Vec<(String, u32, [u8; 32])> = Vec::new();
 
             for ((cid, _tid), ft) in &mut self.file_transfers {
                 if let FileTransfer::Sending(ref mut sender) = ft {
-                    // Check retransmit timeout
-                    if sender.should_retransmit() {
-                        sender.retransmit();
+                    if sender.done {
+                        continue;
                     }
-                    // Send all available chunks within the window
-                    while sender.window_available() > 0 {
-                        if let Some((chunk_idx, chunk_data)) = sender.next_chunk() {
-                            chunks_to_send.push((cid.clone(), sender.transfer_id, chunk_idx, chunk_data));
-                        } else {
-                            break;
+                    if !sender.all_sent {
+                        // Blast up to CHUNKS_PER_TICK chunks
+                        let batch = sender.next_chunks(filetransfer::CHUNKS_PER_TICK);
+                        if !batch.is_empty() {
+                            chunks_to_send.push((cid.clone(), sender.transfer_id, batch));
                         }
+                    }
+                    if sender.all_sent && !sender.complete_sent {
+                        // All chunks sent — send FILE_COMPLETE
+                        completes_to_send.push((cid.clone(), sender.transfer_id, sender.sha256));
+                        sender.mark_complete_sent();
+                    } else if sender.should_resend_complete() {
+                        // Resend COMPLETE if no response
+                        completes_to_send.push((cid.clone(), sender.transfer_id, sender.sha256));
+                        sender.mark_complete_sent();
                     }
                 }
             }
 
             // Send queued chunks
-            for (cid, transfer_id, chunk_idx, chunk_data) in chunks_to_send {
+            for (cid, transfer_id, batch) in chunks_to_send {
                 if let Some(addr) = self.contact_addrs.get(&cid) {
                     if let Some(peer) = self.peers.get(addr) {
-                        filetransfer::protocol::send_file_chunk(
-                            peer, socket, transfer_id, chunk_idx, &chunk_data,
-                        );
-                    }
-                }
-            }
-
-            // Tick receivers: send pending ACKs
-            let mut acks_to_send: Vec<(String, u32, u32)> = Vec::new();
-            for ((cid, _tid), ft) in &mut self.file_transfers {
-                if let FileTransfer::Receiving(ref mut recv) = ft {
-                    if recv.should_ack() {
-                        if let Some(ack_val) = recv.ack_value() {
-                            acks_to_send.push((cid.clone(), recv.transfer_id, ack_val));
+                        for (chunk_idx, chunk_data) in batch {
+                            filetransfer::protocol::send_file_chunk(
+                                peer, socket, transfer_id, chunk_idx, &chunk_data,
+                            );
                         }
                     }
                 }
             }
-            for (cid, transfer_id, ack_val) in acks_to_send {
+
+            // Send FILE_COMPLETE packets
+            for (cid, transfer_id, sha256) in completes_to_send {
                 if let Some(addr) = self.contact_addrs.get(&cid) {
                     if let Some(peer) = self.peers.get(addr) {
-                        filetransfer::protocol::send_file_ack(peer, socket, transfer_id, ack_val);
+                        filetransfer::protocol::send_file_complete(
+                            peer, socket, transfer_id, &sha256,
+                        );
                     }
                 }
             }
@@ -1497,7 +1514,7 @@ impl MsgDaemon {
                             self.event_tx.send(MsgEvent::FileTransferProgress {
                                 contact_id: cid.clone(),
                                 transfer_id: *tid,
-                                bytes_transferred: sender.bytes_confirmed,
+                                bytes_transferred: sender.bytes_sent,
                                 total_bytes: sender.file_size,
                             }).ok();
                         }
@@ -1537,10 +1554,11 @@ impl MsgDaemon {
             for ((cid, tid), ft) in &self.file_transfers {
                 let is_stale = match ft {
                     FileTransfer::Sending(sender) => {
-                        sender.last_ack_time.elapsed().as_secs() >= 30 && !sender.is_fully_acked()
+                        sender.complete_sent && sender.complete_sent_at.elapsed().as_secs() >= filetransfer::STALE_TIMEOUT_SECS
+                            && !sender.done
                     }
                     FileTransfer::Receiving(recv) => {
-                        recv.last_chunk_time.elapsed().as_secs() >= 30 && !recv.is_complete()
+                        recv.last_chunk_time.elapsed().as_secs() >= filetransfer::STALE_TIMEOUT_SECS && !recv.is_complete()
                     }
                     FileTransfer::IncomingWaiting { .. } => false,
                     _ => false,

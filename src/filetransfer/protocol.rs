@@ -3,6 +3,7 @@ use std::net::UdpSocket;
 use crate::crypto::{
     PKT_MSG_FILE_OFFER, PKT_MSG_FILE_ACCEPT, PKT_MSG_FILE_REJECT,
     PKT_MSG_FILE_CHUNK, PKT_MSG_FILE_ACK, PKT_MSG_FILE_COMPLETE, PKT_MSG_FILE_CANCEL,
+    PKT_MSG_FILE_NACK,
 };
 use crate::messaging::session::PeerSession;
 
@@ -111,27 +112,65 @@ pub fn handle_file_chunk(data: &[u8], peer: &PeerSession) -> Option<(u32, u32, V
     Some((transfer_id, chunk_index, chunk_data))
 }
 
-/// Send a FILE_ACK: [4B transfer_id][4B ack_through LE]
-pub fn send_file_ack(peer: &PeerSession, socket: &UdpSocket, transfer_id: u32, ack_through: u32) {
+/// Send a FILE_ACK (all chunks received, transfer complete): [4B transfer_id]
+pub fn send_file_ack(peer: &PeerSession, socket: &UdpSocket, transfer_id: u32) {
     if let Some(session) = &peer.session {
-        let mut payload = [0u8; 8];
-        payload[..4].copy_from_slice(&transfer_id.to_le_bytes());
-        payload[4..].copy_from_slice(&ack_through.to_le_bytes());
-        let pkt = session.encrypt_packet(PKT_MSG_FILE_ACK, &payload);
+        let pkt = session.encrypt_packet(PKT_MSG_FILE_ACK, &transfer_id.to_le_bytes());
         socket.send_to(&pkt, peer.peer_addr).ok();
     }
 }
 
-/// Handle an incoming FILE_ACK. Returns (transfer_id, ack_through).
-pub fn handle_file_ack(data: &[u8], peer: &PeerSession) -> Option<(u32, u32)> {
+/// Handle an incoming FILE_ACK (complete). Returns transfer_id.
+pub fn handle_file_ack(data: &[u8], peer: &PeerSession) -> Option<u32> {
     let session = peer.session.as_ref()?;
     let (pkt_type, plain) = session.decrypt_packet(data)?;
-    if pkt_type != PKT_MSG_FILE_ACK || plain.len() < 8 {
+    if pkt_type != PKT_MSG_FILE_ACK || plain.len() < 4 {
+        return None;
+    }
+    Some(u32::from_le_bytes([plain[0], plain[1], plain[2], plain[3]]))
+}
+
+/// Send a FILE_NACK (missing chunks): [4B transfer_id][4B count LE][4B idx LE ...]
+/// Splits into multiple packets if the missing list is too large.
+pub fn send_file_nack(
+    peer: &PeerSession,
+    socket: &UdpSocket,
+    transfer_id: u32,
+    missing: &[u32],
+) {
+    if let Some(session) = &peer.session {
+        // Max ~280 indices per packet (1200 bytes payload budget: 4+4 header + 280*4 = 1128)
+        for chunk in missing.chunks(280) {
+            let mut payload = Vec::with_capacity(8 + chunk.len() * 4);
+            payload.extend_from_slice(&transfer_id.to_le_bytes());
+            payload.extend_from_slice(&(chunk.len() as u32).to_le_bytes());
+            for &idx in chunk {
+                payload.extend_from_slice(&idx.to_le_bytes());
+            }
+            let pkt = session.encrypt_packet(PKT_MSG_FILE_NACK, &payload);
+            socket.send_to(&pkt, peer.peer_addr).ok();
+        }
+    }
+}
+
+/// Handle an incoming FILE_NACK. Returns (transfer_id, Vec<missing_indices>).
+pub fn handle_file_nack(data: &[u8], peer: &PeerSession) -> Option<(u32, Vec<u32>)> {
+    let session = peer.session.as_ref()?;
+    let (pkt_type, plain) = session.decrypt_packet(data)?;
+    if pkt_type != PKT_MSG_FILE_NACK || plain.len() < 8 {
         return None;
     }
     let transfer_id = u32::from_le_bytes([plain[0], plain[1], plain[2], plain[3]]);
-    let ack_through = u32::from_le_bytes([plain[4], plain[5], plain[6], plain[7]]);
-    Some((transfer_id, ack_through))
+    let count = u32::from_le_bytes([plain[4], plain[5], plain[6], plain[7]]) as usize;
+    let mut missing = Vec::with_capacity(count);
+    for i in 0..count {
+        let offset = 8 + i * 4;
+        if offset + 4 > plain.len() { break; }
+        missing.push(u32::from_le_bytes([
+            plain[offset], plain[offset+1], plain[offset+2], plain[offset+3],
+        ]));
+    }
+    Some((transfer_id, missing))
 }
 
 /// Send a FILE_COMPLETE: [4B transfer_id][32B sha256]
