@@ -42,7 +42,10 @@ impl HostelApp {
                 })
                 .unwrap_or_default();
 
-            let name = if contact.nickname.is_empty() {
+            let is_self = contact.pubkey == self.identity.pubkey;
+            let name = if is_self {
+                "YO (you)".to_string()
+            } else if contact.nickname.is_empty() {
                 contact.fingerprint.clone()
             } else {
                 contact.nickname.clone()

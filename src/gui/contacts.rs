@@ -53,9 +53,16 @@ impl HostelApp {
 
                     let hex = identity::pubkey_hex(&contact.pubkey);
                     let is_blocked = self.settings.is_blocked(&hex);
+                    let is_self = contact.pubkey == self.identity.pubkey;
                     ui.horizontal(|ui| {
                         // Contact name (clickable)
-                        if is_blocked {
+                        if is_self {
+                            if ui.add(egui::Button::new(
+                                egui::RichText::new("YO (you)").italics().color(self.settings.theme.text_muted())
+                            ).frame(false)).clicked() {
+                                click_contact = Some(i);
+                            }
+                        } else if is_blocked {
                             let text = format_peer_display(&contact.nickname, &contact.fingerprint);
                             if ui.add(egui::Button::new(
                                 egui::RichText::new(&text).strikethrough().color(self.settings.theme.text_muted())

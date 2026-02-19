@@ -109,13 +109,18 @@ impl HostelApp {
                         let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
                         ui.painter().circle_filled(rect.center(), 4.0, dot_color);
 
-                        let btn_widget = if has_addr {
-                            egui::Button::new(peer_display_job(&contact.nickname, &contact.fingerprint, 13.0, self.settings.theme.text_primary(), self.settings.theme.text_dim())).frame(false)
+                        let is_self = contact.pubkey == self.identity.pubkey;
+                        let display_nick = if is_self { "YO" } else { &contact.nickname };
+
+                        let btn_widget = if is_self {
+                            egui::Button::new(egui::RichText::new("YO (you)").color(self.settings.theme.text_muted()).italics()).frame(false)
+                        } else if has_addr {
+                            egui::Button::new(peer_display_job(display_nick, &contact.fingerprint, 13.0, self.settings.theme.text_primary(), self.settings.theme.text_dim())).frame(false)
                         } else {
-                            let text = format_peer_display(&contact.nickname, &contact.fingerprint);
+                            let text = format_peer_display(display_nick, &contact.fingerprint);
                             egui::Button::new(egui::RichText::new(&text).color(self.settings.theme.text_muted())).frame(false)
                         };
-                        if ui.add(btn_widget).clicked() && has_addr {
+                        if ui.add(btn_widget).clicked() && has_addr && !is_self {
                             selected_contact = Some(i);
                         }
                     });
@@ -565,6 +570,10 @@ impl HostelApp {
                     self.screen_texture = Some(
                         ui.ctx().load_texture("screen_share", image, Default::default())
                     );
+                } else if v.latest_frame.is_none() && self.screen_texture.is_some() {
+                    // Peer stopped sharing — clear stale texture
+                    self.screen_texture = None;
+                    self.last_frame_time = None;
                 }
             }
         }

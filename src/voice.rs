@@ -13,7 +13,7 @@ use std::thread;
 use nnnoiseless::DenoiseState;
 
 use crate::chat;
-use crate::crypto::{self, Session, PKT_CHAT, PKT_HANGUP, PKT_HELLO, PKT_IDENTITY, PKT_SCREEN, PKT_VOICE};
+use crate::crypto::{self, Session, PKT_CHAT, PKT_HANGUP, PKT_HELLO, PKT_IDENTITY, PKT_SCREEN, PKT_SCREEN_STOP, PKT_VOICE};
 use crate::firewall::{Action, Firewall};
 use crate::identity::{self, Identity};
 use crate::screen::{ScreenQuality, ScreenViewer};
@@ -308,6 +308,14 @@ impl VoiceEngine {
         self.sys_audio_stream = None;
         if let Some(t) = self.screen_thread.take() {
             let _ = t.join();
+        }
+        // Notify peer that screen sharing has stopped
+        let pkt = {
+            let sess = self.session.lock().unwrap();
+            sess.encrypt_packet(crypto::PKT_SCREEN_STOP, &[])
+        };
+        for _ in 0..3 {
+            let _ = self.send_socket.send_to(&pkt, &self.peer_addr);
         }
     }
 }
@@ -845,6 +853,13 @@ pub fn start_engine(
                             }
                             if screen_chunk_count > 0 && screen_chunk_count % 100 == 0 {
                                 log_fmt!("[voice] screen: received {} chunks (no complete frame yet)", screen_chunk_count);
+                            }
+                        }
+                        Some((PKT_SCREEN_STOP, _)) => {
+                            // Remote peer stopped screen sharing — clear viewer
+                            log_fmt!("[voice] screen: peer stopped sharing");
+                            if let Ok(mut viewer) = screen_viewer_r.lock() {
+                                viewer.latest_frame = None;
                             }
                         }
                         Some((PKT_HANGUP, _)) => {
