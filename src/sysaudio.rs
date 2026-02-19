@@ -1,42 +1,73 @@
+#[cfg(not(target_os = "macos"))]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+#[cfg(not(target_os = "macos"))]
 use ringbuf::traits::Producer;
 use ringbuf::HeapProd;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(not(target_os = "macos"))]
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
+
+/// Wrapper enum so voice.rs can hold either a cpal or SCK stream handle.
+#[allow(dead_code)]
+pub enum SysAudioStream {
+    Cpal(cpal::Stream),
+    #[cfg(target_os = "macos")]
+    Sck(crate::sck_audio::SckStream),
+}
+
+impl SysAudioStream {
+    /// Recover the ring buffer producer before dropping, so it can be reused.
+    pub fn take_producer(&self) -> Option<ringbuf::HeapProd<f32>> {
+        match self {
+            #[cfg(target_os = "macos")]
+            SysAudioStream::Sck(s) => s.take_producer(),
+            _ => None, // cpal streams don't hold the producer
+        }
+    }
+}
 
 /// List available loopback/monitor audio devices.
 ///
 /// - **Windows**: Returns output device names (each can be used for WASAPI loopback).
 /// - **Linux**: Returns input device names containing "Monitor".
 pub fn list_loopback_devices() -> Vec<String> {
-    let host = cpal::default_host();
-    let mut names = Vec::new();
-
-    #[cfg(windows)]
+    #[cfg(target_os = "macos")]
     {
-        if let Ok(devices) = host.output_devices() {
-            for dev in devices {
-                if let Ok(name) = dev.name() {
-                    names.push(name);
-                }
-            }
-        }
+        return crate::sck_audio::list_system_audio_sources();
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "macos"))]
     {
-        if let Ok(devices) = host.input_devices() {
-            for dev in devices {
-                if let Ok(name) = dev.name() {
-                    if name.to_lowercase().contains("monitor") {
+        let host = cpal::default_host();
+        let mut names = Vec::new();
+
+        #[cfg(windows)]
+        {
+            if let Ok(devices) = host.output_devices() {
+                for dev in devices {
+                    if let Ok(name) = dev.name() {
                         names.push(name);
                     }
                 }
             }
         }
-    }
 
-    names
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(devices) = host.input_devices() {
+                for dev in devices {
+                    if let Ok(name) = dev.name() {
+                        if name.to_lowercase().contains("monitor") {
+                            names.push(name);
+                        }
+                    }
+                }
+            }
+        }
+
+        names
+    }
 }
 
 /// Start capturing system/desktop audio into a ring buffer.
@@ -49,24 +80,32 @@ pub fn list_loopback_devices() -> Vec<String> {
 /// An empty string means use default.
 ///
 /// Returns `Some(Stream)` on success — the stream captures while alive and stops on drop.
+/// Returns (stream, leftover_producer). On failure, the producer is returned
+/// so the caller can restore it for future retries.
 pub fn start_system_audio_capture(
     producer: HeapProd<f32>,
     active: Arc<AtomicBool>,
     device_name: Option<&str>,
-) -> Option<cpal::Stream> {
+) -> (Option<SysAudioStream>, Option<HeapProd<f32>>) {
     #[cfg(windows)]
     {
-        capture_wasapi_loopback(producer, active, device_name)
+        (capture_wasapi_loopback(producer, active, device_name).map(SysAudioStream::Cpal), None)
     }
     #[cfg(target_os = "linux")]
     {
-        capture_linux_monitor(producer, active, device_name)
+        (capture_linux_monitor(producer, active, device_name).map(SysAudioStream::Cpal), None)
     }
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(target_os = "macos")]
     {
-        let _ = (producer, active, device_name);
+        let _ = device_name;
+        let (stream, leftover) = crate::sck_audio::start_capture(producer, active);
+        (stream.map(SysAudioStream::Sck), leftover)
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (active, device_name);
         log_fmt!("[sysaudio] system audio capture not supported on this platform");
-        None
+        (None, Some(producer))
     }
 }
 
@@ -164,6 +203,7 @@ fn capture_linux_monitor(
     build_capture_stream(&device, &stream_config, channels, producer, active)
 }
 
+#[cfg(not(target_os = "macos"))]
 fn build_capture_stream(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
