@@ -258,7 +258,8 @@ impl HostelApp {
         }
 
         // Chat history
-        let available = ui.available_height() - 46.0;
+        let input_bar_h = 62.0; // taller input bar (1.5×)
+        let available = ui.available_height() - input_bar_h;
         let scroll_height = available.max(80.0);
 
         // Collect file transfer actions to process after the borrow ends
@@ -266,6 +267,7 @@ impl HostelApp {
 
         egui::ScrollArea::vertical()
             .max_height(scroll_height)
+            .auto_shrink(false)
             .stick_to_bottom(true)
             .id_salt("msg_conversation_scroll")
             .show(ui, |ui| {
@@ -348,32 +350,33 @@ impl HostelApp {
             }
         }
 
-        // Input bar
+        // Input bar (1.5× height)
         ui.separator();
         ui.add_space(2.0);
         let mut send = false;
         let mut pick_file = false;
+        let bar_h = 38.0;
         ui.horizontal(|ui| {
             // File attach button
             let attach_btn = egui::Button::new(
-                egui::RichText::new("+").size(16.0).strong(),
+                egui::RichText::new("+").size(18.0).strong(),
             )
-            .min_size(egui::vec2(28.0, 28.0));
+            .min_size(egui::vec2(bar_h, bar_h));
             let attach_resp = ui.add(attach_btn);
             if attach_resp.clicked() {
                 pick_file = true;
             }
             attach_resp.on_hover_text("Send file");
 
-            let resp = ui.add(
+            let resp = ui.add_sized(
+                egui::vec2(ui.available_width() - 75.0, bar_h),
                 egui::TextEdit::singleline(&mut self.msg_chat_input)
-                    .hint_text("Type a message...")
-                    .desired_width(ui.available_width() - 70.0),
+                    .hint_text("Type a message..."),
             );
             if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 send = true;
             }
-            if ui.button("Send").clicked() {
+            if ui.add(egui::Button::new("Send").min_size(egui::vec2(60.0, bar_h))).clicked() {
                 send = true;
             }
             if send {

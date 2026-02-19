@@ -154,7 +154,9 @@ impl ChatHistory {
             }
         }
         if idx.is_none() {
-            for i in (0..self.messages.len()).rev() {
+            // Iterate forward so the oldest placeholder (first file sent) gets
+            // assigned the first real transfer_id from the daemon.
+            for i in 0..self.messages.len() {
                 let msg = &self.messages[i];
                 if let Some(ref ft) = msg.file_transfer {
                     if ft.transfer_id == 0 && msg.from_me && matches!(ft.status, FileTransferStatus::Offered) {

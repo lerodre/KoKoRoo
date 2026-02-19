@@ -1192,6 +1192,10 @@ impl eframe::App for HostelApp {
 
         // Style + theme visuals
         let mut style = (*ctx.style()).clone();
+        // Bump all font sizes by 1 point
+        for (_text_style, font_id) in style.text_styles.iter_mut() {
+            font_id.size += 1.0;
+        }
         style.spacing.item_spacing = egui::vec2(8.0, 6.0);
         style.spacing.button_padding = egui::vec2(14.0, 6.0);
         let t = &self.settings.theme;
