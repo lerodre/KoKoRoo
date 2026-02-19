@@ -358,7 +358,10 @@ impl HostelApp {
         if pick_file {
             if let Some(contact) = self.contacts.iter().find(|c| c.contact_id == contact_id).cloned() {
                 let picked = std::thread::spawn(|| {
-                    let rt = tokio::runtime::Runtime::new().ok()?;
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .ok()?;
                     rt.block_on(async {
                         rfd::AsyncFileDialog::new()
                             .set_title("Send file")
@@ -369,7 +372,7 @@ impl HostelApp {
 
                 if let Some(handles) = picked {
                     for handle in handles {
-                        let path = handle.path().to_path_buf();
+                        let path: std::path::PathBuf = handle.path().to_path_buf();
                         if path.is_file() {
                             self.send_file_to_contact(&contact_id, &contact, &path);
                         }
