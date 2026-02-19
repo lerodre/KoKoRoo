@@ -204,6 +204,8 @@ impl MsgDaemon {
                 Ok(s) => {
                     s.set_read_timeout(Some(RECV_TIMEOUT)).ok();
                     s.set_nonblocking(false).ok();
+                    // Large buffers for file transfer bursts (16 MB each)
+                    set_socket_buffers(&s, 16 * 1024 * 1024);
                     self.socket = Some(s);
                     log_fmt!("[daemon] bind_socket OK on attempt {}", attempt + 1);
                     return;
@@ -1731,6 +1733,38 @@ impl MsgDaemon {
             }
         }
     }
+}
+
+/// Set large socket send/receive buffers for file transfer throughput.
+fn set_socket_buffers(socket: &UdpSocket, size: usize) {
+    let size_i = size as i32;
+    let size_ptr = &size_i as *const i32 as *const u8;
+    let size_len = std::mem::size_of::<i32>() as u32;
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::io::AsRawSocket;
+        let raw = socket.as_raw_socket() as usize;
+        extern "system" {
+            fn setsockopt(s: usize, level: i32, optname: i32, optval: *const u8, optlen: i32) -> i32;
+        }
+        unsafe {
+            setsockopt(raw, 0xFFFF, 0x1002, size_ptr, size_len as i32); // SO_RCVBUF
+            setsockopt(raw, 0xFFFF, 0x1001, size_ptr, size_len as i32); // SO_SNDBUF
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let raw = socket.as_raw_fd();
+        unsafe {
+            libc::setsockopt(raw, libc::SOL_SOCKET, libc::SO_RCVBUF, size_ptr as *const _, size_len);
+            libc::setsockopt(raw, libc::SOL_SOCKET, libc::SO_SNDBUF, size_ptr as *const _, size_len);
+        }
+    }
+
+    let _ = (socket, size); // suppress unused warnings on other platforms
 }
 
 /// Compute SHA-256 hash of a file.
