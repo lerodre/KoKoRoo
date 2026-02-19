@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -28,6 +28,8 @@ pub struct ReceiverState {
     pub bytes_received: u64,
     /// Time of last chunk received.
     pub last_chunk_time: Instant,
+    /// Cached file writer (kept open for the entire transfer).
+    file_writer: Option<BufWriter<File>>,
 }
 
 impl ReceiverState {
@@ -53,6 +55,13 @@ impl ReceiverState {
             f.set_len(file_size).ok();
         }
 
+        // Open the file writer once and keep it open
+        let file_writer = OpenOptions::new()
+            .write(true)
+            .open(&temp_path)
+            .ok()
+            .map(|f| BufWriter::with_capacity(256 * 1024, f));
+
         ReceiverState {
             transfer_id,
             filename,
@@ -64,6 +73,7 @@ impl ReceiverState {
             contact_id,
             bytes_received: 0,
             last_chunk_time: Instant::now(),
+            file_writer,
         }
     }
 
@@ -72,11 +82,11 @@ impl ReceiverState {
         if chunk_index >= self.total_chunks {
             return;
         }
-        let offset = chunk_index as u64 * CHUNK_DATA_SIZE as u64;
 
-        if let Ok(mut file) = OpenOptions::new().write(true).open(&self.temp_path) {
-            if file.seek(SeekFrom::Start(offset)).is_ok() {
-                file.write_all(data).ok();
+        if let Some(ref mut writer) = self.file_writer {
+            let offset = chunk_index as u64 * CHUNK_DATA_SIZE as u64;
+            if writer.seek(SeekFrom::Start(offset)).is_ok() {
+                writer.write_all(data).ok();
             }
         }
 
@@ -84,6 +94,13 @@ impl ReceiverState {
             self.bytes_received += data.len() as u64;
         }
         self.last_chunk_time = Instant::now();
+    }
+
+    /// Flush the writer before verification or finalization.
+    pub fn flush(&mut self) {
+        if let Some(ref mut writer) = self.file_writer {
+            writer.flush().ok();
+        }
     }
 
     /// Compute the list of missing chunk indices.
@@ -103,7 +120,10 @@ impl ReceiverState {
     }
 
     /// Verify the SHA-256 hash of the received file. Returns true if it matches.
-    pub fn verify_hash(&self) -> bool {
+    pub fn verify_hash(&mut self) -> bool {
+        // Flush and close the writer before reading back
+        self.file_writer.take();
+
         let mut hasher = Sha256::new();
         if let Ok(mut file) = File::open(&self.temp_path) {
             let mut buf = [0u8; 8192];
@@ -122,7 +142,10 @@ impl ReceiverState {
     }
 
     /// Move the temp file to its final destination.
-    pub fn finalize(&self) -> Option<String> {
+    pub fn finalize(&mut self) -> Option<String> {
+        // Ensure writer is closed before renaming
+        self.file_writer.take();
+
         let dest_dir = files_dir().join(&self.contact_id);
         fs::create_dir_all(&dest_dir).ok()?;
 
@@ -155,7 +178,8 @@ impl ReceiverState {
     }
 
     /// Clean up temp file on cancel/failure.
-    pub fn cleanup(&self) {
+    pub fn cleanup(&mut self) {
+        self.file_writer.take(); // close handle first
         fs::remove_file(&self.temp_path).ok();
     }
 }

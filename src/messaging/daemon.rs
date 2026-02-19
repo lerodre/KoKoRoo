@@ -260,8 +260,8 @@ impl MsgDaemon {
                 MsgCommand::YieldSocket => {
                     log_fmt!("[daemon] YieldSocket — releasing socket for voice call");
                     // Cancel all active file transfers
-                    for ((cid, tid), ft) in self.file_transfers.drain() {
-                        if let FileTransfer::Receiving(ref recv) = ft {
+                    for ((cid, tid), mut ft) in self.file_transfers.drain() {
+                        if let FileTransfer::Receiving(ref mut recv) = ft {
                             recv.cleanup();
                         }
                         self.event_tx.send(MsgEvent::FileTransferFailed {
@@ -620,7 +620,7 @@ impl MsgDaemon {
 
                 MsgCommand::CancelFileTransfer { contact_id, transfer_id } => {
                     let key = (contact_id.clone(), transfer_id);
-                    if let Some(ft) = self.file_transfers.remove(&key) {
+                    if let Some(mut ft) = self.file_transfers.remove(&key) {
                         // Send cancel to peer
                         if let Some(addr) = self.contact_addrs.get(&contact_id) {
                             if let Some(peer) = self.peers.get(addr) {
@@ -632,7 +632,7 @@ impl MsgDaemon {
                             }
                         }
                         // Clean up receiver temp file if applicable
-                        if let FileTransfer::Receiving(ref recv) = ft {
+                        if let FileTransfer::Receiving(ref mut recv) = ft {
                             recv.cleanup();
                         }
                         self.event_tx.send(MsgEvent::FileTransferFailed {
@@ -1213,7 +1213,8 @@ impl MsgDaemon {
                                         filetransfer::protocol::send_file_ack(peer, socket, transfer_id);
                                     }
                                     if let Some(ft) = self.file_transfers.remove(&key) {
-                                        if let FileTransfer::Receiving(recv) = ft {
+                                        if let FileTransfer::Receiving(mut recv) = ft {
+                                            recv.flush();
                                             if recv.verify_hash() {
                                                 if let Some(saved_path) = recv.finalize() {
                                                     self.event_tx.send(MsgEvent::FileTransferComplete {
@@ -1251,8 +1252,8 @@ impl MsgDaemon {
                             peer.touch();
                             let contact_id = peer.contact_id.clone();
                             let key = (contact_id.clone(), transfer_id);
-                            if let Some(ft) = self.file_transfers.remove(&key) {
-                                if let FileTransfer::Receiving(ref recv) = ft {
+                            if let Some(mut ft) = self.file_transfers.remove(&key) {
+                                if let FileTransfer::Receiving(ref mut recv) = ft {
                                     recv.cleanup();
                                 }
                                 self.event_tx.send(MsgEvent::FileTransferFailed {
@@ -1516,7 +1517,7 @@ impl MsgDaemon {
                             self.event_tx.send(MsgEvent::FileTransferProgress {
                                 contact_id: cid.clone(),
                                 transfer_id: *tid,
-                                bytes_transferred: sender.bytes_sent,
+                                bytes_transferred: sender.progress_bytes(),
                                 total_bytes: sender.file_size,
                             }).ok();
                         }
@@ -1570,8 +1571,8 @@ impl MsgDaemon {
                 }
             }
             for (cid, tid) in stale_transfers {
-                if let Some(ft) = self.file_transfers.remove(&(cid.clone(), tid)) {
-                    if let FileTransfer::Receiving(ref recv) = ft {
+                if let Some(mut ft) = self.file_transfers.remove(&(cid.clone(), tid)) {
+                    if let FileTransfer::Receiving(ref mut recv) = ft {
                         recv.cleanup();
                     }
                     self.event_tx.send(MsgEvent::FileTransferFailed {

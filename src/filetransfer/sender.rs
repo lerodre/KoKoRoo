@@ -24,12 +24,10 @@ pub struct SenderState {
     pub complete_sent: bool,
     /// Time of last FILE_COMPLETE sent (for retry).
     pub complete_sent_at: Instant,
-    /// Bytes confirmed delivered (updated on final ACK).
-    pub bytes_confirmed: u64,
-    /// Total bytes sent so far (for progress display).
-    pub bytes_sent: u64,
     /// Whether transfer is fully done (ACK received).
     pub done: bool,
+    /// Number of unique chunks the receiver has confirmed (total - missing from last NACK).
+    pub chunks_confirmed: u32,
     /// Cached file handle for sequential reads.
     file_reader: Option<BufReader<File>>,
     /// The chunk index that the cached reader is positioned at next.
@@ -56,11 +54,19 @@ impl SenderState {
             all_sent: false,
             complete_sent: false,
             complete_sent_at: now,
-            bytes_confirmed: 0,
-            bytes_sent: 0,
             done: false,
+            chunks_confirmed: 0,
             file_reader: None,
             reader_pos: 0,
+        }
+    }
+
+    /// Progress bytes: how much the receiver has confirmed.
+    pub fn progress_bytes(&self) -> u64 {
+        if self.done {
+            self.file_size
+        } else {
+            (self.chunks_confirmed as u64 * CHUNK_DATA_SIZE as u64).min(self.file_size)
         }
     }
 
@@ -97,9 +103,7 @@ impl SenderState {
             let idx = self.send_queue[self.queue_pos];
             self.queue_pos += 1;
             if let Some(data) = self.read_chunk(idx) {
-                let chunk_bytes = data.len() as u64;
                 result.push((idx, data));
-                self.bytes_sent += chunk_bytes;
             }
         }
         if self.queue_pos >= self.send_queue.len() {
@@ -110,6 +114,8 @@ impl SenderState {
 
     /// Handle a NACK: queue the missing chunks for retransmission.
     pub fn on_nack(&mut self, missing: Vec<u32>) {
+        // The receiver confirmed (total_chunks - missing) chunks
+        self.chunks_confirmed = self.total_chunks.saturating_sub(missing.len() as u32);
         self.send_queue = missing;
         self.queue_pos = 0;
         self.all_sent = false;
@@ -118,7 +124,7 @@ impl SenderState {
 
     /// Handle a final ACK: transfer is complete.
     pub fn on_ack(&mut self) {
-        self.bytes_confirmed = self.file_size;
+        self.chunks_confirmed = self.total_chunks;
         self.done = true;
     }
 
