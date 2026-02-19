@@ -131,7 +131,7 @@ pub struct VoiceEngine {
     screen_thread: Option<thread::JoinHandle<()>>,
     /// System audio capture: active flag, stream handle, and producer for ring buffer
     sys_audio_active: Arc<AtomicBool>,
-    sys_audio_stream: Option<cpal::Stream>,
+    sys_audio_stream: Option<crate::sysaudio::SysAudioStream>,
     sys_audio_producer: Arc<Mutex<Option<HeapProd<f32>>>>,
     /// Wayland portal session (kept alive for the entire call)
     #[cfg(target_os = "linux")]
@@ -153,6 +153,10 @@ pub struct VoiceEngine {
 impl Drop for VoiceEngine {
     fn drop(&mut self) {
         self.sys_audio_active.store(false, Ordering::Relaxed);
+        // Recover producer before dropping stream (not strictly needed in drop, but clean)
+        if let Some(ref stream) = self.sys_audio_stream {
+            let _ = stream.take_producer();
+        }
         self.sys_audio_stream = None;
         self.screen_active.store(false, Ordering::Relaxed);
         if let Some(t) = self.screen_thread.take() {
@@ -178,20 +182,26 @@ impl VoiceEngine {
             if let Some(producer) = self.sys_audio_producer.lock().unwrap().take() {
                 self.sys_audio_active.store(true, Ordering::Relaxed);
                 let dev = if device_name.is_empty() { None } else { Some(device_name.as_str()) };
-                self.sys_audio_stream = crate::sysaudio::start_system_audio_capture(
+                let (stream, leftover) = crate::sysaudio::start_system_audio_capture(
                     producer,
                     self.sys_audio_active.clone(),
                     dev,
                 );
+                self.sys_audio_stream = stream;
                 if self.sys_audio_stream.is_none() {
                     log_fmt!("[voice] WARNING: system audio capture failed to start");
                     self.sys_audio_active.store(false, Ordering::Relaxed);
+                    // Restore producer for future retries
+                    if let Some(p) = leftover {
+                        *self.sys_audio_producer.lock().unwrap() = Some(p);
+                    }
                 }
             } else {
                 log_fmt!("[voice] WARNING: sys_audio_producer already taken");
             }
         }
 
+        log_fmt!("[voice] screen share: preparing socket/session...");
         let socket = self.send_socket.try_clone().unwrap();
         let session = {
             let sess = self.session.lock().unwrap();
@@ -200,6 +210,7 @@ impl VoiceEngine {
         let peer_addr: std::net::SocketAddr = self.peer_addr.parse().unwrap();
         let active = self.screen_active.clone();
         let running = self.running.clone();
+        log_fmt!("[voice] screen share: spawning capture thread...");
 
         // Determine capture source: Wayland PipeWire or scrap (X11/Windows)
         #[cfg(target_os = "linux")]
@@ -228,8 +239,23 @@ impl VoiceEngine {
         let source = crate::screen::CaptureSource::Scrap { display_index };
 
         self.screen_thread = Some(thread::spawn(move || {
-            crate::screen::capture_loop(socket, session, peer_addr, active, running, quality, source);
-            log_fmt!("[voice] screen capture thread exited");
+            log_fmt!("[voice] screen capture thread starting...");
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::screen::capture_loop(socket, session, peer_addr, active.clone(), running, quality, source);
+            })) {
+                Ok(()) => log_fmt!("[voice] screen capture thread exited normally"),
+                Err(e) => {
+                    let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = e.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "unknown panic".to_string()
+                    };
+                    log_fmt!("[voice] screen capture thread PANICKED: {}", msg);
+                    active.store(false, Ordering::Relaxed);
+                }
+            }
         }));
     }
 
@@ -271,8 +297,14 @@ impl VoiceEngine {
     pub fn stop_screen_share(&mut self) {
         log_fmt!("[voice] stop_screen_share");
         self.screen_active.store(false, Ordering::Relaxed);
-        // Stop system audio capture
+        // Stop system audio capture — recover producer for reuse
         self.sys_audio_active.store(false, Ordering::Relaxed);
+        if let Some(ref stream) = self.sys_audio_stream {
+            if let Some(p) = stream.take_producer() {
+                log_fmt!("[voice] recovered sys_audio producer for reuse");
+                *self.sys_audio_producer.lock().unwrap() = Some(p);
+            }
+        }
         self.sys_audio_stream = None;
         if let Some(t) = self.screen_thread.take() {
             let _ = t.join();
@@ -429,15 +461,22 @@ pub fn start_engine(
         .map(|c| c.channels()).unwrap_or(1);
     log_fmt!("[voice] audio: input={}ch, output={}ch", input_channels, output_channels);
 
+    // On macOS, CoreAudio may not respect Fixed buffer sizes and adds its own
+    // internal buffering. Using Default lets it pick optimal values for low latency.
+    #[cfg(target_os = "macos")]
+    let buf_size = cpal::BufferSize::Default;
+    #[cfg(not(target_os = "macos"))]
+    let buf_size = cpal::BufferSize::Fixed(FRAME_SIZE as u32);
+
     let input_config = cpal::StreamConfig {
         channels: input_channels,
         sample_rate: cpal::SampleRate(48000),
-        buffer_size: cpal::BufferSize::Fixed(FRAME_SIZE as u32),
+        buffer_size: buf_size.clone(),
     };
     let output_config = cpal::StreamConfig {
         channels: output_channels,
         sample_rate: cpal::SampleRate(48000),
-        buffer_size: cpal::BufferSize::Fixed(FRAME_SIZE as u32),
+        buffer_size: buf_size,
     };
 
     // ── UDP Socket ──
@@ -573,7 +612,9 @@ pub fn start_engine(
     let mic_ring = HeapRb::<f32>::new(48000);
     let (mut mic_producer, mut mic_consumer) = mic_ring.split();
 
-    let spk_ring = HeapRb::<f32>::new(48000);
+    // Speaker ring: keep small to minimize audio-video desync.
+    // 48000 = 1 second was too much; 9600 = 200ms max audio delay.
+    let spk_ring = HeapRb::<f32>::new(9600);
     let (mut spk_producer, mut spk_consumer) = spk_ring.split();
 
     // System audio ring buffer (for desktop audio sharing)
@@ -632,7 +673,7 @@ pub fn start_engine(
                     };
                     collected += 1;
                 } else {
-                    thread::sleep(std::time::Duration::from_micros(200));
+                    thread::sleep(std::time::Duration::from_millis(1));
                     if !running_s.load(Ordering::Relaxed) { break; }
                     // Also check for chat while waiting for audio
                     while let Ok(text) = outgoing_rx.try_recv() {
@@ -819,7 +860,9 @@ pub fn start_engine(
                         }
                     }
                 }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(std::time::Duration::from_millis(1));
+                }
                 Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {}
                 Err(_) => {}
             }
