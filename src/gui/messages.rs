@@ -235,7 +235,7 @@ impl HostelApp {
         }
 
         // Chat history
-        let available = ui.available_height() - 40.0;
+        let available = ui.available_height() - 46.0;
         let scroll_height = available.max(80.0);
 
         // Collect file transfer actions to process after the borrow ends
@@ -323,6 +323,7 @@ impl HostelApp {
 
         // Input bar
         ui.separator();
+        ui.add_space(2.0);
         let mut send = false;
         let mut pick_file = false;
         ui.horizontal(|ui| {
@@ -352,6 +353,7 @@ impl HostelApp {
                 resp.request_focus();
             }
         });
+        ui.add_space(4.0);
 
         // Open file picker dialog (runs after the ui borrow ends)
         // rfd on Linux uses xdg-desktop-portal via zbus which needs a Tokio runtime.
