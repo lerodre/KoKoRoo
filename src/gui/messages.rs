@@ -10,23 +10,33 @@ use super::HostelApp;
 impl HostelApp {
     pub(crate) fn draw_messages_tab(&mut self, ui: &mut egui::Ui) {
         let available = ui.available_rect_before_wrap();
+        let sep_w = 1.0;
         let list_w = 165.0_f32.min(available.width() * 0.28);
-        let chat_w = (available.width() - list_w - 4.0).max(100.0);
+        let chat_w = (available.width() - list_w - sep_w - 4.0).max(100.0);
 
         let list_rect = egui::Rect::from_min_size(
             available.min,
             egui::vec2(list_w, available.height()),
         );
         let chat_rect = egui::Rect::from_min_size(
-            egui::pos2(available.min.x + list_w + 4.0, available.min.y),
+            egui::pos2(available.min.x + list_w + sep_w + 4.0, available.min.y),
             egui::vec2(chat_w, available.height()),
         );
 
-        // Left panel: contact list
+        // Left panel: contact list with sidebar background
         let mut open_chat: Option<String> = None;
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(list_rect), |ui| {
+            ui.painter().rect_filled(list_rect, 0.0, self.settings.theme.sidebar_bg());
             self.draw_message_list(ui, &mut open_chat);
         });
+
+        // Vertical separator line between panels
+        let sep_x = available.min.x + list_w + 1.0;
+        ui.painter().vline(
+            sep_x,
+            available.y_range(),
+            egui::Stroke::new(sep_w, self.settings.theme.separator()),
+        );
 
         // Right panel: conversation
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(chat_rect), |ui| {
