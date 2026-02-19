@@ -350,40 +350,49 @@ impl HostelApp {
             }
         }
 
-        // Input bar (1.5× height)
-        ui.separator();
-        ui.add_space(2.0);
+        // Input bar (1.5× height) with distinct background
         let mut send = false;
         let mut pick_file = false;
         let bar_h = 38.0;
-        ui.horizontal(|ui| {
-            // File attach button
-            let attach_btn = egui::Button::new(
-                egui::RichText::new("+").size(18.0).strong(),
-            )
-            .min_size(egui::vec2(bar_h, bar_h));
-            let attach_resp = ui.add(attach_btn);
-            if attach_resp.clicked() {
-                pick_file = true;
-            }
-            attach_resp.on_hover_text("Send file");
+        let bar_frame = egui::Frame::none()
+            .fill(self.settings.theme.sidebar_bg())
+            .inner_margin(egui::Margin::symmetric(6.0, 6.0))
+            .rounding(4.0);
+        bar_frame.show(ui, |ui| {
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                // File attach button
+                let attach_btn = egui::Button::new(
+                    egui::RichText::new("+").size(18.0).strong(),
+                )
+                .min_size(egui::vec2(bar_h, bar_h));
+                let attach_resp = ui.add(attach_btn);
+                if attach_resp.clicked() {
+                    pick_file = true;
+                }
+                attach_resp.on_hover_text("Send file");
 
-            let resp = ui.add_sized(
-                egui::vec2(ui.available_width() - 75.0, bar_h),
-                egui::TextEdit::singleline(&mut self.msg_chat_input)
-                    .hint_text("Type a message..."),
-            );
-            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                send = true;
-            }
-            if ui.add(egui::Button::new("Send").min_size(egui::vec2(60.0, bar_h))).clicked() {
-                send = true;
-            }
-            if send {
-                resp.request_focus();
-            }
+                // TextEdit with always-visible outline and distinct bg
+                let outline = self.settings.theme.text_muted();
+                ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::new(1.0, outline);
+                ui.visuals_mut().widgets.inactive.bg_fill = self.settings.theme.panel_bg();
+
+                let resp = ui.add_sized(
+                    egui::vec2(ui.available_width() - 75.0, bar_h),
+                    egui::TextEdit::singleline(&mut self.msg_chat_input)
+                        .hint_text("Type a message...")
+                        .margin(egui::vec2(8.0, 10.0)),
+                );
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    send = true;
+                }
+                if ui.add(egui::Button::new("Send").min_size(egui::vec2(60.0, bar_h))).clicked() {
+                    send = true;
+                }
+                if send {
+                    resp.request_focus();
+                }
+            });
         });
-        ui.add_space(4.0);
 
         // Open file picker dialog (runs after the ui borrow ends)
         // rfd on Linux uses xdg-desktop-portal via zbus which needs a Tokio runtime.
