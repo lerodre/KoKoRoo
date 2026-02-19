@@ -999,8 +999,11 @@ impl eframe::App for HostelApp {
                         if self.msg_active_chat.as_deref() != Some(&contact_id) {
                             *self.msg_unread.entry(contact_id).or_insert(0) += 1;
                         }
-                        // Play notification sound if not in a call (3s cooldown)
-                        if !matches!(self.screen, Screen::InCall | Screen::Connecting | Screen::KeyWarning) {
+                        // Play notification sound if not in a call and not viewing messages (3s cooldown)
+                        let in_messages = self.active_tab == SidebarTab::Messages;
+                        if !matches!(self.screen, Screen::InCall | Screen::Connecting | Screen::KeyWarning)
+                            && !in_messages
+                        {
                             let should_play = self.last_notification_sound
                                 .map_or(true, |t| t.elapsed().as_secs_f32() > 3.0);
                             if should_play {

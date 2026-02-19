@@ -32,25 +32,18 @@ impl HostelApp {
 
             let icon_h = 30.0; // icon height in sidebar buttons
 
-            let tabs: Vec<(SidebarTab, String)> = vec![
-                (SidebarTab::Profile, "Profile".to_string()),
-                (SidebarTab::Contacts, "Contacts".to_string()),
-                (SidebarTab::Requests, if incoming_count > 0 {
-                    format!("Requests ({})", incoming_count)
-                } else {
-                    "Requests".to_string()
-                }),
-                (SidebarTab::Messages, if total_unread > 0 {
-                    format!("Messages ({})", total_unread)
-                } else {
-                    "Messages".to_string()
-                }),
-                (SidebarTab::Call, "Call".to_string()),
-                (SidebarTab::Settings, "Settings".to_string()),
-                (SidebarTab::Appearance, "Colors".to_string()),
+            let tabs: Vec<(SidebarTab, String, u32)> = vec![
+                (SidebarTab::Profile, "Profile".to_string(), 0),
+                (SidebarTab::Contacts, "Contacts".to_string(), 0),
+                (SidebarTab::Requests, "Requests".to_string(), incoming_count as u32),
+                (SidebarTab::Messages, "Messages".to_string(), total_unread),
+                (SidebarTab::Call, "Call".to_string(), 0),
+                (SidebarTab::Settings, "Settings".to_string(), 0),
+                (SidebarTab::Appearance, "Colors".to_string(), 0),
             ];
-            for (tab, label) in &tabs {
+            for (tab, label, badge_count) in &tabs {
                 let tab = *tab;
+                let badge_count = *badge_count;
                 let is_selected = self.active_tab == tab;
                 let enabled = !in_call || tab == SidebarTab::Call || tab == SidebarTab::Appearance;
 
@@ -82,6 +75,30 @@ impl HostelApp {
                         .min_size(egui::vec2(116.0, 38.0));
                     ui.add_enabled(enabled, btn)
                 };
+
+                // Draw badge bubble for unread counts
+                if badge_count > 0 {
+                    let badge_text = format!("{}", badge_count);
+                    let font = egui::FontId::proportional(10.0);
+                    let text_color = egui::Color32::WHITE;
+                    let bg_color = self.settings.theme.btn_negative();
+                    let painter = ui.painter();
+
+                    // Position badge at top-right of button
+                    let badge_center = egui::pos2(
+                        resp.rect.right() - 10.0,
+                        resp.rect.top() + 10.0,
+                    );
+                    let text_galley = painter.layout_no_wrap(badge_text, font, text_color);
+                    let text_w = text_galley.size().x;
+                    let radius = (text_w / 2.0 + 4.0).max(8.0);
+                    painter.circle_filled(badge_center, radius, bg_color);
+                    painter.galley(
+                        badge_center - egui::vec2(text_galley.size().x / 2.0, text_galley.size().y / 2.0),
+                        text_galley,
+                        text_color,
+                    );
+                }
 
                 if resp.clicked() {
                     self.active_tab = tab;
