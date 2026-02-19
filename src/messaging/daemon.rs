@@ -681,6 +681,8 @@ impl MsgDaemon {
             let data = &buf[..len];
             let pkt_type = data[0];
 
+            log_fmt!("[daemon] recv pkt type=0x{:02x} len={} from={}", pkt_type, len, from);
+
             match pkt_type {
                 PKT_MSG_HELLO => {
                     if let Some(peer) = self.outgoing_requests.get_mut(&from) {
@@ -707,18 +709,36 @@ impl MsgDaemon {
                         // Send REQUEST (not IDENTITY)
                         protocol::send_request(peer, socket, &self.identity, &self.nickname);
                     } else if let Some(peer) = self.peers.get_mut(&from) {
-                        if peer.is_connected() {
-                            // Peer restarted — they sent a fresh HELLO but we still
-                            // have a stale Connected session. Tear it down and accept
-                            // the new handshake as an incoming connection.
-                            log_fmt!("[daemon] HELLO from already-connected {} — peer restarted, resetting session", from);
+                        if matches!(peer.state, super::session::PeerState::AwaitingHello { .. }) {
+                            // Pending session (AwaitingHello) — this is a hello response
+                            log_fmt!("[daemon] MSG_HELLO response from {} — completing handshake", from);
+                            let ok = protocol::handle_hello_response(
+                                data, peer, socket, &self.identity, &self.nickname,
+                            );
+                            log_fmt!("[daemon]   handshake result: {} (state now: {})",
+                                ok,
+                                match &peer.state {
+                                    super::session::PeerState::AwaitingHello { .. } => "AwaitingHello",
+                                    super::session::PeerState::AwaitingIdentity => "AwaitingIdentity",
+                                    super::session::PeerState::Connected => "Connected",
+                                });
+                        } else {
+                            // Connected or AwaitingIdentity — peer either restarted
+                            // or we completed our handshake but they never got our response
+                            // (simultaneous connection race). Reset and accept fresh.
                             let old_cid = peer.contact_id.clone();
-                            self.event_tx.send(MsgEvent::PeerStatus {
-                                contact_id: old_cid.clone(),
-                                online: false,
-                            }).ok();
+                            let state_name = if peer.is_connected() { "Connected" } else { "AwaitingIdentity" };
+                            log_fmt!("[daemon] MSG_HELLO from {} (state={}) — resetting, accepting as incoming", from, state_name);
+                            if peer.is_connected() {
+                                self.event_tx.send(MsgEvent::PeerStatus {
+                                    contact_id: old_cid.clone(),
+                                    online: false,
+                                }).ok();
+                            }
                             self.peers.remove(&from);
-                            self.contact_addrs.remove(&old_cid);
+                            if !old_cid.is_empty() {
+                                self.contact_addrs.remove(&old_cid);
+                            }
                             self.hello_retries.remove(&from);
                             // Handle as new incoming connection
                             let ip_str = from.ip().to_string();
@@ -726,34 +746,38 @@ impl MsgDaemon {
                                 if let Some(session) = protocol::handle_incoming_hello(
                                     data, from, socket, &self.identity, &self.nickname,
                                 ) {
+                                    log_fmt!("[daemon]   re-handshake OK (AwaitingIdentity)");
                                     self.peers.insert(from, session);
                                 }
                             }
-                        } else {
-                            // Pending session (AwaitingHello) — this is a hello response
-                            protocol::handle_hello_response(
-                                data, peer, socket, &self.identity, &self.nickname,
-                            );
                         }
                     } else {
                         // Incoming connection from unknown peer
                         // Check if IP is banned before accepting
                         let ip_str = from.ip().to_string();
                         if self.settings.is_ip_banned(&ip_str) {
+                            log_fmt!("[daemon] MSG_HELLO from {} — BLOCKED (IP banned)", from);
                             continue;
                         }
+                        log_fmt!("[daemon] MSG_HELLO from unknown {} — accepting incoming connection", from);
                         if let Some(session) = protocol::handle_incoming_hello(
                             data, from, socket, &self.identity, &self.nickname,
                         ) {
+                            log_fmt!("[daemon]   incoming session created (AwaitingIdentity)");
                             self.peers.insert(from, session);
+                        } else {
+                            log_fmt!("[daemon]   incoming session FAILED to create");
                         }
                     }
                 }
 
                 PKT_MSG_IDENTITY => {
+                    log_fmt!("[daemon] MSG_IDENTITY from {}", from);
                     if let Some(peer) = self.peers.get_mut(&from) {
-                        if protocol::handle_identity(data, peer, &self.identity).is_ok() {
+                        match protocol::handle_identity(data, peer, &self.identity) {
+                            Ok(()) => {
                             let contact_id = peer.contact_id.clone();
+                            log_fmt!("[daemon]   identity OK! contact_id={} nick='{}' — peer is ONLINE", contact_id, peer.peer_nickname);
                             self.contact_addrs.insert(contact_id.clone(), from);
 
                             // Notify GUI peer is online
@@ -773,7 +797,13 @@ impl MsgDaemon {
                             self.retry_state.insert(contact_id, (Instant::now(), 0));
                             // Send our presence to the newly connected peer
                             protocol::send_presence(peer, socket, self.our_presence);
+                            }
+                            Err(e) => {
+                                log_fmt!("[daemon]   identity FAILED: {}", e);
+                            }
                         }
+                    } else {
+                        log_fmt!("[daemon]   no peer session for {} — ignoring IDENTITY", from);
                     }
                 }
 
@@ -1508,6 +1538,17 @@ impl MsgDaemon {
             .map(|(addr, _)| *addr)
             .collect();
 
+        for addr in &timed_out {
+            if let Some(peer) = self.peers.get(addr) {
+                let state_name = match &peer.state {
+                    super::session::PeerState::AwaitingHello { .. } => "AwaitingHello",
+                    super::session::PeerState::AwaitingIdentity => "AwaitingIdentity",
+                    super::session::PeerState::Connected => "Connected",
+                };
+                log_fmt!("[daemon] peer timeout: {} (state={}, cid={})", addr, state_name, peer.contact_id);
+            }
+        }
+
         for addr in timed_out {
             if let Some(peer) = self.peers.remove(&addr) {
                 if peer.is_connected() {
@@ -1529,6 +1570,7 @@ impl MsgDaemon {
                     if sent_at.elapsed() > HELLO_RETRY_INTERVAL {
                         let retries = self.hello_retries.get(addr).copied().unwrap_or(0);
                         if retries >= HELLO_MAX_RETRIES {
+                            log_fmt!("[daemon] HELLO max retries reached for {} (cid={}) — giving up", addr, peer.contact_id);
                             to_remove.push(*addr);
                         } else {
                             let hello = crate::crypto::build_msg_hello(our_pubkey);
