@@ -807,6 +807,19 @@ impl MsgDaemon {
                             }
                             self.contact_addrs.insert(contact_id.clone(), from);
 
+                            // Update last_address on disk so reconnect uses the current IP
+                            if let Some(mut contact) = identity::load_contact(&peer.peer_pubkey) {
+                                let new_ip = from.ip().to_string();
+                                let new_port = from.port().to_string();
+                                if contact.last_address != new_ip || contact.last_port != new_port {
+                                    log_fmt!("[daemon]   updating last_address: {} -> {}", contact.last_address, new_ip);
+                                    contact.last_address = new_ip;
+                                    contact.last_port = new_port;
+                                    contact.last_seen = identity::now_timestamp();
+                                    identity::save_contact(&contact);
+                                }
+                            }
+
                             // Notify GUI peer is online
                             self.event_tx.send(MsgEvent::PeerStatus {
                                 contact_id: contact_id.clone(),
