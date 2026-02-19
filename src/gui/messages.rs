@@ -331,6 +331,10 @@ impl HostelApp {
                     }
                 }
                 FileAction::Cancel(cid, tid) => {
+                    if let Some(history) = self.msg_chat_histories.get_mut(&cid) {
+                        history.update_file_status(tid, FileTransferStatus::Cancelled, None);
+                    }
+                    self.file_transfer_progress.remove(&(cid.clone(), tid));
                     if let Some(tx) = &self.msg_cmd_tx {
                         tx.send(MsgCommand::CancelFileTransfer {
                             contact_id: cid,

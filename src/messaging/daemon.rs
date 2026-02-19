@@ -632,6 +632,11 @@ impl MsgDaemon {
                         if let FileTransfer::Receiving(ref recv) = ft {
                             recv.cleanup();
                         }
+                        self.event_tx.send(MsgEvent::FileTransferFailed {
+                            contact_id,
+                            transfer_id,
+                            reason: "Cancelled".into(),
+                        }).ok();
                     }
                 }
 
@@ -1525,6 +1530,36 @@ impl MsgDaemon {
                     transfer_id: tid,
                     reason: "Offer timed out".into(),
                 }).ok();
+            }
+
+            // Timeout stale transfers (no progress for 30 seconds)
+            let mut stale_transfers = Vec::new();
+            for ((cid, tid), ft) in &self.file_transfers {
+                let is_stale = match ft {
+                    FileTransfer::Sending(sender) => {
+                        sender.last_ack_time.elapsed().as_secs() >= 30 && !sender.is_fully_acked()
+                    }
+                    FileTransfer::Receiving(recv) => {
+                        recv.last_chunk_time.elapsed().as_secs() >= 30 && !recv.is_complete()
+                    }
+                    FileTransfer::IncomingWaiting { .. } => false,
+                    _ => false,
+                };
+                if is_stale {
+                    stale_transfers.push((cid.clone(), *tid));
+                }
+            }
+            for (cid, tid) in stale_transfers {
+                if let Some(ft) = self.file_transfers.remove(&(cid.clone(), tid)) {
+                    if let FileTransfer::Receiving(ref recv) = ft {
+                        recv.cleanup();
+                    }
+                    self.event_tx.send(MsgEvent::FileTransferFailed {
+                        contact_id: cid,
+                        transfer_id: tid,
+                        reason: "Transfer timed out".into(),
+                    }).ok();
+                }
             }
         }
 
