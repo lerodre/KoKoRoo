@@ -775,7 +775,8 @@ fn capture_loop_webcam(
     let res = camera.resolution();
     let native_w = res.width() as u32;
     let native_h = res.height() as u32;
-    log_fmt!("[screen] camera resolution: {}x{}", native_w, native_h);
+    let cam_fmt = camera.camera_format();
+    log_fmt!("[screen] camera resolution: {}x{}, format: {:?}", native_w, native_h, cam_fmt);
 
     // Cap encoder resolution to camera native resolution
     let enc_w = quality.width().min(native_w);
@@ -806,7 +807,9 @@ fn capture_loop_webcam(
         let decoded = match frame.decode_image::<RgbFormat>() {
             Ok(img) => img,
             Err(e) => {
-                log_fmt!("[screen] webcam decode error: {}", e);
+                if frame_count < 3 {
+                    log_fmt!("[screen] webcam decode error: {}", e);
+                }
                 std::thread::sleep(Duration::from_millis(10));
                 continue;
             }
@@ -814,6 +817,20 @@ fn capture_loop_webcam(
         let w = decoded.width() as usize;
         let h = decoded.height() as usize;
         let rgb_data = decoded.into_raw();
+
+        if frame_count < 3 {
+            log_fmt!("[screen] webcam frame: {}x{}, rgb_data.len={}, expected={}", w, h, rgb_data.len(), w * h * 3);
+        }
+
+        // Validate RGB data size
+        let expected_rgb = w * h * 3;
+        if rgb_data.len() < expected_rgb {
+            if frame_count < 5 {
+                log_fmt!("[screen] webcam: RGB data too short ({} < {}), skipping", rgb_data.len(), expected_rgb);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+            continue;
+        }
 
         // Convert RGB → BGRA
         let mut bgra = vec![0u8; w * h * 4];
@@ -933,10 +950,10 @@ fn capture_loop_scrap(
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 wouldblock_count += 1;
-                if wouldblock_count % 5000 == 0 {
+                if wouldblock_count % 1000 == 0 {
                     log_fmt!("[screen] WouldBlock x{} (still waiting for frame)", wouldblock_count);
                 }
-                std::thread::sleep(Duration::from_millis(1));
+                std::thread::sleep(Duration::from_millis(5));
                 continue;
             }
             Err(e) => {
