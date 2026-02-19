@@ -18,6 +18,7 @@ mod gui;
 mod identity;
 pub mod theme;
 mod messaging;
+mod filetransfer;
 mod screen;
 mod sysaudio;
 mod sysfirewall;

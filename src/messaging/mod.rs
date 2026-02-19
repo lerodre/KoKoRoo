@@ -38,6 +38,14 @@ pub enum MsgCommand {
     UpdatePresence { status: PresenceStatus },
     /// Ask connected peers for a contact's current address (IP relay).
     QueryPeer { target_pubkey: [u8; 32] },
+    /// Send a file offer to a contact.
+    SendFileOffer { contact_id: String, peer_addr: SocketAddr, peer_pubkey: [u8; 32], file_path: String },
+    /// Accept an incoming file transfer.
+    AcceptFileTransfer { contact_id: String, transfer_id: u32 },
+    /// Reject an incoming file transfer.
+    RejectFileTransfer { contact_id: String, transfer_id: u32 },
+    /// Cancel an active file transfer.
+    CancelFileTransfer { contact_id: String, transfer_id: u32 },
     /// Voice call starting — daemon must release the UDP socket.
     YieldSocket,
     /// Voice call ended — daemon can reclaim the UDP socket.
@@ -64,4 +72,12 @@ pub enum MsgEvent {
     PeerAddressUpdate { contact_id: String, ip: String, port: String },
     /// A peer's presence status changed (Online/Away).
     PresenceUpdate { contact_id: String, status: PresenceStatus },
+    /// An incoming file offer from a peer.
+    IncomingFileOffer { contact_id: String, transfer_id: u32, filename: String, file_size: u64 },
+    /// Progress update for an active file transfer.
+    FileTransferProgress { contact_id: String, transfer_id: u32, bytes_transferred: u64, total_bytes: u64 },
+    /// A file transfer completed successfully.
+    FileTransferComplete { contact_id: String, transfer_id: u32, saved_path: String },
+    /// A file transfer failed or was cancelled.
+    FileTransferFailed { contact_id: String, transfer_id: u32, reason: String },
 }

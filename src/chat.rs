@@ -5,12 +5,37 @@ use std::path::PathBuf;
 
 use crate::crypto;
 
+/// Status of a file transfer attached to a chat message.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum FileTransferStatus {
+    Offered,
+    Accepted,
+    Rejected,
+    Completed,
+    Cancelled,
+    Failed(String),
+}
+
+/// Metadata for a file transfer attached to a chat message.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct FileTransferInfo {
+    pub filename: String,
+    pub file_size: u64,
+    pub transfer_id: u32,
+    pub status: FileTransferStatus,
+    /// Final saved path (set on completion).
+    #[serde(default)]
+    pub saved_path: Option<String>,
+}
+
 /// A single chat message.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ChatMessage {
     pub from_me: bool,
     pub text: String,
     pub timestamp: u64,
+    #[serde(default)]
+    pub file_transfer: Option<FileTransferInfo>,
 }
 
 /// Chat history for one contact.
@@ -71,6 +96,7 @@ impl ChatHistory {
             from_me,
             text,
             timestamp,
+            file_transfer: None,
         });
 
         self.save();
@@ -86,6 +112,45 @@ impl ChatHistory {
 
         let path = dir.join(format!("{}.enc", self.contact_id));
         fs::write(path, encrypted).expect("Failed to write chat history");
+    }
+
+    /// Add a file transfer message and save to disk.
+    pub fn add_file_message(&mut self, from_me: bool, info: FileTransferInfo) {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let text = if from_me {
+            format!("Sent file: {} ({})", info.filename, crate::filetransfer::format_size(info.file_size))
+        } else {
+            format!("File: {} ({})", info.filename, crate::filetransfer::format_size(info.file_size))
+        };
+
+        self.messages.push(ChatMessage {
+            from_me,
+            text,
+            timestamp,
+            file_transfer: Some(info),
+        });
+
+        self.save();
+    }
+
+    /// Update the status of a file transfer message by transfer_id.
+    pub fn update_file_status(&mut self, transfer_id: u32, status: FileTransferStatus, saved_path: Option<String>) {
+        for msg in self.messages.iter_mut().rev() {
+            if let Some(ref mut ft) = msg.file_transfer {
+                if ft.transfer_id == transfer_id {
+                    ft.status = status;
+                    if saved_path.is_some() {
+                        ft.saved_path = saved_path;
+                    }
+                    break;
+                }
+            }
+        }
+        self.save();
     }
 
     /// Format a timestamp as HH:MM.

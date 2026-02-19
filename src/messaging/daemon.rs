@@ -9,8 +9,13 @@ use crate::crypto::{
     PKT_MSG_REQUEST, PKT_MSG_REQUEST_ACK,
     PKT_MSG_IP_ANNOUNCE, PKT_MSG_PEER_QUERY, PKT_MSG_PEER_RESPONSE,
     PKT_MSG_PRESENCE,
+    PKT_MSG_FILE_OFFER, PKT_MSG_FILE_ACCEPT, PKT_MSG_FILE_REJECT,
+    PKT_MSG_FILE_CHUNK, PKT_MSG_FILE_ACK, PKT_MSG_FILE_COMPLETE, PKT_MSG_FILE_CANCEL,
 };
 use crate::identity::{self, Identity, Settings};
+use crate::filetransfer;
+use crate::filetransfer::sender::SenderState;
+use crate::filetransfer::receiver::ReceiverState;
 
 use super::outbox::Outbox;
 use super::protocol;
@@ -39,6 +44,30 @@ const RETRY_BACKOFFS: &[Duration] = &[
     Duration::from_secs(300),
     Duration::from_secs(900),
 ];
+
+/// Active file transfer (either sending or receiving).
+pub enum FileTransfer {
+    Sending(SenderState),
+    Receiving(ReceiverState),
+    /// Waiting for the peer to accept/reject our offer.
+    OfferedWaiting {
+        transfer_id: u32,
+        contact_id: String,
+        file_path: String,
+        file_size: u64,
+        sha256: [u8; 32],
+        filename: String,
+        offered_at: Instant,
+    },
+    /// Waiting for our user to accept/reject an incoming offer.
+    IncomingWaiting {
+        transfer_id: u32,
+        contact_id: String,
+        filename: String,
+        file_size: u64,
+        sha256: [u8; 32],
+    },
+}
 
 pub struct MsgDaemon {
     socket: Option<UdpSocket>,
@@ -91,6 +120,12 @@ pub struct MsgDaemon {
     last_beacon: Instant,
     /// All known contacts (for periodic reconnect). Populated by ConnectAll.
     all_contacts: Vec<(String, SocketAddr, [u8; 32])>,
+    /// Active file transfers keyed by (contact_id, transfer_id).
+    file_transfers: HashMap<(String, u32), FileTransfer>,
+    /// Counter for generating unique transfer IDs.
+    next_transfer_id: u32,
+    /// Last time progress events were emitted.
+    last_progress_emit: Instant,
 }
 
 impl MsgDaemon {
@@ -130,6 +165,9 @@ impl MsgDaemon {
             our_presence: super::PresenceStatus::Online,
             last_beacon: Instant::now(),
             all_contacts: Vec::new(),
+            file_transfers: HashMap::new(),
+            next_transfer_id: 1,
+            last_progress_emit: Instant::now(),
         }
     }
 
@@ -218,6 +256,17 @@ impl MsgDaemon {
 
                 MsgCommand::YieldSocket => {
                     log_fmt!("[daemon] YieldSocket — releasing socket for voice call");
+                    // Cancel all active file transfers
+                    for ((cid, tid), ft) in self.file_transfers.drain() {
+                        if let FileTransfer::Receiving(ref recv) = ft {
+                            recv.cleanup();
+                        }
+                        self.event_tx.send(MsgEvent::FileTransferFailed {
+                            contact_id: cid,
+                            transfer_id: tid,
+                            reason: "Voice call started".into(),
+                        }).ok();
+                    }
                     // Save connected peer info for reconnection after call
                     self.saved_peers.clear();
                     for peer in self.peers.values() {
@@ -449,6 +498,139 @@ impl MsgDaemon {
                             if peer.is_connected() {
                                 protocol::send_peer_query(peer, socket, &target_pubkey);
                             }
+                        }
+                    }
+                }
+
+                MsgCommand::SendFileOffer { contact_id, peer_addr, peer_pubkey, file_path } => {
+                    // Compute SHA-256 and file size
+                    let metadata = match std::fs::metadata(&file_path) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            self.event_tx.send(MsgEvent::FileTransferFailed {
+                                contact_id: contact_id.clone(),
+                                transfer_id: 0,
+                                reason: format!("Cannot read file: {e}"),
+                            }).ok();
+                            continue;
+                        }
+                    };
+                    let file_size = metadata.len();
+                    let filename = std::path::Path::new(&file_path)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "file".to_string());
+
+                    // Compute SHA-256
+                    let sha256 = match compute_file_sha256(&file_path) {
+                        Some(h) => h,
+                        None => {
+                            self.event_tx.send(MsgEvent::FileTransferFailed {
+                                contact_id: contact_id.clone(),
+                                transfer_id: 0,
+                                reason: "Failed to hash file".into(),
+                            }).ok();
+                            continue;
+                        }
+                    };
+
+                    let transfer_id = self.next_transfer_id;
+                    self.next_transfer_id += 1;
+
+                    // Ensure connected
+                    if let Some(addr) = self.contact_addrs.get(&contact_id) {
+                        if let Some(peer) = self.peers.get(addr) {
+                            if peer.is_connected() {
+                                if let Some(ref socket) = self.socket {
+                                    filetransfer::protocol::send_file_offer(
+                                        peer, socket, transfer_id, file_size, &sha256, &filename,
+                                    );
+                                }
+                            }
+                        }
+                    } else {
+                        // Try to connect first
+                        if let Some(ref socket) = self.socket {
+                            if let Some(session) = protocol::initiate_handshake(
+                                socket, &contact_id, peer_addr, peer_pubkey,
+                            ) {
+                                self.contact_addrs.insert(contact_id.clone(), peer_addr);
+                                self.hello_retries.insert(peer_addr, 0);
+                                self.peers.insert(peer_addr, session);
+                            }
+                        }
+                    }
+
+                    // Store as waiting for accept
+                    self.file_transfers.insert(
+                        (contact_id.clone(), transfer_id),
+                        FileTransfer::OfferedWaiting {
+                            transfer_id,
+                            contact_id: contact_id.clone(),
+                            file_path,
+                            file_size,
+                            sha256,
+                            filename,
+                            offered_at: Instant::now(),
+                        },
+                    );
+                }
+
+                MsgCommand::AcceptFileTransfer { contact_id, transfer_id } => {
+                    let key = (contact_id.clone(), transfer_id);
+                    if let Some(ft) = self.file_transfers.remove(&key) {
+                        if let FileTransfer::IncomingWaiting { transfer_id, contact_id, filename, file_size, sha256 } = ft {
+                            // Send FILE_ACCEPT to peer
+                            if let Some(addr) = self.contact_addrs.get(&contact_id) {
+                                if let Some(peer) = self.peers.get(addr) {
+                                    if let Some(ref socket) = self.socket {
+                                        filetransfer::protocol::send_file_accept(peer, socket, transfer_id);
+                                    }
+                                }
+                            }
+                            // Create receiver state
+                            let receiver = ReceiverState::new(
+                                transfer_id, filename, file_size, sha256, contact_id.clone(),
+                            );
+                            self.file_transfers.insert(
+                                (contact_id, transfer_id),
+                                FileTransfer::Receiving(receiver),
+                            );
+                        }
+                    }
+                }
+
+                MsgCommand::RejectFileTransfer { contact_id, transfer_id } => {
+                    let key = (contact_id.clone(), transfer_id);
+                    if let Some(ft) = self.file_transfers.remove(&key) {
+                        if let FileTransfer::IncomingWaiting { transfer_id, contact_id, .. } = ft {
+                            if let Some(addr) = self.contact_addrs.get(&contact_id) {
+                                if let Some(peer) = self.peers.get(addr) {
+                                    if let Some(ref socket) = self.socket {
+                                        filetransfer::protocol::send_file_reject(peer, socket, transfer_id);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                MsgCommand::CancelFileTransfer { contact_id, transfer_id } => {
+                    let key = (contact_id.clone(), transfer_id);
+                    if let Some(ft) = self.file_transfers.remove(&key) {
+                        // Send cancel to peer
+                        if let Some(addr) = self.contact_addrs.get(&contact_id) {
+                            if let Some(peer) = self.peers.get(addr) {
+                                if let Some(ref socket) = self.socket {
+                                    filetransfer::protocol::send_file_cancel(
+                                        peer, socket, transfer_id, filetransfer::CANCEL_USER,
+                                    );
+                                }
+                            }
+                        }
+                        // Clean up receiver temp file if applicable
+                        if let FileTransfer::Receiving(ref recv) = ft {
+                            recv.cleanup();
                         }
                     }
                 }
@@ -832,6 +1014,198 @@ impl MsgDaemon {
                     }
                 }
 
+                PKT_MSG_FILE_OFFER => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((transfer_id, file_size, sha256, filename)) =
+                            filetransfer::protocol::handle_file_offer(data, peer)
+                        {
+                            peer.touch();
+                            let contact_id = peer.contact_id.clone();
+                            if contact_id.is_empty() { continue; }
+
+                            // Store as incoming waiting
+                            self.file_transfers.insert(
+                                (contact_id.clone(), transfer_id),
+                                FileTransfer::IncomingWaiting {
+                                    transfer_id,
+                                    contact_id: contact_id.clone(),
+                                    filename: filename.clone(),
+                                    file_size,
+                                    sha256,
+                                },
+                            );
+
+                            self.event_tx.send(MsgEvent::IncomingFileOffer {
+                                contact_id,
+                                transfer_id,
+                                filename,
+                                file_size,
+                            }).ok();
+                        }
+                    }
+                }
+
+                PKT_MSG_FILE_ACCEPT => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some(transfer_id) = filetransfer::protocol::handle_file_accept(data, peer) {
+                            peer.touch();
+                            let contact_id = peer.contact_id.clone();
+                            let key = (contact_id.clone(), transfer_id);
+                            // Transition OfferedWaiting → Sending
+                            if let Some(ft) = self.file_transfers.remove(&key) {
+                                if let FileTransfer::OfferedWaiting { file_path, file_size, sha256, .. } = ft {
+                                    let sender = SenderState::new(transfer_id, file_path, file_size, sha256);
+                                    self.file_transfers.insert(key, FileTransfer::Sending(sender));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                PKT_MSG_FILE_REJECT => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some(transfer_id) = filetransfer::protocol::handle_file_reject(data, peer) {
+                            peer.touch();
+                            let contact_id = peer.contact_id.clone();
+                            let key = (contact_id.clone(), transfer_id);
+                            self.file_transfers.remove(&key);
+                            self.event_tx.send(MsgEvent::FileTransferFailed {
+                                contact_id,
+                                transfer_id,
+                                reason: "Rejected by peer".into(),
+                            }).ok();
+                        }
+                    }
+                }
+
+                PKT_MSG_FILE_CHUNK => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((transfer_id, chunk_index, chunk_data)) =
+                            filetransfer::protocol::handle_file_chunk(data, peer)
+                        {
+                            peer.touch();
+                            let contact_id = peer.contact_id.clone();
+                            let key = (contact_id.clone(), transfer_id);
+                            let mut should_ack = false;
+                            let mut ack_value = None;
+                            if let Some(FileTransfer::Receiving(ref mut recv)) = self.file_transfers.get_mut(&key) {
+                                recv.on_chunk(chunk_index, &chunk_data);
+                                if recv.should_ack() {
+                                    ack_value = recv.ack_value();
+                                    should_ack = true;
+                                }
+                            }
+                            if should_ack {
+                                if let Some(ack_val) = ack_value {
+                                    if let Some(ref socket) = self.socket {
+                                        filetransfer::protocol::send_file_ack(peer, socket, transfer_id, ack_val);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                PKT_MSG_FILE_ACK => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((transfer_id, ack_through)) =
+                            filetransfer::protocol::handle_file_ack(data, peer)
+                        {
+                            peer.touch();
+                            let contact_id = peer.contact_id.clone();
+                            let key = (contact_id.clone(), transfer_id);
+                            let mut all_acked = false;
+                            if let Some(FileTransfer::Sending(ref mut sender)) = self.file_transfers.get_mut(&key) {
+                                all_acked = sender.on_ack(ack_through);
+                            }
+                            if all_acked {
+                                // Send FILE_COMPLETE
+                                if let Some(FileTransfer::Sending(ref sender)) = self.file_transfers.get(&key) {
+                                    if !sender.complete_sent {
+                                        if let Some(ref socket) = self.socket {
+                                            filetransfer::protocol::send_file_complete(
+                                                peer, socket, transfer_id, &sender.sha256,
+                                            );
+                                        }
+                                    }
+                                }
+                                if let Some(FileTransfer::Sending(ref mut sender)) = self.file_transfers.get_mut(&key) {
+                                    sender.complete_sent = true;
+                                }
+                                // Emit completion for sender side
+                                self.file_transfers.remove(&key);
+                                self.event_tx.send(MsgEvent::FileTransferComplete {
+                                    contact_id,
+                                    transfer_id,
+                                    saved_path: String::new(), // sender doesn't save
+                                }).ok();
+                            }
+                        }
+                    }
+                }
+
+                PKT_MSG_FILE_COMPLETE => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((transfer_id, sha256)) =
+                            filetransfer::protocol::handle_file_complete(data, peer)
+                        {
+                            peer.touch();
+                            let contact_id = peer.contact_id.clone();
+                            let key = (contact_id.clone(), transfer_id);
+                            if let Some(ft) = self.file_transfers.remove(&key) {
+                                if let FileTransfer::Receiving(recv) = ft {
+                                    // Verify hash
+                                    if recv.verify_hash() && sha256 == recv.expected_sha256 {
+                                        if let Some(saved_path) = recv.finalize() {
+                                            self.event_tx.send(MsgEvent::FileTransferComplete {
+                                                contact_id,
+                                                transfer_id,
+                                                saved_path,
+                                            }).ok();
+                                        } else {
+                                            recv.cleanup();
+                                            self.event_tx.send(MsgEvent::FileTransferFailed {
+                                                contact_id,
+                                                transfer_id,
+                                                reason: "Failed to save file".into(),
+                                            }).ok();
+                                        }
+                                    } else {
+                                        recv.cleanup();
+                                        self.event_tx.send(MsgEvent::FileTransferFailed {
+                                            contact_id,
+                                            transfer_id,
+                                            reason: "Hash verification failed".into(),
+                                        }).ok();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                PKT_MSG_FILE_CANCEL => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((transfer_id, _reason)) =
+                            filetransfer::protocol::handle_file_cancel(data, peer)
+                        {
+                            peer.touch();
+                            let contact_id = peer.contact_id.clone();
+                            let key = (contact_id.clone(), transfer_id);
+                            if let Some(ft) = self.file_transfers.remove(&key) {
+                                if let FileTransfer::Receiving(ref recv) = ft {
+                                    recv.cleanup();
+                                }
+                                self.event_tx.send(MsgEvent::FileTransferFailed {
+                                    contact_id,
+                                    transfer_id,
+                                    reason: "Cancelled by peer".into(),
+                                }).ok();
+                            }
+                        }
+                    }
+                }
+
                 PKT_HELLO => {
                     // Voice HELLO (0x01) — detect incoming calls from known contacts
                     let ip_str = from.ip().to_string();
@@ -1020,6 +1394,102 @@ impl MsgDaemon {
             }
         }
 
+        // ── File transfer ticking ──
+        if let Some(ref socket) = self.socket {
+            // Tick senders: send chunks within window with pacing
+            let mut chunks_to_send: Vec<(String, u32, u32, Vec<u8>)> = Vec::new();
+
+            for ((cid, tid), ft) in &mut self.file_transfers {
+                if let FileTransfer::Sending(ref mut sender) = ft {
+                    // Check retransmit timeout
+                    if sender.should_retransmit() {
+                        sender.retransmit();
+                    }
+                    // Send chunks within pacing constraint
+                    let elapsed_us = sender.last_chunk_sent.elapsed().as_micros();
+                    if elapsed_us >= filetransfer::CHUNK_PACING_US as u128 {
+                        if let Some((chunk_idx, chunk_data)) = sender.next_chunk() {
+                            chunks_to_send.push((cid.clone(), sender.transfer_id, chunk_idx, chunk_data));
+                        }
+                    }
+                }
+            }
+
+            // Send queued chunks
+            for (cid, transfer_id, chunk_idx, chunk_data) in chunks_to_send {
+                if let Some(addr) = self.contact_addrs.get(&cid) {
+                    if let Some(peer) = self.peers.get(addr) {
+                        filetransfer::protocol::send_file_chunk(
+                            peer, socket, transfer_id, chunk_idx, &chunk_data,
+                        );
+                    }
+                }
+            }
+
+            // Tick receivers: send pending ACKs
+            let mut acks_to_send: Vec<(String, u32, u32)> = Vec::new();
+            for ((cid, _tid), ft) in &mut self.file_transfers {
+                if let FileTransfer::Receiving(ref mut recv) = ft {
+                    if recv.should_ack() {
+                        if let Some(ack_val) = recv.ack_value() {
+                            acks_to_send.push((cid.clone(), recv.transfer_id, ack_val));
+                        }
+                    }
+                }
+            }
+            for (cid, transfer_id, ack_val) in acks_to_send {
+                if let Some(addr) = self.contact_addrs.get(&cid) {
+                    if let Some(peer) = self.peers.get(addr) {
+                        filetransfer::protocol::send_file_ack(peer, socket, transfer_id, ack_val);
+                    }
+                }
+            }
+
+            // Emit progress events periodically
+            if self.last_progress_emit.elapsed().as_millis() >= filetransfer::PROGRESS_INTERVAL_MS as u128 {
+                self.last_progress_emit = now;
+                for ((cid, tid), ft) in &self.file_transfers {
+                    match ft {
+                        FileTransfer::Sending(sender) => {
+                            self.event_tx.send(MsgEvent::FileTransferProgress {
+                                contact_id: cid.clone(),
+                                transfer_id: *tid,
+                                bytes_transferred: sender.bytes_confirmed,
+                                total_bytes: sender.file_size,
+                            }).ok();
+                        }
+                        FileTransfer::Receiving(recv) => {
+                            self.event_tx.send(MsgEvent::FileTransferProgress {
+                                contact_id: cid.clone(),
+                                transfer_id: *tid,
+                                bytes_transferred: recv.bytes_received,
+                                total_bytes: recv.file_size,
+                            }).ok();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // Timeout offers that weren't responded to
+            let mut timed_out_offers = Vec::new();
+            for ((cid, tid), ft) in &self.file_transfers {
+                if let FileTransfer::OfferedWaiting { offered_at, .. } = ft {
+                    if offered_at.elapsed().as_secs() >= filetransfer::OFFER_TIMEOUT_SECS {
+                        timed_out_offers.push((cid.clone(), *tid));
+                    }
+                }
+            }
+            for (cid, tid) in timed_out_offers {
+                self.file_transfers.remove(&(cid.clone(), tid));
+                self.event_tx.send(MsgEvent::FileTransferFailed {
+                    contact_id: cid,
+                    transfer_id: tid,
+                    reason: "Offer timed out".into(),
+                }).ok();
+            }
+        }
+
         // Keepalives
         if now.duration_since(self.last_keepalive) > KEEPALIVE_INTERVAL {
             self.last_keepalive = now;
@@ -1158,6 +1628,25 @@ impl MsgDaemon {
             }
         }
     }
+}
+
+/// Compute SHA-256 hash of a file.
+fn compute_file_sha256(path: &str) -> Option<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        match std::io::Read::read(&mut file, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => hasher.update(&buf[..n]),
+            Err(_) => return None,
+        }
+    }
+    let hash = hasher.finalize();
+    let mut result = [0u8; 32];
+    result.copy_from_slice(&hash);
+    Some(result)
 }
 
 /// Check if two IPv6 addresses share the same /64 prefix.

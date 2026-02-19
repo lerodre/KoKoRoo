@@ -26,6 +26,7 @@ block2 = "0.6"
 objc2-foundation = "0.3"
 objc2-core-media = "0.3"
 objc2-screen-capture-kit = "0.3"
+rfd = "0.15"
 
 # macOS notes:
 #   - pipewire/libspa/ashpd excluded: Linux-only (Wayland/PipeWire)

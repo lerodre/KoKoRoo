@@ -243,12 +243,14 @@ impl HostelApp {
                         let time = ChatHistory::format_time(msg.timestamp);
                         if msg.from_me {
                             ui.horizontal_wrapped(|ui| {
+                                ui.add_space(2.0);
                                 ui.colored_label(self.settings.theme.text_muted(), &time);
                                 ui.colored_label(self.settings.theme.chat_self(), "You:");
                                 ui.label(&msg.text);
                             });
                         } else {
                             ui.horizontal_wrapped(|ui| {
+                                ui.add_space(2.0);
                                 ui.colored_label(self.settings.theme.text_muted(), &time);
                                 ui.colored_label(self.settings.theme.chat_peer(), &peer_label);
                                 ui.label(&msg.text);

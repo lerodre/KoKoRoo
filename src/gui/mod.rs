@@ -558,6 +558,9 @@ pub struct HostelApp {
     pub(crate) last_key_press: Instant,
     pub(crate) last_presence_sent: crate::messaging::PresenceStatus,
 
+    // File transfers
+    pub(crate) file_transfer_progress: HashMap<(String, u32), (u64, u64)>,
+
     // Contact requests
     pub(crate) req_incoming: Vec<(String, String, String, String)>, // (request_id, nickname, ip, fingerprint)
     pub(crate) req_ip_input: String,
@@ -725,6 +728,7 @@ impl HostelApp {
             msg_peer_presence: HashMap::new(),
             last_key_press: Instant::now(),
             last_presence_sent: crate::messaging::PresenceStatus::Online,
+            file_transfer_progress: HashMap::new(),
             req_incoming: Vec::new(),
             req_ip_input: String::new(),
             req_port_input: String::new(),
@@ -1090,6 +1094,49 @@ impl eframe::App for HostelApp {
                             contact.last_address = ip;
                             contact.last_port = port;
                         }
+                    }
+                    MsgEvent::IncomingFileOffer { contact_id, transfer_id, filename, file_size } => {
+                        let history = self.msg_chat_histories.entry(contact_id.clone())
+                            .or_insert_with(|| ChatHistory::load(&contact_id, &self.identity.secret));
+                        history.add_file_message(false, crate::chat::FileTransferInfo {
+                            filename: filename.clone(),
+                            file_size,
+                            transfer_id,
+                            status: crate::chat::FileTransferStatus::Offered,
+                            saved_path: None,
+                        });
+                        let viewing_this_chat = self.active_tab == SidebarTab::Messages
+                            && self.msg_active_chat.as_deref() == Some(contact_id.as_str());
+                        if !viewing_this_chat {
+                            *self.msg_unread.entry(contact_id).or_insert(0) += 1;
+                        }
+                    }
+                    MsgEvent::FileTransferProgress { contact_id, transfer_id, bytes_transferred, total_bytes } => {
+                        self.file_transfer_progress.insert(
+                            (contact_id, transfer_id),
+                            (bytes_transferred, total_bytes),
+                        );
+                    }
+                    MsgEvent::FileTransferComplete { contact_id, transfer_id, saved_path } => {
+                        self.file_transfer_progress.remove(&(contact_id.clone(), transfer_id));
+                        let history = self.msg_chat_histories.entry(contact_id.clone())
+                            .or_insert_with(|| ChatHistory::load(&contact_id, &self.identity.secret));
+                        let save_path = if saved_path.is_empty() { None } else { Some(saved_path) };
+                        history.update_file_status(
+                            transfer_id,
+                            crate::chat::FileTransferStatus::Completed,
+                            save_path,
+                        );
+                    }
+                    MsgEvent::FileTransferFailed { contact_id, transfer_id, reason } => {
+                        self.file_transfer_progress.remove(&(contact_id.clone(), transfer_id));
+                        let history = self.msg_chat_histories.entry(contact_id.clone())
+                            .or_insert_with(|| ChatHistory::load(&contact_id, &self.identity.secret));
+                        history.update_file_status(
+                            transfer_id,
+                            crate::chat::FileTransferStatus::Failed(reason),
+                            None,
+                        );
                     }
                     MsgEvent::IncomingCall { nickname, fingerprint, ip, port } => {
                         log_fmt!("[gui] IncomingCall event: nick='{}' fp='{}' ip='{}' port='{}' screen={}",
@@ -1466,7 +1513,8 @@ pub fn run() {
             .with_inner_size([884.0, 750.0])
             .with_min_inner_size([484.0, 600.0])
             .with_title("hostelD — Secure P2P Voice + Chat + Screen")
-            .with_icon(std::sync::Arc::new(icon)),
+            .with_icon(std::sync::Arc::new(icon))
+            .with_drag_and_drop(true),
         ..Default::default()
     };
     eframe::run_native(

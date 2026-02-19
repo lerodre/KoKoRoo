@@ -27,6 +27,15 @@ pub const PKT_MSG_PEER_QUERY: u8   = 0x18; // peer lookup: encrypted [32-byte ta
 pub const PKT_MSG_PEER_RESPONSE: u8 = 0x19; // peer lookup reply: encrypted [32-byte pubkey][ip_str][0x00][port_str][0x00][8-byte timestamp LE]
 pub const PKT_MSG_PRESENCE: u8 = 0x1A;      // presence status: encrypted [1 byte: 0x01=Online, 0x02=Away]
 
+// File transfer packet types
+pub const PKT_MSG_FILE_OFFER: u8    = 0x1B; // file offer: encrypted [4B transfer_id][8B file_size LE][32B sha256][filename UTF-8]
+pub const PKT_MSG_FILE_ACCEPT: u8   = 0x1C; // file accept: encrypted [4B transfer_id]
+pub const PKT_MSG_FILE_REJECT: u8   = 0x1D; // file reject: encrypted [4B transfer_id]
+pub const PKT_MSG_FILE_CHUNK: u8    = 0x1E; // file chunk: encrypted [4B transfer_id][4B chunk_index LE][data: up to 1200 bytes]
+pub const PKT_MSG_FILE_ACK: u8      = 0x1F; // file ack: encrypted [4B transfer_id][4B ack_through LE]
+pub const PKT_MSG_FILE_COMPLETE: u8 = 0x20; // file complete: encrypted [4B transfer_id][32B sha256]
+pub const PKT_MSG_FILE_CANCEL: u8   = 0x21; // file cancel: encrypted [4B transfer_id][1B reason]
+
 /// Size of an X25519 public key.
 pub const PUBKEY_SIZE: usize = 32;
 
