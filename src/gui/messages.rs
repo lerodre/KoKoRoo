@@ -22,13 +22,14 @@ impl HostelApp {
         );
         ui.painter().rect_filled(bg_rect, 0.0, self.settings.theme.sidebar_bg());
 
-        // Separator line (full height)
+        let line_stroke = egui::Stroke::new(sep_w, self.settings.theme.text_muted());
+
+        // Separator between main sidebar and contact list (left edge)
+        ui.painter().vline(clip.min.x, clip.y_range(), line_stroke);
+
+        // Separator between contact list and chat (right edge)
         let sep_x = available.min.x + list_w + 1.0;
-        ui.painter().vline(
-            sep_x,
-            clip.y_range(),
-            egui::Stroke::new(sep_w, self.settings.theme.text_muted()),
-        );
+        ui.painter().vline(sep_x, clip.y_range(), line_stroke);
 
         let list_rect = egui::Rect::from_min_size(
             available.min,
