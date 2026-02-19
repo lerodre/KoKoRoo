@@ -59,8 +59,12 @@ impl HostelApp {
             return;
         }
 
-        // Sort: online first, then by most recent message, then rest
+        // Sort: self first, then online, then by most recent message
         conversations.sort_by(|a, b| {
+            // Self always first
+            let self_a = a.1 == "YO (you)";
+            let self_b = b.1 == "YO (you)";
+            if self_a != self_b { return self_b.cmp(&self_a); }
             // Online first
             let online_ord = b.3.cmp(&a.3);
             if online_ord != std::cmp::Ordering::Equal { return online_ord; }

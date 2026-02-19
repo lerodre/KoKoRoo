@@ -75,12 +75,18 @@ impl HostelApp {
         let search = self.contact_search.to_lowercase();
         let mut selected_contact: Option<usize> = None;
 
+        // Sort: self first, then rest
+        let mut sorted_indices: Vec<usize> = (0..self.contacts.len()).collect();
+        sorted_indices.sort_by_key(|&i| if self.contacts[i].pubkey == self.identity.pubkey { 0 } else { 1 });
+
         let max_height = ui.available_height().max(80.0);
         egui::ScrollArea::vertical()
             .max_height(max_height)
             .id_salt("call_contacts_scroll")
             .show(ui, |ui| {
-                for (i, contact) in self.contacts.iter().enumerate() {
+                for i in &sorted_indices {
+                    let i = *i;
+                    let contact = &self.contacts[i];
                     if !search.is_empty()
                         && !contact.nickname.to_lowercase().contains(&search)
                         && !contact.fingerprint.to_lowercase().contains(&search)
