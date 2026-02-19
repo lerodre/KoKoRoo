@@ -1540,6 +1540,39 @@ pub(crate) fn load_icon_texture_sized(ctx: &egui::Context, name: &str, png_bytes
 }
 
 pub fn run() {
+    // On Linux, install .desktop file and icon so the desktop environment
+    // (GNOME, KDE, etc.) shows the app logo instead of a generic gear.
+    #[cfg(target_os = "linux")]
+    {
+        let logo_bytes = include_bytes!("../../assets/logo.png");
+        if let Some(data_home) = std::env::var_os("XDG_DATA_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share")))
+        {
+            let icon_dir = data_home.join("icons/hicolor/512x512/apps");
+            let icon_path = icon_dir.join("hostelD.png");
+            if !icon_path.exists() {
+                let _ = std::fs::create_dir_all(&icon_dir);
+                let _ = std::fs::write(&icon_path, logo_bytes);
+            }
+            let desktop_dir = data_home.join("applications");
+            let desktop_path = desktop_dir.join("hostelD.desktop");
+            if !desktop_path.exists() {
+                let _ = std::fs::create_dir_all(&desktop_dir);
+                let desktop_entry = "[Desktop Entry]\n\
+                    Type=Application\n\
+                    Name=hostelD\n\
+                    Comment=Secure P2P Voice + Chat + Screen\n\
+                    Icon=hostelD\n\
+                    Exec=hostelD\n\
+                    Terminal=false\n\
+                    Categories=Network;InstantMessaging;\n\
+                    StartupWMClass=hostelD\n";
+                let _ = std::fs::write(&desktop_path, desktop_entry);
+            }
+        }
+    }
+
     // Window icon from cropped logo (cross-platform: Windows, Linux, macOS)
     let (rgba, w, h) = load_png_cropped(include_bytes!("../../assets/logo.png"));
     let icon = egui::IconData { rgba, width: w, height: h };
@@ -1550,7 +1583,8 @@ pub fn run() {
             .with_min_inner_size([484.0, 600.0])
             .with_title("hostelD — Secure P2P Voice + Chat + Screen")
             .with_icon(std::sync::Arc::new(icon))
-            .with_drag_and_drop(true),
+            .with_drag_and_drop(true)
+            .with_app_id("hostelD".to_string()),
         ..Default::default()
     };
     eframe::run_native(
