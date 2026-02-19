@@ -1,3 +1,4 @@
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 use std::process::Command;
 
 /// Remove the hostelD UDP firewall rule for the given port.
@@ -10,7 +11,15 @@ pub fn remove_udp_port_rule(port: u16) -> Result<bool, String> {
     #[cfg(target_os = "linux")]
     return remove_linux(port);
 
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = port;
+        // macOS uses an application-based firewall, not port-based rules.
+        // No port rule to remove.
+        Ok(false)
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     {
         let _ = port;
         Err("Automatic firewall rules not supported on this OS".into())
@@ -27,7 +36,15 @@ pub fn ensure_udp_port_open(port: u16) -> Result<bool, String> {
     #[cfg(target_os = "linux")]
     return ensure_linux(port);
 
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = port;
+        // macOS uses an application-based firewall (not port-based).
+        // The OS will prompt the user to allow network access on first launch.
+        Ok(false)
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     {
         let _ = port;
         Err("Automatic firewall rules not supported on this OS".into())

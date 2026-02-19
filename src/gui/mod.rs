@@ -155,6 +155,40 @@ fn get_network_interfaces() -> Vec<(String, String, String)> {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("ifconfig").output() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let mut current_iface = String::new();
+            for line in text.lines() {
+                // Interface header: "en0: flags=8863<UP,..."
+                if !line.starts_with('\t') && !line.starts_with(' ') {
+                    if let Some(name) = line.split(':').next() {
+                        current_iface = name.to_string();
+                    }
+                }
+                let trimmed = line.trim();
+                if trimmed.starts_with("inet6") {
+                    // Skip temporary/deprecated addresses
+                    if trimmed.contains("deprecated") || trimmed.contains("temporary") {
+                        continue;
+                    }
+                    // Format: "inet6 fe80::1%en0 prefixlen 64 scopeid 0x4"
+                    // or:     "inet6 2001:db8::1 prefixlen 64"
+                    if let Some(addr_raw) = trimmed.split_whitespace().nth(1) {
+                        // Strip %interface suffix (e.g. "fe80::1%en0" → "fe80::1")
+                        let addr = addr_raw.split('%').next().unwrap_or(addr_raw);
+                        if addr == "::1" { continue; }
+                        // Skip loopback interface
+                        if current_iface == "lo0" { continue; }
+                        let scope = if addr.starts_with("fe80") { "link-local" } else { "global" };
+                        result.push((current_iface.clone(), addr.to_string(), scope.to_string()));
+                    }
+                }
+            }
+        }
+    }
+
     // Sort: global first per interface
     result.sort_by_key(|(_, _, scope)| {
         match scope.as_str() {
@@ -234,7 +268,7 @@ fn start_ringtone() -> Arc<AtomicBool> {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_clone = stop.clone();
     std::thread::spawn(move || {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let path = format!("{}/.hostelD/ringtone.mp3", std::env::var("HOME").unwrap_or_default());
         #[cfg(target_os = "windows")]
         let path = format!("{}\\.hostelD\\ringtone.mp3", std::env::var("USERPROFILE").unwrap_or_default());
@@ -269,6 +303,17 @@ fn start_ringtone() -> Arc<AtomicBool> {
                         path.replace('\\', "/")
                     ),
                 ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(_) => break,
+            };
+
+            #[cfg(target_os = "macos")]
+            let mut child = match std::process::Command::new("afplay")
+                .arg(&path)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .spawn()
@@ -320,6 +365,18 @@ fn send_desktop_notification(title: &str, body: &str) {
             );
             std::process::Command::new("powershell")
                 .args(["-WindowStyle", "Hidden", "-Command", &script])
+                .spawn()
+                .ok();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let script = format!(
+                "display notification \"{}\" with title \"{}\"",
+                b.replace('\\', "\\\\").replace('"', "\\\""),
+                t.replace('\\', "\\\\").replace('"', "\\\""),
+            );
+            std::process::Command::new("osascript")
+                .args(["-e", &script])
                 .spawn()
                 .ok();
         }
