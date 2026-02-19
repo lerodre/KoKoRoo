@@ -2,7 +2,7 @@ use std::net::{SocketAddr, UdpSocket};
 use std::time::Instant;
 
 use crate::crypto::{
-    self, PKT_MSG_ACK, PKT_MSG_BYE, PKT_MSG_CHAT, PKT_MSG_IDENTITY,
+    self, PKT_MSG_ACK, PKT_MSG_BYE, PKT_MSG_CHAT, PKT_MSG_CONFIRM, PKT_MSG_IDENTITY,
     PKT_MSG_REQUEST, PKT_MSG_REQUEST_ACK,
     PKT_MSG_IP_ANNOUNCE, PKT_MSG_PEER_QUERY, PKT_MSG_PEER_RESPONSE,
     PKT_MSG_PRESENCE,
@@ -28,7 +28,7 @@ pub fn handle_incoming_hello(
     socket.send_to(&hello, from).ok()?;
 
     // Complete handshake
-    let session = crypto::complete_handshake(our_secret, &peer_ephemeral);
+    let (session, ephemeral_shared) = crypto::complete_handshake(our_secret, &peer_ephemeral);
 
     // Send our identity (encrypted)
     let mut id_payload = Vec::with_capacity(32 + nickname.len());
@@ -46,6 +46,9 @@ pub fn handle_incoming_hello(
         last_activity: Instant::now(),
         state: PeerState::AwaitingIdentity,
         seen_seqs: std::collections::HashSet::new(),
+        ephemeral_shared: Some(ephemeral_shared),
+        upgraded_session: None,
+        identity_confirmed: false,
     })
 }
 
@@ -73,7 +76,7 @@ pub fn handle_hello_response(
         None => return false,
     };
 
-    let session = crypto::complete_handshake(our_secret, &peer_ephemeral);
+    let (session, ephemeral_shared) = crypto::complete_handshake(our_secret, &peer_ephemeral);
 
     // Send our identity
     let mut id_payload = Vec::with_capacity(32 + nickname.len());
@@ -83,6 +86,9 @@ pub fn handle_hello_response(
     socket.send_to(&pkt, peer.peer_addr).ok();
 
     peer.session = Some(session);
+    peer.ephemeral_shared = Some(ephemeral_shared);
+    peer.upgraded_session = None;
+    peer.identity_confirmed = false;
     peer.state = PeerState::AwaitingIdentity;
     peer.touch();
     true
@@ -90,11 +96,14 @@ pub fn handle_hello_response(
 
 /// Handle an incoming MSG_IDENTITY packet (encrypted).
 /// Extracts peer's identity pubkey and nickname, derives contact_id.
+/// For known contacts, computes an upgraded session key binding identity DH.
+/// Returns Ok(true) if an upgraded session was computed (CONFIRM should be sent).
 pub fn handle_identity(
     data: &[u8],
     peer: &mut PeerSession,
     identity: &Identity,
-) -> Result<(), String> {
+    socket: &UdpSocket,
+) -> Result<bool, String> {
     let session = peer.session.as_ref().ok_or("no session")?;
     let (pkt_type, plain) = session.decrypt_packet(data).ok_or("decrypt failed")?;
     if pkt_type != PKT_MSG_IDENTITY {
@@ -113,7 +122,42 @@ pub fn handle_identity(
     peer.contact_id = crate::identity::derive_contact_id(&identity.pubkey, &peer_id_pubkey);
     peer.state = PeerState::Connected;
     peer.touch();
-    Ok(())
+
+    // Phase 2: For known contacts, compute upgraded session key binding identity DH.
+    let mut upgraded = false;
+    if let Some(ephemeral_shared) = peer.ephemeral_shared.take() {
+        if crate::identity::load_contact(&peer_id_pubkey).is_some() {
+            let upgraded_session = crypto::upgrade_session_with_identity(
+                &ephemeral_shared,
+                &identity.secret,
+                &peer_id_pubkey,
+            );
+            // Send CONFIRM encrypted with upgraded key
+            let pkt = upgraded_session.encrypt_packet(PKT_MSG_CONFIRM, &[]);
+            socket.send_to(&pkt, peer.peer_addr).ok();
+            peer.upgraded_session = Some(upgraded_session);
+            upgraded = true;
+        }
+    }
+
+    Ok(upgraded)
+}
+
+/// Handle an incoming PKT_MSG_CONFIRM packet.
+/// Tries to decrypt with the upgraded session. On success, promotes it.
+/// Returns true if confirmation succeeded.
+pub fn handle_confirm(data: &[u8], peer: &mut PeerSession) -> bool {
+    if let Some(ref upgraded) = peer.upgraded_session {
+        if let Some((pkt_type, _)) = upgraded.decrypt_packet(data) {
+            if pkt_type == PKT_MSG_CONFIRM {
+                // Promote upgraded session to primary
+                peer.identity_confirmed = true;
+                peer.session = peer.upgraded_session.take();
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Send a chat message through an established session.
@@ -123,19 +167,17 @@ pub fn send_chat_message(
     seq: u32,
     text: &str,
 ) -> Result<(), String> {
-    let session = peer.session.as_ref().ok_or("no session")?;
     let mut payload = Vec::with_capacity(4 + text.len());
     payload.extend_from_slice(&seq.to_le_bytes());
     payload.extend_from_slice(text.as_bytes());
-    let pkt = session.encrypt_packet(PKT_MSG_CHAT, &payload);
+    let pkt = peer.encrypt_packet(PKT_MSG_CHAT, &payload).ok_or("no session")?;
     socket.send_to(&pkt, peer.peer_addr).map_err(|e| e.to_string())?;
     Ok(())
 }
 
 /// Handle an incoming MSG_CHAT packet. Returns (seq, text).
-pub fn handle_chat(data: &[u8], peer: &PeerSession) -> Option<(u32, String)> {
-    let session = peer.session.as_ref()?;
-    let (pkt_type, plain) = session.decrypt_packet(data)?;
+pub fn handle_chat(data: &[u8], peer: &mut PeerSession) -> Option<(u32, String)> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
     if pkt_type != PKT_MSG_CHAT || plain.len() < 4 {
         return None;
     }
@@ -148,16 +190,14 @@ pub fn handle_chat(data: &[u8], peer: &PeerSession) -> Option<(u32, String)> {
 
 /// Send an ACK for a received message.
 pub fn send_ack(peer: &PeerSession, socket: &UdpSocket, seq: u32) {
-    if let Some(session) = &peer.session {
-        let pkt = session.encrypt_packet(PKT_MSG_ACK, &seq.to_le_bytes());
+    if let Some(pkt) = peer.encrypt_packet(PKT_MSG_ACK, &seq.to_le_bytes()) {
         socket.send_to(&pkt, peer.peer_addr).ok();
     }
 }
 
 /// Handle an incoming ACK. Returns the acked sequence number.
-pub fn handle_ack(data: &[u8], peer: &PeerSession) -> Option<u32> {
-    let session = peer.session.as_ref()?;
-    let (pkt_type, plain) = session.decrypt_packet(data)?;
+pub fn handle_ack(data: &[u8], peer: &mut PeerSession) -> Option<u32> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
     if pkt_type != PKT_MSG_ACK || plain.len() < 4 {
         return None;
     }
@@ -168,16 +208,14 @@ pub fn handle_ack(data: &[u8], peer: &PeerSession) -> Option<u32> {
 
 /// Send a BYE (disconnect) to a peer.
 pub fn send_bye(peer: &PeerSession, socket: &UdpSocket) {
-    if let Some(session) = &peer.session {
-        let pkt = session.encrypt_packet(PKT_MSG_BYE, &[]);
+    if let Some(pkt) = peer.encrypt_packet(PKT_MSG_BYE, &[]) {
         socket.send_to(&pkt, peer.peer_addr).ok();
     }
 }
 
 /// Send a keepalive (ACK for seq 0, used to maintain NAT mappings).
 pub fn send_keepalive(peer: &PeerSession, socket: &UdpSocket) {
-    if let Some(session) = &peer.session {
-        let pkt = session.encrypt_packet(PKT_MSG_ACK, &0u32.to_le_bytes());
+    if let Some(pkt) = peer.encrypt_packet(PKT_MSG_ACK, &0u32.to_le_bytes()) {
         let _ = socket.send_to(&pkt, peer.peer_addr);
     }
 }
@@ -206,6 +244,9 @@ pub fn initiate_handshake(
             sent_at: Instant::now(),
         },
         seen_seqs: std::collections::HashSet::new(),
+        ephemeral_shared: None,
+        upgraded_session: None,
+        identity_confirmed: false,
     })
 }
 
@@ -216,19 +257,17 @@ pub fn send_request(
     identity: &Identity,
     nickname: &str,
 ) {
-    if let Some(session) = &peer.session {
-        let mut payload = Vec::with_capacity(32 + nickname.len());
-        payload.extend_from_slice(&identity.pubkey);
-        payload.extend_from_slice(nickname.as_bytes());
-        let pkt = session.encrypt_packet(PKT_MSG_REQUEST, &payload);
+    let mut payload = Vec::with_capacity(32 + nickname.len());
+    payload.extend_from_slice(&identity.pubkey);
+    payload.extend_from_slice(nickname.as_bytes());
+    if let Some(pkt) = peer.encrypt_packet(PKT_MSG_REQUEST, &payload) {
         socket.send_to(&pkt, peer.peer_addr).ok();
     }
 }
 
 /// Handle an incoming PKT_MSG_REQUEST. Returns (identity_pubkey, nickname).
-pub fn handle_request(data: &[u8], peer: &PeerSession) -> Option<([u8; 32], String)> {
-    let session = peer.session.as_ref()?;
-    let (pkt_type, plain) = session.decrypt_packet(data)?;
+pub fn handle_request(data: &[u8], peer: &mut PeerSession) -> Option<([u8; 32], String)> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
     if pkt_type != PKT_MSG_REQUEST || plain.len() < 32 {
         return None;
     }
@@ -245,19 +284,17 @@ pub fn send_request_accept(
     identity: &Identity,
     nickname: &str,
 ) {
-    if let Some(session) = &peer.session {
-        let mut payload = Vec::with_capacity(32 + nickname.len());
-        payload.extend_from_slice(&identity.pubkey);
-        payload.extend_from_slice(nickname.as_bytes());
-        let pkt = session.encrypt_packet(PKT_MSG_REQUEST_ACK, &payload);
+    let mut payload = Vec::with_capacity(32 + nickname.len());
+    payload.extend_from_slice(&identity.pubkey);
+    payload.extend_from_slice(nickname.as_bytes());
+    if let Some(pkt) = peer.encrypt_packet(PKT_MSG_REQUEST_ACK, &payload) {
         socket.send_to(&pkt, peer.peer_addr).ok();
     }
 }
 
 /// Handle an incoming PKT_MSG_REQUEST_ACK. Returns (identity_pubkey, nickname).
-pub fn handle_request_accept(data: &[u8], peer: &PeerSession) -> Option<([u8; 32], String)> {
-    let session = peer.session.as_ref()?;
-    let (pkt_type, plain) = session.decrypt_packet(data)?;
+pub fn handle_request_accept(data: &[u8], peer: &mut PeerSession) -> Option<([u8; 32], String)> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
     if pkt_type != PKT_MSG_REQUEST_ACK || plain.len() < 32 {
         return None;
     }
@@ -278,22 +315,20 @@ pub fn send_ip_announce(
     port: &str,
     timestamp: u64,
 ) {
-    if let Some(session) = &peer.session {
-        let mut payload = Vec::new();
-        payload.extend_from_slice(ip.as_bytes());
-        payload.push(0x00);
-        payload.extend_from_slice(port.as_bytes());
-        payload.push(0x00);
-        payload.extend_from_slice(&timestamp.to_le_bytes());
-        let pkt = session.encrypt_packet(PKT_MSG_IP_ANNOUNCE, &payload);
+    let mut payload = Vec::new();
+    payload.extend_from_slice(ip.as_bytes());
+    payload.push(0x00);
+    payload.extend_from_slice(port.as_bytes());
+    payload.push(0x00);
+    payload.extend_from_slice(&timestamp.to_le_bytes());
+    if let Some(pkt) = peer.encrypt_packet(PKT_MSG_IP_ANNOUNCE, &payload) {
         socket.send_to(&pkt, peer.peer_addr).ok();
     }
 }
 
 /// Handle an incoming IP_ANNOUNCE. Returns (ip, port, timestamp).
-pub fn handle_ip_announce(data: &[u8], peer: &PeerSession) -> Option<(String, String, u64)> {
-    let session = peer.session.as_ref()?;
-    let (pkt_type, plain) = session.decrypt_packet(data)?;
+pub fn handle_ip_announce(data: &[u8], peer: &mut PeerSession) -> Option<(String, String, u64)> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
     if pkt_type != PKT_MSG_IP_ANNOUNCE {
         return None;
     }
@@ -326,16 +361,14 @@ pub fn send_peer_query(
     socket: &UdpSocket,
     target_pubkey: &[u8; 32],
 ) {
-    if let Some(session) = &peer.session {
-        let pkt = session.encrypt_packet(PKT_MSG_PEER_QUERY, target_pubkey);
+    if let Some(pkt) = peer.encrypt_packet(PKT_MSG_PEER_QUERY, target_pubkey) {
         socket.send_to(&pkt, peer.peer_addr).ok();
     }
 }
 
 /// Handle an incoming PEER_QUERY. Returns the target pubkey being searched.
-pub fn handle_peer_query(data: &[u8], peer: &PeerSession) -> Option<[u8; 32]> {
-    let session = peer.session.as_ref()?;
-    let (pkt_type, plain) = session.decrypt_packet(data)?;
+pub fn handle_peer_query(data: &[u8], peer: &mut PeerSession) -> Option<[u8; 32]> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
     if pkt_type != PKT_MSG_PEER_QUERY || plain.len() < 32 {
         return None;
     }
@@ -354,23 +387,21 @@ pub fn send_peer_response(
     port: &str,
     timestamp: u64,
 ) {
-    if let Some(session) = &peer.session {
-        let mut payload = Vec::with_capacity(32 + ip.len() + port.len() + 10);
-        payload.extend_from_slice(target_pubkey);
-        payload.extend_from_slice(ip.as_bytes());
-        payload.push(0x00);
-        payload.extend_from_slice(port.as_bytes());
-        payload.push(0x00);
-        payload.extend_from_slice(&timestamp.to_le_bytes());
-        let pkt = session.encrypt_packet(PKT_MSG_PEER_RESPONSE, &payload);
+    let mut payload = Vec::with_capacity(32 + ip.len() + port.len() + 10);
+    payload.extend_from_slice(target_pubkey);
+    payload.extend_from_slice(ip.as_bytes());
+    payload.push(0x00);
+    payload.extend_from_slice(port.as_bytes());
+    payload.push(0x00);
+    payload.extend_from_slice(&timestamp.to_le_bytes());
+    if let Some(pkt) = peer.encrypt_packet(PKT_MSG_PEER_RESPONSE, &payload) {
         socket.send_to(&pkt, peer.peer_addr).ok();
     }
 }
 
 /// Handle an incoming PEER_RESPONSE. Returns (target_pubkey, ip, port, timestamp).
-pub fn handle_peer_response(data: &[u8], peer: &PeerSession) -> Option<([u8; 32], String, String, u64)> {
-    let session = peer.session.as_ref()?;
-    let (pkt_type, plain) = session.decrypt_packet(data)?;
+pub fn handle_peer_response(data: &[u8], peer: &mut PeerSession) -> Option<([u8; 32], String, String, u64)> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
     if pkt_type != PKT_MSG_PEER_RESPONSE {
         return None;
     }
@@ -404,21 +435,19 @@ pub fn send_presence(
     socket: &UdpSocket,
     status: super::PresenceStatus,
 ) {
-    if let Some(session) = &peer.session {
-        let byte = match status {
-            super::PresenceStatus::Online => 0x01,
-            super::PresenceStatus::Away => 0x02,
-            super::PresenceStatus::Offline => return, // never sent, inferred from disconnect
-        };
-        let pkt = session.encrypt_packet(PKT_MSG_PRESENCE, &[byte]);
+    let byte = match status {
+        super::PresenceStatus::Online => 0x01,
+        super::PresenceStatus::Away => 0x02,
+        super::PresenceStatus::Offline => return, // never sent, inferred from disconnect
+    };
+    if let Some(pkt) = peer.encrypt_packet(PKT_MSG_PRESENCE, &[byte]) {
         socket.send_to(&pkt, peer.peer_addr).ok();
     }
 }
 
 /// Handle an incoming PRESENCE packet. Returns the presence status.
-pub fn handle_presence(data: &[u8], peer: &PeerSession) -> Option<super::PresenceStatus> {
-    let session = peer.session.as_ref()?;
-    let (pkt_type, plain) = session.decrypt_packet(data)?;
+pub fn handle_presence(data: &[u8], peer: &mut PeerSession) -> Option<super::PresenceStatus> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
     if pkt_type != PKT_MSG_PRESENCE || plain.is_empty() {
         return None;
     }

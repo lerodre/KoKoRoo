@@ -16,21 +16,19 @@ pub fn send_file_offer(
     sha256: &[u8; 32],
     filename: &str,
 ) {
-    if let Some(session) = &peer.session {
-        let mut payload = Vec::with_capacity(4 + 8 + 32 + filename.len());
-        payload.extend_from_slice(&transfer_id.to_le_bytes());
-        payload.extend_from_slice(&file_size.to_le_bytes());
-        payload.extend_from_slice(sha256);
-        payload.extend_from_slice(filename.as_bytes());
-        let pkt = session.encrypt_packet(PKT_MSG_FILE_OFFER, &payload);
+    let mut payload = Vec::with_capacity(4 + 8 + 32 + filename.len());
+    payload.extend_from_slice(&transfer_id.to_le_bytes());
+    payload.extend_from_slice(&file_size.to_le_bytes());
+    payload.extend_from_slice(sha256);
+    payload.extend_from_slice(filename.as_bytes());
+    if let Some(pkt) = peer.encrypt_packet(PKT_MSG_FILE_OFFER, &payload) {
         socket.send_to(&pkt, peer.peer_addr).ok();
     }
 }
 
 /// Handle an incoming FILE_OFFER. Returns (transfer_id, file_size, sha256, filename).
-pub fn handle_file_offer(data: &[u8], peer: &PeerSession) -> Option<(u32, u64, [u8; 32], String)> {
-    let session = peer.session.as_ref()?;
-    let (pkt_type, plain) = session.decrypt_packet(data)?;
+pub fn handle_file_offer(data: &[u8], peer: &mut PeerSession) -> Option<(u32, u64, [u8; 32], String)> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
     if pkt_type != PKT_MSG_FILE_OFFER || plain.len() < 44 {
         return None;
     }
@@ -47,16 +45,14 @@ pub fn handle_file_offer(data: &[u8], peer: &PeerSession) -> Option<(u32, u64, [
 
 /// Send a FILE_ACCEPT: [4B transfer_id]
 pub fn send_file_accept(peer: &PeerSession, socket: &UdpSocket, transfer_id: u32) {
-    if let Some(session) = &peer.session {
-        let pkt = session.encrypt_packet(PKT_MSG_FILE_ACCEPT, &transfer_id.to_le_bytes());
+    if let Some(pkt) = peer.encrypt_packet(PKT_MSG_FILE_ACCEPT, &transfer_id.to_le_bytes()) {
         socket.send_to(&pkt, peer.peer_addr).ok();
     }
 }
 
 /// Handle an incoming FILE_ACCEPT. Returns transfer_id.
-pub fn handle_file_accept(data: &[u8], peer: &PeerSession) -> Option<u32> {
-    let session = peer.session.as_ref()?;
-    let (pkt_type, plain) = session.decrypt_packet(data)?;
+pub fn handle_file_accept(data: &[u8], peer: &mut PeerSession) -> Option<u32> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
     if pkt_type != PKT_MSG_FILE_ACCEPT || plain.len() < 4 {
         return None;
     }
@@ -65,16 +61,14 @@ pub fn handle_file_accept(data: &[u8], peer: &PeerSession) -> Option<u32> {
 
 /// Send a FILE_REJECT: [4B transfer_id]
 pub fn send_file_reject(peer: &PeerSession, socket: &UdpSocket, transfer_id: u32) {
-    if let Some(session) = &peer.session {
-        let pkt = session.encrypt_packet(PKT_MSG_FILE_REJECT, &transfer_id.to_le_bytes());
+    if let Some(pkt) = peer.encrypt_packet(PKT_MSG_FILE_REJECT, &transfer_id.to_le_bytes()) {
         socket.send_to(&pkt, peer.peer_addr).ok();
     }
 }
 
 /// Handle an incoming FILE_REJECT. Returns transfer_id.
-pub fn handle_file_reject(data: &[u8], peer: &PeerSession) -> Option<u32> {
-    let session = peer.session.as_ref()?;
-    let (pkt_type, plain) = session.decrypt_packet(data)?;
+pub fn handle_file_reject(data: &[u8], peer: &mut PeerSession) -> Option<u32> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
     if pkt_type != PKT_MSG_FILE_REJECT || plain.len() < 4 {
         return None;
     }
@@ -89,20 +83,18 @@ pub fn send_file_chunk(
     chunk_index: u32,
     data: &[u8],
 ) {
-    if let Some(session) = &peer.session {
-        let mut payload = Vec::with_capacity(8 + data.len());
-        payload.extend_from_slice(&transfer_id.to_le_bytes());
-        payload.extend_from_slice(&chunk_index.to_le_bytes());
-        payload.extend_from_slice(data);
-        let pkt = session.encrypt_packet(PKT_MSG_FILE_CHUNK, &payload);
+    let mut payload = Vec::with_capacity(8 + data.len());
+    payload.extend_from_slice(&transfer_id.to_le_bytes());
+    payload.extend_from_slice(&chunk_index.to_le_bytes());
+    payload.extend_from_slice(data);
+    if let Some(pkt) = peer.encrypt_packet(PKT_MSG_FILE_CHUNK, &payload) {
         socket.send_to(&pkt, peer.peer_addr).ok();
     }
 }
 
 /// Handle an incoming FILE_CHUNK. Returns (transfer_id, chunk_index, data).
-pub fn handle_file_chunk(data: &[u8], peer: &PeerSession) -> Option<(u32, u32, Vec<u8>)> {
-    let session = peer.session.as_ref()?;
-    let (pkt_type, plain) = session.decrypt_packet(data)?;
+pub fn handle_file_chunk(data: &[u8], peer: &mut PeerSession) -> Option<(u32, u32, Vec<u8>)> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
     if pkt_type != PKT_MSG_FILE_CHUNK || plain.len() < 8 {
         return None;
     }
@@ -114,16 +106,14 @@ pub fn handle_file_chunk(data: &[u8], peer: &PeerSession) -> Option<(u32, u32, V
 
 /// Send a FILE_ACK (all chunks received, transfer complete): [4B transfer_id]
 pub fn send_file_ack(peer: &PeerSession, socket: &UdpSocket, transfer_id: u32) {
-    if let Some(session) = &peer.session {
-        let pkt = session.encrypt_packet(PKT_MSG_FILE_ACK, &transfer_id.to_le_bytes());
+    if let Some(pkt) = peer.encrypt_packet(PKT_MSG_FILE_ACK, &transfer_id.to_le_bytes()) {
         socket.send_to(&pkt, peer.peer_addr).ok();
     }
 }
 
 /// Handle an incoming FILE_ACK (complete). Returns transfer_id.
-pub fn handle_file_ack(data: &[u8], peer: &PeerSession) -> Option<u32> {
-    let session = peer.session.as_ref()?;
-    let (pkt_type, plain) = session.decrypt_packet(data)?;
+pub fn handle_file_ack(data: &[u8], peer: &mut PeerSession) -> Option<u32> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
     if pkt_type != PKT_MSG_FILE_ACK || plain.len() < 4 {
         return None;
     }
@@ -138,25 +128,23 @@ pub fn send_file_nack(
     transfer_id: u32,
     missing: &[u32],
 ) {
-    if let Some(session) = &peer.session {
-        // Max ~280 indices per packet (1200 bytes payload budget: 4+4 header + 280*4 = 1128)
-        for chunk in missing.chunks(280) {
-            let mut payload = Vec::with_capacity(8 + chunk.len() * 4);
-            payload.extend_from_slice(&transfer_id.to_le_bytes());
-            payload.extend_from_slice(&(chunk.len() as u32).to_le_bytes());
-            for &idx in chunk {
-                payload.extend_from_slice(&idx.to_le_bytes());
-            }
-            let pkt = session.encrypt_packet(PKT_MSG_FILE_NACK, &payload);
+    // Max ~280 indices per packet (1200 bytes payload budget: 4+4 header + 280*4 = 1128)
+    for chunk in missing.chunks(280) {
+        let mut payload = Vec::with_capacity(8 + chunk.len() * 4);
+        payload.extend_from_slice(&transfer_id.to_le_bytes());
+        payload.extend_from_slice(&(chunk.len() as u32).to_le_bytes());
+        for &idx in chunk {
+            payload.extend_from_slice(&idx.to_le_bytes());
+        }
+        if let Some(pkt) = peer.encrypt_packet(PKT_MSG_FILE_NACK, &payload) {
             socket.send_to(&pkt, peer.peer_addr).ok();
         }
     }
 }
 
 /// Handle an incoming FILE_NACK. Returns (transfer_id, Vec<missing_indices>).
-pub fn handle_file_nack(data: &[u8], peer: &PeerSession) -> Option<(u32, Vec<u32>)> {
-    let session = peer.session.as_ref()?;
-    let (pkt_type, plain) = session.decrypt_packet(data)?;
+pub fn handle_file_nack(data: &[u8], peer: &mut PeerSession) -> Option<(u32, Vec<u32>)> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
     if pkt_type != PKT_MSG_FILE_NACK || plain.len() < 8 {
         return None;
     }
@@ -180,19 +168,17 @@ pub fn send_file_complete(
     transfer_id: u32,
     sha256: &[u8; 32],
 ) {
-    if let Some(session) = &peer.session {
-        let mut payload = Vec::with_capacity(36);
-        payload.extend_from_slice(&transfer_id.to_le_bytes());
-        payload.extend_from_slice(sha256);
-        let pkt = session.encrypt_packet(PKT_MSG_FILE_COMPLETE, &payload);
+    let mut payload = Vec::with_capacity(36);
+    payload.extend_from_slice(&transfer_id.to_le_bytes());
+    payload.extend_from_slice(sha256);
+    if let Some(pkt) = peer.encrypt_packet(PKT_MSG_FILE_COMPLETE, &payload) {
         socket.send_to(&pkt, peer.peer_addr).ok();
     }
 }
 
 /// Handle an incoming FILE_COMPLETE. Returns (transfer_id, sha256).
-pub fn handle_file_complete(data: &[u8], peer: &PeerSession) -> Option<(u32, [u8; 32])> {
-    let session = peer.session.as_ref()?;
-    let (pkt_type, plain) = session.decrypt_packet(data)?;
+pub fn handle_file_complete(data: &[u8], peer: &mut PeerSession) -> Option<(u32, [u8; 32])> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
     if pkt_type != PKT_MSG_FILE_COMPLETE || plain.len() < 36 {
         return None;
     }
@@ -204,19 +190,17 @@ pub fn handle_file_complete(data: &[u8], peer: &PeerSession) -> Option<(u32, [u8
 
 /// Send a FILE_CANCEL: [4B transfer_id][1B reason]
 pub fn send_file_cancel(peer: &PeerSession, socket: &UdpSocket, transfer_id: u32, reason: u8) {
-    if let Some(session) = &peer.session {
-        let mut payload = [0u8; 5];
-        payload[..4].copy_from_slice(&transfer_id.to_le_bytes());
-        payload[4] = reason;
-        let pkt = session.encrypt_packet(PKT_MSG_FILE_CANCEL, &payload);
+    let mut payload = [0u8; 5];
+    payload[..4].copy_from_slice(&transfer_id.to_le_bytes());
+    payload[4] = reason;
+    if let Some(pkt) = peer.encrypt_packet(PKT_MSG_FILE_CANCEL, &payload) {
         socket.send_to(&pkt, peer.peer_addr).ok();
     }
 }
 
 /// Handle an incoming FILE_CANCEL. Returns (transfer_id, reason).
-pub fn handle_file_cancel(data: &[u8], peer: &PeerSession) -> Option<(u32, u8)> {
-    let session = peer.session.as_ref()?;
-    let (pkt_type, plain) = session.decrypt_packet(data)?;
+pub fn handle_file_cancel(data: &[u8], peer: &mut PeerSession) -> Option<(u32, u8)> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
     if pkt_type != PKT_MSG_FILE_CANCEL || plain.len() < 5 {
         return None;
     }

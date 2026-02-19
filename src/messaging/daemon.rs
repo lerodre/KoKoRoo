@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::crypto::{
     self, PKT_HELLO, PKT_HANGUP,
-    PKT_MSG_ACK, PKT_MSG_BYE, PKT_MSG_CHAT, PKT_MSG_HELLO, PKT_MSG_IDENTITY,
+    PKT_MSG_ACK, PKT_MSG_BYE, PKT_MSG_CHAT, PKT_MSG_CONFIRM, PKT_MSG_HELLO, PKT_MSG_IDENTITY,
     PKT_MSG_REQUEST, PKT_MSG_REQUEST_ACK,
     PKT_MSG_IP_ANNOUNCE, PKT_MSG_PEER_QUERY, PKT_MSG_PEER_RESPONSE,
     PKT_MSG_PRESENCE,
@@ -242,7 +242,7 @@ impl MsgDaemon {
                                 let (our_secret, our_pubkey) = crypto::generate_keypair();
                                 let hello_reply = crypto::build_hello(&our_pubkey);
                                 socket.send_to(&hello_reply, peer_addr).ok();
-                                let session = crypto::complete_handshake(our_secret, &peer_ephemeral);
+                                let (session, _) = crypto::complete_handshake(our_secret, &peer_ephemeral);
                                 let hangup = session.encrypt_packet(PKT_HANGUP, &[]);
                                 socket.send_to(&hangup, peer_addr).ok();
                             }
@@ -370,6 +370,9 @@ impl MsgDaemon {
                                     sent_at: Instant::now(),
                                 },
                                 seen_seqs: std::collections::HashSet::new(),
+                                ephemeral_shared: None,
+                                upgraded_session: None,
+                                identity_confirmed: false,
                             };
                             self.outgoing_requests.insert(peer_addr, session);
                         } else {
@@ -710,8 +713,11 @@ impl MsgDaemon {
                             Some(s) => s,
                             None => continue,
                         };
-                        let session = crate::crypto::complete_handshake(our_secret, &peer_ephemeral);
+                        let (session, ephemeral_shared) = crate::crypto::complete_handshake(our_secret, &peer_ephemeral);
                         peer.session = Some(session);
+                        peer.ephemeral_shared = Some(ephemeral_shared);
+                        peer.upgraded_session = None;
+                        peer.identity_confirmed = false;
                         peer.state = super::session::PeerState::AwaitingIdentity;
                         peer.touch();
                         // Send REQUEST (not IDENTITY)
@@ -781,11 +787,24 @@ impl MsgDaemon {
 
                 PKT_MSG_IDENTITY => {
                     log_fmt!("[daemon] MSG_IDENTITY from {}", from);
+                    let mut stale_addr_to_remove: Option<SocketAddr> = None;
                     if let Some(peer) = self.peers.get_mut(&from) {
-                        match protocol::handle_identity(data, peer, &self.identity) {
-                            Ok(()) => {
+                        match protocol::handle_identity(data, peer, &self.identity, socket) {
+                            Ok(upgraded) => {
                             let contact_id = peer.contact_id.clone();
-                            log_fmt!("[daemon]   identity OK! contact_id={} nick='{}' — peer is ONLINE", contact_id, peer.peer_nickname);
+                            if upgraded {
+                                log_fmt!("[daemon]   identity OK (upgraded session)! contact_id={} nick='{}' — peer is ONLINE", contact_id, peer.peer_nickname);
+                            } else {
+                                log_fmt!("[daemon]   identity OK! contact_id={} nick='{}' — peer is ONLINE", contact_id, peer.peer_nickname);
+                            }
+
+                            // Detect stale peer session if contact reconnected from a new address
+                            if let Some(&old_addr) = self.contact_addrs.get(&contact_id) {
+                                if old_addr != from {
+                                    log_fmt!("[daemon]   contact {} migrated from {} to {}, will remove stale session", contact_id, old_addr, from);
+                                    stale_addr_to_remove = Some(old_addr);
+                                }
+                            }
                             self.contact_addrs.insert(contact_id.clone(), from);
 
                             // Notify GUI peer is online
@@ -812,6 +831,18 @@ impl MsgDaemon {
                         }
                     } else {
                         log_fmt!("[daemon]   no peer session for {} — ignoring IDENTITY", from);
+                    }
+                    // Clean up stale peer session after releasing the borrow
+                    if let Some(old_addr) = stale_addr_to_remove {
+                        self.peers.remove(&old_addr);
+                    }
+                }
+
+                PKT_MSG_CONFIRM => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if protocol::handle_confirm(data, peer) {
+                            log_fmt!("[daemon] CONFIRM: identity upgrade confirmed for {}", peer.contact_id);
+                        }
                     }
                 }
 
@@ -906,7 +937,7 @@ impl MsgDaemon {
 
                 PKT_MSG_REQUEST_ACK => {
                     // Our contact request was accepted
-                    if let Some(peer) = self.outgoing_requests.get(&from) {
+                    if let Some(peer) = self.outgoing_requests.get_mut(&from) {
                         if let Some((pubkey, nickname)) = protocol::handle_request_accept(data, peer) {
                             let contact_id = identity::derive_contact_id(
                                 &self.identity.pubkey, &pubkey,

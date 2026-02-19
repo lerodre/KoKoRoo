@@ -3,7 +3,7 @@ use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use x25519_dalek::{EphemeralSecret, PublicKey, SharedSecret};
+use x25519_dalek::{EphemeralSecret, PublicKey, SharedSecret, StaticSecret};
 
 /// Packet type markers (first byte of every UDP packet).
 pub const PKT_HELLO: u8 = 0x01;    // key exchange: [0x01][32-byte ephemeral pubkey]
@@ -36,6 +36,7 @@ pub const PKT_MSG_FILE_ACK: u8      = 0x1F; // file ack (all received): encrypte
 pub const PKT_MSG_FILE_COMPLETE: u8 = 0x20; // file complete (sender done): encrypted [4B transfer_id][32B sha256]
 pub const PKT_MSG_FILE_CANCEL: u8   = 0x21; // file cancel: encrypted [4B transfer_id][1B reason]
 pub const PKT_MSG_FILE_NACK: u8     = 0x22; // file nack (missing chunks): encrypted [4B transfer_id][4B missing_count LE][4B idx LE ...]
+pub const PKT_MSG_CONFIRM: u8       = 0x23; // identity-bound key upgrade confirmation
 
 /// Size of an X25519 public key.
 pub const PUBKEY_SIZE: usize = 32;
@@ -100,13 +101,15 @@ pub fn parse_msg_hello(data: &[u8]) -> Option<[u8; 32]> {
     Some(pubkey)
 }
 
-/// Complete the key exchange: our secret + peer's public key → Session.
+/// Complete the key exchange: our secret + peer's public key → (Session, ephemeral_shared_bytes).
 ///
 /// Derives a 256-bit symmetric key from the X25519 shared secret using SHA-256.
 /// Also generates a human-readable verification code for anti-MITM.
-pub fn complete_handshake(our_secret: EphemeralSecret, peer_pubkey: &[u8; 32]) -> Session {
+/// Returns the raw ephemeral shared secret bytes for Phase 2 identity-bound upgrade.
+pub fn complete_handshake(our_secret: EphemeralSecret, peer_pubkey: &[u8; 32]) -> (Session, [u8; 32]) {
     let peer_public = PublicKey::from(*peer_pubkey);
     let shared: SharedSecret = our_secret.diffie_hellman(&peer_public);
+    let ephemeral_shared = *shared.as_bytes();
 
     // Derive encryption key: SHA-256(shared_secret || "hostelD-voice-key")
     let mut hasher = Sha256::new();
@@ -121,6 +124,45 @@ pub fn complete_handshake(our_secret: EphemeralSecret, peer_pubkey: &[u8; 32]) -
     // Display as XXXX-XXXX so users can compare verbally.
     let mut verify_hasher = Sha256::new();
     verify_hasher.update(shared.as_bytes());
+    verify_hasher.update(b"hostelD-verify");
+    let verify_hash = verify_hasher.finalize();
+    let code = format!(
+        "{:02X}{:02X}-{:02X}{:02X}",
+        verify_hash[0], verify_hash[1], verify_hash[2], verify_hash[3]
+    );
+
+    (Session {
+        cipher,
+        send_counter: Arc::new(AtomicU32::new(0)),
+        verification_code: code,
+    }, ephemeral_shared)
+}
+
+/// Compute an upgraded session key that binds both ephemeral and identity DH.
+/// Used for known contacts after IDENTITY exchange to prove private key ownership.
+pub fn upgrade_session_with_identity(
+    ephemeral_shared: &[u8; 32],
+    our_identity_secret: &[u8; 32],
+    peer_identity_pubkey: &[u8; 32],
+) -> Session {
+    let identity_secret = StaticSecret::from(*our_identity_secret);
+    let peer_identity_public = PublicKey::from(*peer_identity_pubkey);
+    let identity_dh = identity_secret.diffie_hellman(&peer_identity_public);
+
+    // Derive upgraded key: SHA-256(ephemeral_shared || identity_DH || "hostelD-msg-key")
+    let mut hasher = Sha256::new();
+    hasher.update(ephemeral_shared);
+    hasher.update(identity_dh.as_bytes());
+    hasher.update(b"hostelD-msg-key");
+    let key_bytes = hasher.finalize();
+
+    let cipher = ChaCha20Poly1305::new_from_slice(&key_bytes)
+        .expect("key size mismatch");
+
+    // Upgraded verification: SHA-256(ephemeral_shared || identity_DH || "hostelD-verify")
+    let mut verify_hasher = Sha256::new();
+    verify_hasher.update(ephemeral_shared);
+    verify_hasher.update(identity_dh.as_bytes());
     verify_hasher.update(b"hostelD-verify");
     let verify_hash = verify_hasher.finalize();
     let code = format!(

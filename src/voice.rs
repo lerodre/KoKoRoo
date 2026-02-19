@@ -376,7 +376,7 @@ fn handshake(
         thread::sleep(std::time::Duration::from_millis(100));
     }
 
-    let session = crypto::complete_handshake(our_secret, &peer_pubkey);
+    let (session, _) = crypto::complete_handshake(our_secret, &peer_pubkey);
     println!("Key exchange: complete!");
 
     Ok(session)
