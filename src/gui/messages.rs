@@ -152,15 +152,39 @@ impl HostelApp {
                             let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
                             ui.painter().circle_filled(rect.center(), 4.0, color);
 
-                            // Name + preview (clickable)
+                            // Name + badge + preview (clickable)
                             let text = if *unread > 0 {
-                                egui::RichText::new(format!("{name} ({unread})")).strong().size(12.0)
+                                egui::RichText::new(name.as_str()).strong().size(12.0)
                             } else {
                                 egui::RichText::new(name.as_str()).size(12.0)
                             };
 
                             ui.vertical(|ui| {
-                                if ui.add(egui::Button::new(text).frame(false)).clicked() {
+                                let resp = ui.horizontal(|ui| {
+                                    let btn = ui.add(egui::Button::new(text).frame(false));
+                                    if *unread > 0 {
+                                        let badge_color = self.settings.theme.btn_negative();
+                                        let badge_text = format!("{}", unread);
+                                        let font = egui::FontId::proportional(9.0);
+                                        let galley = ui.painter().layout_no_wrap(badge_text, font, egui::Color32::WHITE);
+                                        let text_w = galley.size().x;
+                                        let text_h = galley.size().y;
+                                        let radius = (text_w / 2.0 + 4.0).max(8.0);
+                                        let (badge_rect, _) = ui.allocate_exact_size(
+                                            egui::vec2(radius * 2.0, text_h + 4.0),
+                                            egui::Sense::hover(),
+                                        );
+                                        let center = badge_rect.center();
+                                        ui.painter().circle_filled(center, radius, badge_color);
+                                        ui.painter().galley(
+                                            egui::pos2(center.x - text_w / 2.0, center.y - text_h / 2.0),
+                                            galley,
+                                            egui::Color32::WHITE,
+                                        );
+                                    }
+                                    btn.clicked()
+                                });
+                                if resp.inner {
                                     *open_chat = Some(contact_id.clone());
                                 }
                                 if !preview.is_empty() {
