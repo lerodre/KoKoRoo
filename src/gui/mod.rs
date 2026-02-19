@@ -1279,6 +1279,15 @@ impl eframe::App for HostelApp {
         // (incoming calls, messages, peer status) even when idle.
         ctx.request_repaint_after(std::time::Duration::from_secs(4));
     }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Drop the command sender so the daemon thread detects disconnection and exits.
+        self.msg_cmd_tx.take();
+        // Give the daemon a moment to send BYE packets to peers.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        // Force-terminate: daemon or audio threads may still be alive.
+        std::process::exit(0);
+    }
 }
 
 impl HostelApp {
