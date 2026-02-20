@@ -34,10 +34,10 @@ impl HostelApp {
 
             let icon_h = 30.0; // icon height in sidebar buttons
 
+            let friends_badge = incoming_count as u32;
             let tabs: Vec<(SidebarTab, String, u32)> = vec![
                 (SidebarTab::Profile, "Profile".to_string(), 0),
-                (SidebarTab::Contacts, "Contacts".to_string(), 0),
-                (SidebarTab::Requests, "Requests".to_string(), incoming_count as u32),
+                (SidebarTab::Friends, "Friends".to_string(), friends_badge),
                 (SidebarTab::Messages, "Messages".to_string(), total_unread),
                 (SidebarTab::Call, "Call".to_string(), 0),
                 (SidebarTab::Settings, "Settings".to_string(), 0),
