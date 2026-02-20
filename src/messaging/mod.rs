@@ -2,6 +2,9 @@ pub mod daemon;
 pub mod session;
 pub mod protocol;
 pub mod outbox;
+mod commands;
+mod packets;
+mod housekeep;
 
 pub use daemon::MsgDaemon;
 
@@ -16,6 +19,7 @@ pub enum PresenceStatus {
 }
 
 /// Commands sent from GUI to the messaging daemon.
+#[allow(dead_code)]
 pub enum MsgCommand {
     /// Send a text message to a contact. Daemon handles connection if needed.
     SendMessage { contact_id: String, peer_addr: SocketAddr, peer_pubkey: [u8; 32], text: String },
@@ -46,6 +50,10 @@ pub enum MsgCommand {
     RejectFileTransfer { contact_id: String, transfer_id: u32 },
     /// Cancel an active file transfer.
     CancelFileTransfer { contact_id: String, transfer_id: u32 },
+    /// Broadcast our avatar to all connected + identity-confirmed peers.
+    BroadcastAvatar { avatar_data: Vec<u8>, sha256: [u8; 32] },
+    /// Send our avatar to a specific contact (e.g. on new contact add).
+    SendAvatarTo { contact_id: String, avatar_data: Vec<u8>, sha256: [u8; 32] },
     /// Voice call starting — daemon must release the UDP socket.
     YieldSocket,
     /// Voice call ended — daemon can reclaim the UDP socket.
@@ -80,4 +88,6 @@ pub enum MsgEvent {
     FileTransferComplete { contact_id: String, transfer_id: u32, saved_path: String },
     /// A file transfer failed or was cancelled.
     FileTransferFailed { contact_id: String, transfer_id: u32, reason: String },
+    /// A contact's avatar was received and saved.
+    AvatarReceived { contact_id: String },
 }

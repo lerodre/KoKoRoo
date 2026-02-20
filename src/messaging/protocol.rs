@@ -6,6 +6,7 @@ use crate::crypto::{
     PKT_MSG_REQUEST, PKT_MSG_REQUEST_ACK,
     PKT_MSG_IP_ANNOUNCE, PKT_MSG_PEER_QUERY, PKT_MSG_PEER_RESPONSE,
     PKT_MSG_PRESENCE,
+    PKT_MSG_AVATAR_OFFER, PKT_MSG_AVATAR_DATA,
 };
 use crate::identity::Identity;
 
@@ -456,4 +457,70 @@ pub fn handle_presence(data: &[u8], peer: &mut PeerSession) -> Option<super::Pre
         0x02 => Some(super::PresenceStatus::Away),
         _ => None,
     }
+}
+
+// ── Avatar protocol ──
+
+/// Send an AVATAR_OFFER to a peer. Payload: [32B sha256][4B total_size LE].
+pub fn send_avatar_offer(
+    peer: &PeerSession,
+    socket: &UdpSocket,
+    sha256: &[u8; 32],
+    total_size: u32,
+) {
+    let mut payload = Vec::with_capacity(36);
+    payload.extend_from_slice(sha256);
+    payload.extend_from_slice(&total_size.to_le_bytes());
+    if let Some(pkt) = peer.encrypt_packet(PKT_MSG_AVATAR_OFFER, &payload) {
+        socket.send_to(&pkt, peer.peer_addr).ok();
+    }
+}
+
+/// Handle an incoming AVATAR_OFFER. Returns (sha256, total_size).
+pub fn handle_avatar_offer(data: &[u8], peer: &mut PeerSession) -> Option<([u8; 32], u32)> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
+    if pkt_type != PKT_MSG_AVATAR_OFFER || plain.len() < 36 {
+        return None;
+    }
+    let mut sha256 = [0u8; 32];
+    sha256.copy_from_slice(&plain[..32]);
+    let mut size_bytes = [0u8; 4];
+    size_bytes.copy_from_slice(&plain[32..36]);
+    let total_size = u32::from_le_bytes(size_bytes);
+    Some((sha256, total_size))
+}
+
+/// Send all avatar data chunks to a peer.
+/// Payload per chunk: [2B chunk_index LE][up to 1200B data].
+pub fn send_avatar_chunks(
+    peer: &PeerSession,
+    socket: &UdpSocket,
+    avatar_data: &[u8],
+) {
+    let chunk_size = super::daemon::AVATAR_CHUNK_SIZE;
+    let total_chunks = (avatar_data.len() + chunk_size - 1) / chunk_size;
+    for i in 0..total_chunks {
+        let start = i * chunk_size;
+        let end = (start + chunk_size).min(avatar_data.len());
+        let chunk = &avatar_data[start..end];
+        let mut payload = Vec::with_capacity(2 + chunk.len());
+        payload.extend_from_slice(&(i as u16).to_le_bytes());
+        payload.extend_from_slice(chunk);
+        if let Some(pkt) = peer.encrypt_packet(PKT_MSG_AVATAR_DATA, &payload) {
+            socket.send_to(&pkt, peer.peer_addr).ok();
+        }
+    }
+}
+
+/// Handle an incoming AVATAR_DATA chunk. Returns (chunk_index, data).
+pub fn handle_avatar_data(data: &[u8], peer: &mut PeerSession) -> Option<(u16, Vec<u8>)> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
+    if pkt_type != PKT_MSG_AVATAR_DATA || plain.len() < 3 {
+        return None;
+    }
+    let mut idx_bytes = [0u8; 2];
+    idx_bytes.copy_from_slice(&plain[..2]);
+    let chunk_index = u16::from_le_bytes(idx_bytes);
+    let chunk_data = plain[2..].to_vec();
+    Some((chunk_index, chunk_data))
 }

@@ -1,0 +1,852 @@
+use std::net::SocketAddr;
+use std::time::{Duration, Instant};
+
+use crate::crypto::{
+    self, PKT_HELLO,
+    PKT_MSG_ACK, PKT_MSG_BYE, PKT_MSG_CHAT, PKT_MSG_CONFIRM, PKT_MSG_HELLO, PKT_MSG_IDENTITY,
+    PKT_MSG_REQUEST, PKT_MSG_REQUEST_ACK,
+    PKT_MSG_IP_ANNOUNCE, PKT_MSG_PEER_QUERY, PKT_MSG_PEER_RESPONSE,
+    PKT_MSG_PRESENCE,
+    PKT_MSG_FILE_OFFER, PKT_MSG_FILE_ACCEPT, PKT_MSG_FILE_REJECT,
+    PKT_MSG_FILE_CHUNK, PKT_MSG_FILE_ACK, PKT_MSG_FILE_COMPLETE, PKT_MSG_FILE_CANCEL,
+    PKT_MSG_FILE_NACK,
+    PKT_MSG_AVATAR_OFFER, PKT_MSG_AVATAR_DATA,
+};
+use crate::identity::{self};
+use crate::filetransfer;
+use crate::filetransfer::sender::SenderState;
+
+use super::protocol;
+use super::MsgEvent;
+use super::daemon::{MsgDaemon, FileTransfer, QUERY_RATE_WINDOW, QUERY_RATE_MAX, ANNOUNCE_MAX_AGE};
+
+impl MsgDaemon {
+    pub(crate) fn receive_packets(&mut self) {
+        let socket = match &self.socket {
+            Some(s) => s,
+            None => return,
+        };
+
+        let mut buf = [0u8; 1500];
+        while let Ok((len, from)) = socket.recv_from(&mut buf) {
+            if len == 0 {
+                continue;
+            }
+            let data = &buf[..len];
+            let pkt_type = data[0];
+
+            log_fmt!("[daemon] recv pkt type=0x{:02x} len={} from={}", pkt_type, len, from);
+
+            match pkt_type {
+                PKT_MSG_HELLO => {
+                    if let Some(peer) = self.outgoing_requests.get_mut(&from) {
+                        // HELLO response for an outgoing contact request
+                        // Complete handshake but send REQUEST instead of IDENTITY
+                        let peer_ephemeral = match crate::crypto::parse_msg_hello(data) {
+                            Some(pk) => pk,
+                            None => continue,
+                        };
+                        let our_secret = match &mut peer.state {
+                            super::session::PeerState::AwaitingHello { our_secret, .. } => {
+                                our_secret.take()
+                            }
+                            _ => continue,
+                        };
+                        let our_secret = match our_secret {
+                            Some(s) => s,
+                            None => continue,
+                        };
+                        let (session, ephemeral_shared) = crate::crypto::complete_handshake(our_secret, &peer_ephemeral);
+                        peer.session = Some(session);
+                        peer.ephemeral_shared = Some(ephemeral_shared);
+                        peer.upgraded_session = None;
+                        peer.identity_confirmed = false;
+                        peer.state = super::session::PeerState::AwaitingIdentity;
+                        peer.touch();
+                        // Send REQUEST (not IDENTITY)
+                        protocol::send_request(peer, socket, &self.identity, &self.nickname);
+                    } else if let Some(peer) = self.peers.get_mut(&from) {
+                        if matches!(peer.state, super::session::PeerState::AwaitingHello { .. }) {
+                            // Pending session (AwaitingHello) — this is a hello response
+                            log_fmt!("[daemon] MSG_HELLO response from {} — completing handshake", from);
+                            let ok = protocol::handle_hello_response(
+                                data, peer, socket, &self.identity, &self.nickname,
+                            );
+                            log_fmt!("[daemon]   handshake result: {} (state now: {})",
+                                ok,
+                                match &peer.state {
+                                    super::session::PeerState::AwaitingHello { .. } => "AwaitingHello",
+                                    super::session::PeerState::AwaitingIdentity => "AwaitingIdentity",
+                                    super::session::PeerState::Connected => "Connected",
+                                });
+                        } else {
+                            // Connected or AwaitingIdentity — peer either restarted
+                            // or we completed our handshake but they never got our response
+                            // (simultaneous connection race). Reset and accept fresh.
+                            let old_cid = peer.contact_id.clone();
+                            let state_name = if peer.is_connected() { "Connected" } else { "AwaitingIdentity" };
+                            log_fmt!("[daemon] MSG_HELLO from {} (state={}) — resetting, accepting as incoming", from, state_name);
+                            if peer.is_connected() {
+                                self.event_tx.send(MsgEvent::PeerStatus {
+                                    contact_id: old_cid.clone(),
+                                    online: false,
+                                }).ok();
+                            }
+                            self.peers.remove(&from);
+                            if !old_cid.is_empty() {
+                                self.contact_addrs.remove(&old_cid);
+                            }
+                            self.hello_retries.remove(&from);
+                            // Handle as new incoming connection
+                            let ip_str = from.ip().to_string();
+                            if !self.settings.is_ip_banned(&ip_str) {
+                                if let Some(session) = protocol::handle_incoming_hello(
+                                    data, from, socket, &self.identity, &self.nickname,
+                                ) {
+                                    log_fmt!("[daemon]   re-handshake OK (AwaitingIdentity)");
+                                    self.peers.insert(from, session);
+                                }
+                            }
+                        }
+                    } else {
+                        // Incoming connection from unknown peer
+                        // Check if IP is banned before accepting
+                        let ip_str = from.ip().to_string();
+                        if self.settings.is_ip_banned(&ip_str) {
+                            log_fmt!("[daemon] MSG_HELLO from {} — BLOCKED (IP banned)", from);
+                            continue;
+                        }
+                        log_fmt!("[daemon] MSG_HELLO from unknown {} — accepting incoming connection", from);
+                        if let Some(session) = protocol::handle_incoming_hello(
+                            data, from, socket, &self.identity, &self.nickname,
+                        ) {
+                            log_fmt!("[daemon]   incoming session created (AwaitingIdentity)");
+                            self.peers.insert(from, session);
+                        } else {
+                            log_fmt!("[daemon]   incoming session FAILED to create");
+                        }
+                    }
+                }
+
+                PKT_MSG_IDENTITY => {
+                    log_fmt!("[daemon] MSG_IDENTITY from {}", from);
+                    let mut stale_addr_to_remove: Option<SocketAddr> = None;
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        match protocol::handle_identity(data, peer, &self.identity, socket) {
+                            Ok(upgraded) => {
+                            let contact_id = peer.contact_id.clone();
+                            if upgraded {
+                                log_fmt!("[daemon]   identity OK (upgraded session)! contact_id={} nick='{}' — peer is ONLINE", contact_id, peer.peer_nickname);
+                            } else {
+                                log_fmt!("[daemon]   identity OK! contact_id={} nick='{}' — peer is ONLINE", contact_id, peer.peer_nickname);
+                            }
+
+                            // Detect stale peer session if contact reconnected from a new address
+                            if let Some(&old_addr) = self.contact_addrs.get(&contact_id) {
+                                if old_addr != from {
+                                    log_fmt!("[daemon]   contact {} migrated from {} to {}, will remove stale session", contact_id, old_addr, from);
+                                    stale_addr_to_remove = Some(old_addr);
+                                }
+                            }
+                            self.contact_addrs.insert(contact_id.clone(), from);
+
+                            // Update last_address on disk so reconnect uses the current IP
+                            if let Some(mut contact) = identity::load_contact(&peer.peer_pubkey) {
+                                let new_ip = from.ip().to_string();
+                                let new_port = from.port().to_string();
+                                if contact.last_address != new_ip || contact.last_port != new_port {
+                                    log_fmt!("[daemon]   updating last_address: {} -> {}", contact.last_address, new_ip);
+                                    contact.last_address = new_ip;
+                                    contact.last_port = new_port;
+                                    contact.last_seen = identity::now_timestamp();
+                                    identity::save_contact(&contact);
+                                }
+                            }
+
+                            // Notify GUI peer is online
+                            self.event_tx.send(MsgEvent::PeerStatus {
+                                contact_id: contact_id.clone(),
+                                online: true,
+                            }).ok();
+
+                            // Load outbox and flush pending messages
+                            let outbox = self.outboxes.entry(contact_id.clone())
+                                .or_insert_with(|| super::outbox::Outbox::load(&contact_id, &self.identity.secret));
+                            for msg in &mut outbox.messages {
+                                protocol::send_chat_message(peer, socket, msg.seq, &msg.text).ok();
+                                msg.attempts += 1;
+                            }
+                            // Reset retry state
+                            self.retry_state.insert(contact_id, (Instant::now(), 0));
+                            // Send our presence to the newly connected peer
+                            protocol::send_presence(peer, socket, self.our_presence);
+                            }
+                            Err(e) => {
+                                log_fmt!("[daemon]   identity FAILED: {}", e);
+                            }
+                        }
+                    } else {
+                        log_fmt!("[daemon]   no peer session for {} — ignoring IDENTITY", from);
+                    }
+                    // Clean up stale peer session after releasing the borrow
+                    if let Some(old_addr) = stale_addr_to_remove {
+                        self.peers.remove(&old_addr);
+                    }
+                }
+
+                PKT_MSG_CONFIRM => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if protocol::handle_confirm(data, peer) {
+                            let cid = peer.contact_id.clone();
+                            log_fmt!("[daemon] CONFIRM: identity upgrade confirmed for {}", cid);
+                            // Auto-send our avatar if we have one
+                            if !self.avatar_sends.contains_key(&cid) {
+                                if let Some(avatar_data) = crate::avatar::load_own_avatar() {
+                                    let sha256 = crate::avatar::avatar_sha256(&avatar_data);
+                                    self.avatar_sends.insert(cid, super::daemon::AvatarSendState {
+                                        avatar_data,
+                                        sha256,
+                                        sent: false,
+                                        sent_at: Instant::now(),
+                                        retries: 0,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+
+                PKT_MSG_CHAT => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((seq, text)) = protocol::handle_chat(data, peer) {
+                            peer.touch();
+                            // Always ACK (so sender stops retrying)
+                            protocol::send_ack(peer, socket, seq);
+
+                            // Only deliver to GUI if not a duplicate
+                            if peer.seen_seqs.insert(seq) {
+                                self.event_tx.send(MsgEvent::IncomingMessage {
+                                    contact_id: peer.contact_id.clone(),
+                                    text,
+                                }).ok();
+                            }
+                        }
+                    }
+                }
+
+                PKT_MSG_ACK => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some(seq) = protocol::handle_ack(data, peer) {
+                            peer.touch();
+                            let cid = peer.contact_id.clone();
+                            if let Some(outbox) = self.outboxes.get_mut(&cid) {
+                                outbox.remove_acked(seq);
+                            }
+                            self.event_tx.send(MsgEvent::MessageDelivered).ok();
+                        }
+                    }
+                }
+
+                PKT_MSG_BYE => {
+                    if let Some(peer) = self.peers.remove(&from) {
+                        if peer.is_connected() {
+                            self.event_tx.send(MsgEvent::PeerStatus {
+                                contact_id: peer.contact_id.clone(),
+                                online: false,
+                            }).ok();
+                        }
+                        self.contact_addrs.retain(|_, addr| *addr != from);
+                        self.hello_retries.remove(&from);
+                    }
+                    // Also clean up outgoing requests
+                    self.outgoing_requests.remove(&from);
+                }
+
+                PKT_MSG_REQUEST => {
+                    // Incoming contact request from a peer we already have a session with
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((pubkey, nickname)) = protocol::handle_request(data, peer) {
+                            let ip_str = from.ip().to_string();
+                            let hex = identity::pubkey_hex(&pubkey);
+
+                            // Check if blocked/banned
+                            if self.settings.is_ip_banned(&ip_str) || self.settings.is_blocked(&hex) {
+                                // Silently discard
+                                continue;
+                            }
+
+                            let fingerprint = crate::crypto::fingerprint(&pubkey);
+                            let request_id = from.to_string();
+
+                            // Check if we already have this contact
+                            if identity::load_contact(&pubkey).is_some() {
+                                // Already a contact — auto-accept so the other side completes too
+                                if let Some(ref socket) = self.socket {
+                                    protocol::send_request_accept(
+                                        peer, socket, &self.identity, &self.nickname,
+                                    );
+                                }
+                                continue;
+                            }
+
+                            // Store as pending
+                            self.pending_requests.insert(
+                                request_id.clone(),
+                                (from, pubkey, nickname.clone(), fingerprint.clone()),
+                            );
+
+                            self.event_tx.send(MsgEvent::IncomingRequest {
+                                request_id,
+                                nickname,
+                                ip: ip_str,
+                                fingerprint,
+                            }).ok();
+                        }
+                    }
+                }
+
+                PKT_MSG_REQUEST_ACK => {
+                    // Our contact request was accepted
+                    if let Some(peer) = self.outgoing_requests.get_mut(&from) {
+                        if let Some((pubkey, nickname)) = protocol::handle_request_accept(data, peer) {
+                            let contact_id = identity::derive_contact_id(
+                                &self.identity.pubkey, &pubkey,
+                            );
+                            let fingerprint = crate::crypto::fingerprint(&pubkey);
+
+                            // Save the new contact
+                            let contact = identity::Contact {
+                                fingerprint,
+                                pubkey,
+                                nickname,
+                                contact_id: contact_id.clone(),
+                                first_seen: identity::now_timestamp(),
+                                last_seen: identity::now_timestamp(),
+                                last_address: from.ip().to_string(),
+                                last_port: from.port().to_string(),
+                                call_count: 0,
+                            };
+                            identity::save_contact(&contact);
+
+                            // Move session from outgoing_requests to regular peers
+                            if let Some(mut peer_session) = self.outgoing_requests.remove(&from) {
+                                peer_session.contact_id = contact_id.clone();
+                                peer_session.peer_pubkey = pubkey;
+                                peer_session.peer_nickname = contact.nickname.clone();
+                                peer_session.state = super::session::PeerState::Connected;
+                                peer_session.touch();
+                                self.contact_addrs.insert(contact_id.clone(), from);
+                                self.peers.insert(from, peer_session);
+                            }
+
+                            self.event_tx.send(MsgEvent::RequestAccepted {
+                                contact_id,
+                            }).ok();
+                        }
+                    }
+                }
+
+                PKT_MSG_IP_ANNOUNCE => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((ip, port, timestamp)) = protocol::handle_ip_announce(data, peer) {
+                            peer.touch();
+                            let peer_pubkey = peer.peer_pubkey;
+                            let contact_id = peer.contact_id.clone();
+                            // Only accept if timestamp is newer than what we have
+                            let dominated = self.ip_announces.get(&peer_pubkey)
+                                .map(|(_, _, old_ts)| timestamp <= *old_ts)
+                                .unwrap_or(false);
+                            if !dominated {
+                                log_fmt!("[daemon] IP_ANNOUNCE from {} => ip={} port={} ts={}", from, ip, port, timestamp);
+                                self.ip_announces.insert(peer_pubkey, (ip.clone(), port.clone(), timestamp));
+                                // Update contact on disk
+                                if let Some(mut contact) = identity::load_contact(&peer_pubkey) {
+                                    contact.last_address = ip.clone();
+                                    contact.last_port = port.clone();
+                                    contact.last_seen = identity::now_timestamp();
+                                    identity::save_contact(&contact);
+                                }
+                                if !contact_id.is_empty() {
+                                    self.event_tx.send(MsgEvent::PeerAddressUpdate {
+                                        contact_id,
+                                        ip,
+                                        port,
+                                    }).ok();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                PKT_MSG_PEER_QUERY => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some(target_pubkey) = protocol::handle_peer_query(data, peer) {
+                            peer.touch();
+                            // Rate limit: max QUERY_RATE_MAX queries per QUERY_RATE_WINDOW per peer
+                            let (window_start, count) = self.query_counts.entry(from)
+                                .or_insert((Instant::now(), 0));
+                            if window_start.elapsed() > QUERY_RATE_WINDOW {
+                                *window_start = Instant::now();
+                                *count = 0;
+                            }
+                            *count += 1;
+                            if *count > QUERY_RATE_MAX {
+                                continue; // Rate limited
+                            }
+                            // Only respond if target is our contact AND we have a recent announce
+                            if identity::load_contact(&target_pubkey).is_some() {
+                                if let Some((ip, port, ts)) = self.ip_announces.get(&target_pubkey) {
+                                    let age = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_secs()
+                                        .saturating_sub(*ts);
+                                    if age < ANNOUNCE_MAX_AGE.as_secs() {
+                                        if let Some(ref socket) = self.socket {
+                                            log_fmt!("[daemon] PEER_QUERY from {} for target => responding with ip={} port={}", from, ip, port);
+                                            protocol::send_peer_response(
+                                                peer, socket, &target_pubkey,
+                                                ip, port, *ts,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                PKT_MSG_PEER_RESPONSE => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((target_pubkey, ip, port, timestamp)) = protocol::handle_peer_response(data, peer) {
+                            peer.touch();
+                            log_fmt!("[daemon] PEER_RESPONSE from {} => target ip={} port={} ts={}", from, ip, port, timestamp);
+                            // Update the target contact's address
+                            if let Some(mut contact) = identity::load_contact(&target_pubkey) {
+                                contact.last_address = ip.clone();
+                                contact.last_port = port.clone();
+                                contact.last_seen = identity::now_timestamp();
+                                identity::save_contact(&contact);
+                                // Also cache the announce
+                                self.ip_announces.insert(target_pubkey, (ip.clone(), port.clone(), timestamp));
+                                self.event_tx.send(MsgEvent::PeerAddressUpdate {
+                                    contact_id: contact.contact_id,
+                                    ip,
+                                    port,
+                                }).ok();
+                            }
+                        }
+                    }
+                }
+
+                PKT_MSG_PRESENCE => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some(status) = protocol::handle_presence(data, peer) {
+                            peer.touch();
+                            if !peer.contact_id.is_empty() {
+                                self.event_tx.send(MsgEvent::PresenceUpdate {
+                                    contact_id: peer.contact_id.clone(),
+                                    status,
+                                }).ok();
+                            }
+                        }
+                    }
+                }
+
+                PKT_MSG_FILE_OFFER => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((transfer_id, file_size, sha256, filename)) =
+                            filetransfer::protocol::handle_file_offer(data, peer)
+                        {
+                            peer.touch();
+                            let contact_id = peer.contact_id.clone();
+                            if contact_id.is_empty() { continue; }
+
+                            // Store as incoming waiting
+                            self.file_transfers.insert(
+                                (contact_id.clone(), transfer_id),
+                                FileTransfer::IncomingWaiting {
+                                    transfer_id,
+                                    contact_id: contact_id.clone(),
+                                    filename: filename.clone(),
+                                    file_size,
+                                    sha256,
+                                },
+                            );
+
+                            self.event_tx.send(MsgEvent::IncomingFileOffer {
+                                contact_id,
+                                transfer_id,
+                                filename,
+                                file_size,
+                            }).ok();
+                        }
+                    }
+                }
+
+                PKT_MSG_FILE_ACCEPT => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some(transfer_id) = filetransfer::protocol::handle_file_accept(data, peer) {
+                            peer.touch();
+                            let contact_id = peer.contact_id.clone();
+                            let key = (contact_id.clone(), transfer_id);
+                            // Transition OfferedWaiting → Sending
+                            if let Some(ft) = self.file_transfers.remove(&key) {
+                                if let FileTransfer::OfferedWaiting { file_path, file_size, sha256, .. } = ft {
+                                    let sender = SenderState::new(transfer_id, file_path, file_size, sha256);
+                                    self.file_transfers.insert(key, FileTransfer::Sending(sender));
+                                    // Notify GUI that transfer started (transitions Offered → Accepted)
+                                    self.event_tx.send(MsgEvent::FileTransferProgress {
+                                        contact_id,
+                                        transfer_id,
+                                        bytes_transferred: 0,
+                                        total_bytes: file_size,
+                                    }).ok();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                PKT_MSG_FILE_REJECT => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some(transfer_id) = filetransfer::protocol::handle_file_reject(data, peer) {
+                            peer.touch();
+                            let contact_id = peer.contact_id.clone();
+                            let key = (contact_id.clone(), transfer_id);
+                            self.file_transfers.remove(&key);
+                            self.event_tx.send(MsgEvent::FileTransferFailed {
+                                contact_id,
+                                transfer_id,
+                                reason: "Rejected by peer".into(),
+                            }).ok();
+                        }
+                    }
+                }
+
+                PKT_MSG_FILE_CHUNK => {
+                    // ACK-on-Error: just store the chunk, no ACK needed per-chunk.
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((transfer_id, chunk_index, chunk_data)) =
+                            filetransfer::protocol::handle_file_chunk(data, peer)
+                        {
+                            peer.touch();
+                            let contact_id = peer.contact_id.clone();
+                            let key = (contact_id, transfer_id);
+                            if let Some(FileTransfer::Receiving(ref mut recv)) = self.file_transfers.get_mut(&key) {
+                                recv.on_chunk(chunk_index, &chunk_data);
+                            }
+                        }
+                    }
+                }
+
+                PKT_MSG_FILE_ACK => {
+                    // Final ACK from receiver: all chunks received, transfer done.
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some(transfer_id) =
+                            filetransfer::protocol::handle_file_ack(data, peer)
+                        {
+                            peer.touch();
+                            let contact_id = peer.contact_id.clone();
+                            let key = (contact_id.clone(), transfer_id);
+                            if let Some(FileTransfer::Sending(ref mut sender)) = self.file_transfers.get_mut(&key) {
+                                sender.on_ack();
+                            }
+                            self.file_transfers.remove(&key);
+                            self.event_tx.send(MsgEvent::FileTransferComplete {
+                                contact_id,
+                                transfer_id,
+                                saved_path: String::new(),
+                            }).ok();
+                        }
+                    }
+                }
+
+                PKT_MSG_FILE_NACK => {
+                    // Receiver reports missing chunks — retransmit only those.
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((transfer_id, missing)) =
+                            filetransfer::protocol::handle_file_nack(data, peer)
+                        {
+                            peer.touch();
+                            let contact_id = peer.contact_id.clone();
+                            let key = (contact_id, transfer_id);
+                            if let Some(FileTransfer::Sending(ref mut sender)) = self.file_transfers.get_mut(&key) {
+                                sender.on_nack(missing);
+                            }
+                        }
+                    }
+                }
+
+                PKT_MSG_FILE_COMPLETE => {
+                    // Sender says all chunks sent. Check for missing, respond with ACK or NACK.
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((transfer_id, _sha256)) =
+                            filetransfer::protocol::handle_file_complete(data, peer)
+                        {
+                            peer.touch();
+                            let contact_id = peer.contact_id.clone();
+                            let key = (contact_id.clone(), transfer_id);
+
+                            // Check if receiver has all chunks
+                            let action = if let Some(FileTransfer::Receiving(ref recv)) = self.file_transfers.get(&key) {
+                                let missing = recv.missing_chunks();
+                                if missing.is_empty() {
+                                    Some(("complete".to_string(), missing))
+                                } else {
+                                    Some(("nack".to_string(), missing))
+                                }
+                            } else {
+                                None
+                            };
+
+                            if let Some((action_type, missing)) = action {
+                                if action_type == "nack" {
+                                    // Send NACK with missing chunk list
+                                    if let Some(ref socket) = self.socket {
+                                        filetransfer::protocol::send_file_nack(
+                                            peer, socket, transfer_id, &missing,
+                                        );
+                                    }
+                                } else {
+                                    // All received — verify and finalize
+                                    if let Some(ref socket) = self.socket {
+                                        filetransfer::protocol::send_file_ack(peer, socket, transfer_id);
+                                    }
+                                    if let Some(ft) = self.file_transfers.remove(&key) {
+                                        if let FileTransfer::Receiving(mut recv) = ft {
+                                            recv.flush();
+                                            if recv.verify_hash() {
+                                                if let Some(saved_path) = recv.finalize() {
+                                                    self.event_tx.send(MsgEvent::FileTransferComplete {
+                                                        contact_id,
+                                                        transfer_id,
+                                                        saved_path,
+                                                    }).ok();
+                                                } else {
+                                                    recv.cleanup();
+                                                    self.event_tx.send(MsgEvent::FileTransferFailed {
+                                                        contact_id, transfer_id,
+                                                        reason: "Failed to save file".into(),
+                                                    }).ok();
+                                                }
+                                            } else {
+                                                recv.cleanup();
+                                                self.event_tx.send(MsgEvent::FileTransferFailed {
+                                                    contact_id, transfer_id,
+                                                    reason: "Hash verification failed".into(),
+                                                }).ok();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                PKT_MSG_FILE_CANCEL => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((transfer_id, _reason)) =
+                            filetransfer::protocol::handle_file_cancel(data, peer)
+                        {
+                            peer.touch();
+                            let contact_id = peer.contact_id.clone();
+                            let key = (contact_id.clone(), transfer_id);
+                            if let Some(mut ft) = self.file_transfers.remove(&key) {
+                                if let FileTransfer::Receiving(ref mut recv) = ft {
+                                    recv.cleanup();
+                                }
+                                self.event_tx.send(MsgEvent::FileTransferFailed {
+                                    contact_id,
+                                    transfer_id,
+                                    reason: "Cancelled by peer".into(),
+                                }).ok();
+                            }
+                        }
+                    }
+                }
+
+                PKT_MSG_AVATAR_OFFER => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((sha256, total_size)) = protocol::handle_avatar_offer(data, peer) {
+                            peer.touch();
+                            let contact_id = peer.contact_id.clone();
+                            if contact_id.is_empty() { continue; }
+                            // Validate size cap
+                            if total_size as usize > crate::avatar::MAX_AVATAR_BYTES {
+                                continue;
+                            }
+                            let chunk_size = super::daemon::AVATAR_CHUNK_SIZE;
+                            let total_chunks = ((total_size as usize + chunk_size - 1) / chunk_size) as u16;
+                            log_fmt!("[daemon] AVATAR_OFFER from {} size={} chunks={}", from, total_size, total_chunks);
+                            self.avatar_recvs.insert(from, super::daemon::AvatarRecvState {
+                                sha256,
+                                total_size,
+                                total_chunks,
+                                chunks: std::collections::HashMap::new(),
+                                started_at: Instant::now(),
+                                contact_id,
+                            });
+                        }
+                    }
+                }
+
+                PKT_MSG_AVATAR_DATA => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((chunk_index, chunk_data)) = protocol::handle_avatar_data(data, peer) {
+                            peer.touch();
+                            if let Some(recv) = self.avatar_recvs.get_mut(&from) {
+                                if chunk_index < recv.total_chunks {
+                                    recv.chunks.insert(chunk_index, chunk_data);
+                                }
+                                // Check if all chunks received
+                                if recv.chunks.len() as u16 >= recv.total_chunks {
+                                    // Reassemble
+                                    let mut assembled = Vec::with_capacity(recv.total_size as usize);
+                                    let mut ok = true;
+                                    for i in 0..recv.total_chunks {
+                                        if let Some(chunk) = recv.chunks.get(&i) {
+                                            assembled.extend_from_slice(chunk);
+                                        } else {
+                                            ok = false;
+                                            break;
+                                        }
+                                    }
+                                    if ok {
+                                        // Validate
+                                        let hash = crate::avatar::avatar_sha256(&assembled);
+                                        if hash == recv.sha256 && crate::avatar::validate_received_avatar(&assembled) {
+                                            let cid = recv.contact_id.clone();
+                                            log_fmt!("[daemon] avatar received OK for contact {}", cid);
+                                            crate::avatar::save_contact_avatar(&cid, &assembled).ok();
+                                            self.event_tx.send(MsgEvent::AvatarReceived {
+                                                contact_id: cid,
+                                            }).ok();
+                                        } else {
+                                            log_fmt!("[daemon] avatar validation FAILED from {}", from);
+                                        }
+                                    }
+                                    self.avatar_recvs.remove(&from);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                PKT_HELLO => {
+                    // Voice HELLO (0x01) — detect incoming calls from known contacts
+                    let ip_str = from.ip().to_string();
+                    log_fmt!("[daemon] PKT_HELLO from {} (ip={})", from, ip_str);
+                    if self.settings.is_ip_banned(&ip_str) {
+                        log_fmt!("[daemon]   SKIP: ip banned");
+                        continue;
+                    }
+                    // Suppress extra HELLOs after a recent reject (short window)
+                    if let Some(t) = self.rejected_ips.get(&ip_str) {
+                        if t.elapsed() < Duration::from_secs(5) {
+                            log_fmt!("[daemon]   SKIP: rejected_ips cooldown ({}ms ago)", t.elapsed().as_millis());
+                            continue;
+                        }
+                    }
+                    // Parse ephemeral pubkey from HELLO
+                    let peer_ephemeral = match crypto::parse_hello(data) {
+                        Some(pk) => pk,
+                        None => {
+                            log_fmt!("[daemon]   SKIP: parse_hello failed (len={}, type=0x{:02x})", data.len(), data[0]);
+                            continue;
+                        }
+                    };
+                    let pk_short = format!("{:02x}{:02x}{:02x}{:02x}", peer_ephemeral[0], peer_ephemeral[1], peer_ephemeral[2], peer_ephemeral[3]);
+                    log_fmt!("[daemon]   ephemeral_pk={}...", pk_short);
+                    // Suppress retries from the SAME call (same ephemeral key).
+                    // A NEW call uses a different key, so it always gets through.
+                    if let Some((t, _, stored_pk)) = self.notified_calls.get(&ip_str) {
+                        let stored_short = format!("{:02x}{:02x}{:02x}{:02x}", stored_pk[0], stored_pk[1], stored_pk[2], stored_pk[3]);
+                        let same_key = *stored_pk == peer_ephemeral;
+                        log_fmt!("[daemon]   notified_calls entry: stored_pk={}... same_key={} age={}ms",
+                            stored_short, same_key, t.elapsed().as_millis());
+                        if same_key && t.elapsed() < Duration::from_secs(60) {
+                            log_fmt!("[daemon]   SKIP: same call retry");
+                            continue;
+                        }
+                        log_fmt!("[daemon]   PASS: different key or expired");
+                    } else {
+                        log_fmt!("[daemon]   no notified_calls entry for this IP");
+                    }
+
+                    // Try to identify caller:
+                    // 1. Check active messaging peers (most reliable)
+                    let mut found_contact: Option<identity::Contact> = None;
+                    if let Some(peer) = self.peers.get(&from) {
+                        if peer.is_connected() && !peer.contact_id.is_empty() {
+                            found_contact = identity::load_contact(&peer.peer_pubkey);
+                            if found_contact.is_some() {
+                                log_fmt!("[daemon]   matched via active messaging peer");
+                            }
+                        }
+                    }
+                    // 2. Check contacts by exact last_address
+                    if found_contact.is_none() {
+                        let contacts = identity::load_all_contacts();
+                        found_contact = contacts.into_iter()
+                            .find(|c| c.last_address == ip_str);
+                        if found_contact.is_some() {
+                            log_fmt!("[daemon]   matched via exact last_address");
+                        }
+                    }
+                    // 3. Check contacts by /64 prefix match (IPv6 privacy addresses)
+                    if found_contact.is_none() {
+                        let contacts = identity::load_all_contacts();
+                        found_contact = contacts.into_iter()
+                            .find(|c| ipv6_prefix_match(&c.last_address, &ip_str));
+                        if found_contact.is_some() {
+                            log_fmt!("[daemon]   matched via /64 prefix");
+                        }
+                    }
+
+                    if let Some(contact) = found_contact {
+                        log_fmt!("[daemon]   => EMITTING IncomingCall for '{}' ({})", contact.nickname, contact.fingerprint);
+                        self.notified_calls.insert(
+                            ip_str.clone(),
+                            (Instant::now(), from, peer_ephemeral),
+                        );
+                        self.event_tx.send(MsgEvent::IncomingCall {
+                            nickname: contact.nickname.clone(),
+                            fingerprint: contact.fingerprint.clone(),
+                            ip: ip_str,
+                            port: from.port().to_string(),
+                        }).ok();
+                    } else {
+                        log_fmt!("[daemon]   NO contact match found (checked {} contacts)", identity::load_all_contacts().len());
+                    }
+                }
+
+                _ => {} // Ignore unknown packet types
+            }
+
+            // Only process one packet per frame to keep latency low
+            break;
+        }
+    }
+}
+
+/// Check if two IPv6 addresses share the same /64 prefix.
+/// This handles IPv6 privacy extensions where the host part changes
+/// but the network prefix stays the same.
+fn ipv6_prefix_match(a: &str, b: &str) -> bool {
+    use std::net::Ipv6Addr;
+    let a_addr: Ipv6Addr = match a.parse() {
+        Ok(addr) => addr,
+        Err(_) => return false,
+    };
+    let b_addr: Ipv6Addr = match b.parse() {
+        Ok(addr) => addr,
+        Err(_) => return false,
+    };
+    let a_segs = a_addr.segments();
+    let b_segs = b_addr.segments();
+    // Compare first 4 segments (64 bits = /64 prefix)
+    a_segs[0] == b_segs[0] && a_segs[1] == b_segs[1]
+        && a_segs[2] == b_segs[2] && a_segs[3] == b_segs[3]
+}

@@ -37,6 +37,8 @@ pub const PKT_MSG_FILE_COMPLETE: u8 = 0x20; // file complete (sender done): encr
 pub const PKT_MSG_FILE_CANCEL: u8   = 0x21; // file cancel: encrypted [4B transfer_id][1B reason]
 pub const PKT_MSG_FILE_NACK: u8     = 0x22; // file nack (missing chunks): encrypted [4B transfer_id][4B missing_count LE][4B idx LE ...]
 pub const PKT_MSG_CONFIRM: u8       = 0x23; // identity-bound key upgrade confirmation
+pub const PKT_MSG_AVATAR_OFFER: u8  = 0x24; // avatar offer: encrypted [32B sha256][4B total_size LE]
+pub const PKT_MSG_AVATAR_DATA: u8   = 0x25; // avatar chunk: encrypted [2B chunk_index LE][up to 1200B data]
 
 /// Size of an X25519 public key.
 pub const PUBKEY_SIZE: usize = 32;
