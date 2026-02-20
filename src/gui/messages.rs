@@ -1,11 +1,17 @@
 use eframe::egui;
 use std::net::SocketAddr;
 
+use crate::avatar;
 use crate::chat::{ChatHistory, FileTransferStatus};
 use crate::identity;
 use crate::messaging::MsgCommand;
 
-use super::HostelApp;
+use super::{HostelApp, load_avatar_texture};
+
+const DEFAULT_AVATAR_PNG: &[u8] = include_bytes!("../../assets/default_avatar.png");
+
+/// Number of messages to show initially and per "Load more" page.
+const MSG_PAGE_SIZE: usize = 100;
 
 impl HostelApp {
     pub(crate) fn draw_messages_tab(&mut self, ui: &mut egui::Ui) {
@@ -122,13 +128,14 @@ impl HostelApp {
             .max_height(max_height)
             .id_salt("messages_list_scroll")
             .show(ui, |ui| {
-                for (contact_id, name, preview, online, unread) in &conversations {
+                for (contact_id, name, _preview, online, unread) in &conversations {
                     let is_active = active_cid.as_deref() == Some(contact_id.as_str());
 
-                    // Highlight active chat
+                    // Highlight active chat with same bg as sidebar buttons
                     let frame = if is_active {
                         egui::Frame::none()
-                            .fill(self.settings.theme.sidebar_bg())
+                            .fill(self.settings.theme.widget_bg())
+                            .rounding(6.0)
                             .inner_margin(4.0)
                     } else {
                         egui::Frame::none().inner_margin(4.0)
@@ -151,6 +158,55 @@ impl HostelApp {
                             };
                             let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
                             ui.painter().circle_filled(rect.center(), 4.0, color);
+
+                            // Avatar (32px circle)
+                            let avatar_size = 32.0;
+                            let is_self = name == "YO (you)";
+                            let avatar_tex = if is_self {
+                                // Use own avatar
+                                if self.own_avatar_texture.is_none() {
+                                    if let Some(bytes) = avatar::load_own_avatar() {
+                                        self.own_avatar_texture = load_avatar_texture(
+                                            ui.ctx(), "own_avatar", &bytes, 96,
+                                        );
+                                    }
+                                }
+                                self.own_avatar_texture.as_ref()
+                            } else {
+                                // Use contact avatar (lazy load)
+                                if !self.contact_avatar_textures.contains_key(contact_id) {
+                                    if let Some(bytes) = avatar::load_contact_avatar(contact_id) {
+                                        if let Some(tex) = load_avatar_texture(
+                                            ui.ctx(),
+                                            &format!("contact_avatar_{}", &contact_id[..8.min(contact_id.len())]),
+                                            &bytes, 32,
+                                        ) {
+                                            self.contact_avatar_textures.insert(contact_id.clone(), tex);
+                                        }
+                                    }
+                                }
+                                self.contact_avatar_textures.get(contact_id)
+                            };
+
+                            let (av_rect, _) = ui.allocate_exact_size(
+                                egui::vec2(avatar_size, avatar_size),
+                                egui::Sense::hover(),
+                            );
+                            if let Some(tex) = avatar_tex {
+                                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                                ui.painter().image(tex.id(), av_rect, uv, egui::Color32::WHITE);
+                            } else {
+                                // Default placeholder
+                                if self.default_avatar_texture.is_none() {
+                                    self.default_avatar_texture = load_avatar_texture(
+                                        ui.ctx(), "default_avatar", DEFAULT_AVATAR_PNG, 96,
+                                    );
+                                }
+                                if let Some(tex) = &self.default_avatar_texture {
+                                    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                                    ui.painter().image(tex.id(), av_rect, uv, egui::Color32::from_white_alpha(160));
+                                }
+                            }
 
                             // Name + badge + preview (clickable)
                             let text = if *unread > 0 {
@@ -186,10 +242,6 @@ impl HostelApp {
                                 });
                                 if resp.inner {
                                     *open_chat = Some(contact_id.clone());
-                                }
-                                if !preview.is_empty() {
-                                    ui.colored_label(self.settings.theme.text_muted(),
-                                        egui::RichText::new(preview.as_str()).small());
                                 }
                             });
                         });
@@ -307,47 +359,83 @@ impl HostelApp {
         // Collect file transfer actions to process after the borrow ends
         let mut file_actions: Vec<FileAction> = Vec::new();
 
-        egui::ScrollArea::vertical()
+        let visible_count = self.msg_visible_count.get(&contact_id).copied().unwrap_or(MSG_PAGE_SIZE);
+
+        // If we loaded more messages last frame, set the initial scroll offset to compensate
+        let pending_compensate = self.msg_scroll_compensate.take();
+        let mut scroll_area = egui::ScrollArea::vertical()
             .max_height(scroll_height)
             .auto_shrink(false)
-            .stick_to_bottom(true)
-            .id_salt("msg_conversation_scroll")
-            .show(ui, |ui| {
+            .id_salt("msg_conversation_scroll");
+
+        // Only stick to bottom if we're NOT compensating (normal flow)
+        if pending_compensate.is_none() {
+            scroll_area = scroll_area.stick_to_bottom(true);
+        }
+
+        let scroll_output = scroll_area.show(ui, |ui| {
                 if let Some(history) = self.msg_chat_histories.get(&contact_id) {
                     if history.messages.is_empty() {
                         ui.colored_label(self.settings.theme.text_muted(), "No messages yet.");
-                    }
-                    for msg in &history.messages {
-                        let time = ChatHistory::format_time(msg.timestamp);
+                    } else {
+                        let total = history.messages.len();
+                        let skip = total.saturating_sub(visible_count);
 
-                        // File transfer message
-                        if let Some(ref ft) = msg.file_transfer {
-                            self.draw_file_message(ui, &contact_id, msg, ft, &time, &peer_name, &mut file_actions);
-                            continue;
-                        }
+                        for msg in history.messages.iter().skip(skip) {
+                            let time = ChatHistory::format_time(msg.timestamp);
 
-                        // Regular text message
-                        if msg.from_me {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.add_space(2.0);
-                                ui.colored_label(self.settings.theme.text_muted(), &time);
-                                ui.colored_label(self.settings.theme.chat_self(), "You:");
-                                ui.label(&msg.text);
-                            });
-                        } else {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.add_space(2.0);
-                                ui.colored_label(self.settings.theme.text_muted(), &time);
-                                ui.colored_label(
-                                    self.settings.theme.chat_peer(),
-                                    format!("{}:", peer_name),
-                                );
-                                ui.label(&msg.text);
-                            });
+                            // File transfer message
+                            if let Some(ref ft) = msg.file_transfer {
+                                self.draw_file_message(ui, &contact_id, msg, ft, &time, &peer_name, &mut file_actions);
+                                continue;
+                            }
+
+                            // Regular text message
+                            if msg.from_me {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.add_space(2.0);
+                                    ui.colored_label(self.settings.theme.text_muted(), &time);
+                                    ui.colored_label(self.settings.theme.chat_self(), "You:");
+                                    ui.label(&msg.text);
+                                });
+                            } else {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.add_space(2.0);
+                                    ui.colored_label(self.settings.theme.text_muted(), &time);
+                                    ui.colored_label(
+                                        self.settings.theme.chat_peer(),
+                                        format!("{}:", peer_name),
+                                    );
+                                    ui.label(&msg.text);
+                                });
+                            }
                         }
                     }
                 }
             });
+
+        // Compensate scroll position after loading older messages
+        if let Some(old_height) = pending_compensate {
+            let new_height = scroll_output.content_size.y;
+            let height_diff = new_height - old_height;
+            if height_diff > 0.0 {
+                let mut state = scroll_output.state.clone();
+                state.offset.y += height_diff;
+                let scroll_id = egui::Id::new("msg_conversation_scroll");
+                state.store(ui.ctx(), scroll_id);
+                ui.ctx().request_repaint();
+            }
+        }
+
+        // Auto-load older messages when scrolled near the top
+        let has_older = self.msg_chat_histories.get(&contact_id)
+            .map_or(false, |h| h.messages.len() > visible_count);
+        if has_older && scroll_output.state.offset.y < 50.0 && pending_compensate.is_none() {
+            // Save current content height so next frame we can compensate
+            self.msg_scroll_compensate = Some(scroll_output.content_size.y);
+            let new_count = visible_count + MSG_PAGE_SIZE;
+            self.msg_visible_count.insert(contact_id.clone(), new_count);
+        }
 
         // Process deferred file actions
         for action in file_actions {
@@ -623,6 +711,8 @@ impl HostelApp {
         }
         self.msg_active_chat = Some(contact_id.to_string());
         self.msg_unread.remove(contact_id);
+        // Start showing only the last PAGE_SIZE messages
+        self.msg_visible_count.insert(contact_id.to_string(), MSG_PAGE_SIZE);
 
         // Try to connect to peer via daemon
         if let Some(contact) = self.contacts.iter().find(|c| c.contact_id == contact_id) {
