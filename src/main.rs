@@ -20,14 +20,10 @@ pub mod theme;
 mod messaging;
 mod filetransfer;
 mod screen;
-mod sysaudio;
-mod sysfirewall;
+mod platform;
+mod avatar;
 mod voice;
 mod ui;
-#[cfg(target_os = "linux")]
-mod wayland_capture;
-#[cfg(target_os = "macos")]
-mod sck_audio;
 
 fn main() {
     let args: Vec<String> = env::args().collect();

@@ -309,7 +309,7 @@ impl HostelApp {
                         }
                     }
                     if self.loopback_devices.is_empty() {
-                        self.loopback_devices = crate::sysaudio::list_loopback_devices();
+                        self.loopback_devices = crate::audio::list_loopback_devices();
                     }
                     self.display_names = crate::screen::list_displays();
                     self.show_screen_popup = true;
@@ -402,7 +402,7 @@ impl HostelApp {
                         });
 
                     #[cfg(target_os = "linux")]
-                    if crate::wayland_capture::is_wayland() {
+                    if crate::screen::wayland::is_wayland() {
                         ui.colored_label(
                             egui::Color32::from_rgb(180, 180, 255),
                             "Display will be selected via system dialog",

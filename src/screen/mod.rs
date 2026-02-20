@@ -12,6 +12,9 @@ use vpx_sys::vp8e_enc_control_id::VP8E_SET_CPUUSED;
 use vpx_sys::vpx_img_fmt::VPX_IMG_FMT_I420;
 use vpx_sys::vpx_codec_cx_pkt_kind::VPX_CODEC_CX_FRAME_PKT;
 
+#[cfg(target_os = "linux")]
+pub mod wayland;
+
 use crate::crypto::{Session, PKT_SCREEN};
 
 // ── Capture Source ──
@@ -23,7 +26,7 @@ pub enum CaptureSource {
     /// Wayland XDG Desktop Portal + PipeWire (Linux only)
     #[cfg(target_os = "linux")]
     PipeWire {
-        capture: crate::wayland_capture::PortalCapture,
+        capture: wayland::PortalCapture,
     },
     /// Webcam via nokhwa (V4L2 on Linux, MediaFoundation on Windows)
     Webcam { device_index: usize },
@@ -100,7 +103,7 @@ pub enum ScreenCommand {
 pub fn list_displays() -> Vec<String> {
     #[cfg(target_os = "linux")]
     {
-        if crate::wayland_capture::is_wayland() {
+        if wayland::is_wayland() {
             return vec!["Screen (system dialog)".to_string()];
         }
     }
@@ -669,7 +672,7 @@ fn capture_loop_pipewire(
     active: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     quality: ScreenQuality,
-    capture: crate::wayland_capture::PortalCapture,
+    capture: wayland::PortalCapture,
 ) {
     use std::sync::Mutex;
     use std::thread;
@@ -687,7 +690,7 @@ fn capture_loop_pipewire(
         let a = active.clone();
         let r = running.clone();
         thread::spawn(move || {
-            crate::wayland_capture::run_pipewire_capture(capture, fb, a, r);
+            wayland::run_pipewire_capture(capture, fb, a, r);
         })
     };
 

@@ -13,7 +13,7 @@ use std::sync::Arc;
 pub enum SysAudioStream {
     Cpal(cpal::Stream),
     #[cfg(target_os = "macos")]
-    Sck(crate::sck_audio::SckStream),
+    Sck(super::sck::SckStream),
 }
 
 impl SysAudioStream {
@@ -34,7 +34,7 @@ impl SysAudioStream {
 pub fn list_loopback_devices() -> Vec<String> {
     #[cfg(target_os = "macos")]
     {
-        return crate::sck_audio::list_system_audio_sources();
+        return super::sck::list_system_audio_sources();
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -98,7 +98,7 @@ pub fn start_system_audio_capture(
     #[cfg(target_os = "macos")]
     {
         let _ = device_name;
-        let (stream, leftover) = crate::sck_audio::start_capture(producer, active);
+        let (stream, leftover) = super::sck::start_capture(producer, active);
         (stream.map(SysAudioStream::Sck), leftover)
     }
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]

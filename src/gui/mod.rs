@@ -5,7 +5,9 @@ mod call;
 mod settings;
 mod error;
 mod messages;
-mod requests;
+mod network;
+mod notifications;
+mod popups;
 
 use cpal::traits::{DeviceTrait, HostTrait};
 use eframe::egui;
@@ -15,13 +17,15 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
-
 use crate::chat::ChatHistory;
 use crate::identity::{self, Contact, Identity, Settings};
 use crate::messaging::{MsgCommand, MsgDaemon, MsgEvent};
 use crate::screen::{ScreenCommand, ScreenViewer};
+
+// Re-export functions used by submodules via super::
+pub(crate) use network::{get_best_ipv6, get_adapter_names, format_peer_display, peer_display_job, censor_ip};
+pub(crate) use notifications::{start_ringtone, play_notification_sound, send_desktop_notification};
+pub(crate) use popups::{load_png_cropped, load_icon_texture_sized, load_avatar_texture};
 
 // ── App State Machine ──
 
@@ -36,12 +40,17 @@ pub(crate) enum Screen {
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum SidebarTab {
     Profile,
-    Contacts,
-    Requests,
+    Friends,
     Messages,
     Call,
     Settings,
     Appearance,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum FriendsSubTab {
+    List,
+    Requests,
 }
 
 pub(crate) struct DeviceList {
@@ -58,411 +67,6 @@ pub(crate) fn list_audio_devices() -> DeviceList {
         .map(|devs| devs.map(|d| d.name().unwrap_or_else(|_| "unknown".into())).collect())
         .unwrap_or_default();
     DeviceList { input_names, output_names }
-}
-
-/// Get the best (non-temporary, non-loopback) IPv6 address, optionally filtered by adapter.
-pub(crate) fn get_best_ipv6(adapter: &str) -> String {
-    let ifaces = get_network_interfaces();
-    let filtered: Vec<&(String, String, String)> = if adapter.is_empty() {
-        ifaces.iter().collect()
-    } else {
-        ifaces.iter().filter(|(iface, _, _)| iface == adapter).collect()
-    };
-    // Prefer global non-loopback
-    for (_, ip, scope) in &filtered {
-        if *ip != "::1" && scope == "global" {
-            return ip.clone();
-        }
-    }
-    // Fallback to link-local
-    for (_, ip, _) in &filtered {
-        if *ip != "::1" {
-            return ip.clone();
-        }
-    }
-    "::1".to_string()
-}
-
-/// Get unique network adapter names (excluding loopback and docker/veth).
-pub(crate) fn get_adapter_names() -> Vec<String> {
-    let ifaces = get_network_interfaces();
-    let mut names: Vec<String> = Vec::new();
-    for (iface, _, _) in &ifaces {
-        if iface != "lo" && !names.contains(iface) {
-            names.push(iface.clone());
-        }
-    }
-    names
-}
-
-/// Returns (interface_name, ip, scope) for all non-temporary IPv6 addresses.
-fn get_network_interfaces() -> Vec<(String, String, String)> {
-    let mut result: Vec<(String, String, String)> = Vec::new();
-
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(output) = std::process::Command::new("ip").args(["-6", "addr", "show"]).output() {
-            let text = String::from_utf8_lossy(&output.stdout);
-            let mut current_iface = String::new();
-            for line in text.lines() {
-                let trimmed = line.trim();
-                // Interface line: "3: wlp3s0: <BROADCAST,..."
-                if !trimmed.starts_with("inet6") && trimmed.contains(": <") {
-                    if let Some(name) = trimmed.split(':').nth(1) {
-                        current_iface = name.trim().to_string();
-                        // Strip @... suffix (e.g. "vethd3f93b1@enp2s0")
-                        if let Some(pos) = current_iface.find('@') {
-                            current_iface.truncate(pos);
-                        }
-                    }
-                }
-                if trimmed.starts_with("inet6") {
-                    // Skip temporary privacy extension addresses
-                    if trimmed.contains("temporary") {
-                        continue;
-                    }
-                    if let Some(addr_cidr) = trimmed.split_whitespace().nth(1) {
-                        let addr = addr_cidr.split('/').next().unwrap_or(addr_cidr);
-                        if addr == "::1" { continue; }
-                        let scope = if trimmed.contains("scope global") { "global" }
-                            else if trimmed.contains("scope link") { "link-local" }
-                            else { "other" };
-                        result.push((current_iface.clone(), addr.to_string(), scope.to_string()));
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        // Use PowerShell CSV output to handle adapter names with spaces (e.g. "Ethernet 2", "vEthernet (WSL)")
-        if let Ok(output) = std::process::Command::new("powershell")
-            .args(["-Command", "Get-NetIPAddress -AddressFamily IPv6 | Where-Object { $_.SuffixOrigin -ne 'Random' -and $_.IPAddress -ne '::1' -and $_.AddressState -eq 'Preferred' } | Select-Object InterfaceAlias, IPAddress | ConvertTo-Csv -NoTypeInformation"])
-            .creation_flags(0x08000000)
-            .output()
-        {
-            let text = String::from_utf8_lossy(&output.stdout);
-            for line in text.lines().skip(1) { // skip CSV header
-                let line = line.trim();
-                if line.is_empty() { continue; }
-                // CSV format: "InterfaceAlias","IPAddress"
-                let fields: Vec<&str> = line.split(',').collect();
-                if fields.len() >= 2 {
-                    let iface = fields[0].trim_matches('"').to_string();
-                    let addr = fields[1].trim_matches('"').to_string();
-                    if addr == "::1" || addr.is_empty() { continue; }
-                    let scope = if addr.starts_with("fe80") { "link-local" } else { "global" };
-                    result.push((iface, addr, scope.to_string()));
-                }
-            }
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        if let Ok(output) = std::process::Command::new("ifconfig").output() {
-            let text = String::from_utf8_lossy(&output.stdout);
-            let mut current_iface = String::new();
-            for line in text.lines() {
-                // Interface header: "en0: flags=8863<UP,..."
-                if !line.starts_with('\t') && !line.starts_with(' ') {
-                    if let Some(name) = line.split(':').next() {
-                        current_iface = name.to_string();
-                    }
-                }
-                let trimmed = line.trim();
-                if trimmed.starts_with("inet6") {
-                    // Skip temporary/deprecated addresses
-                    if trimmed.contains("deprecated") || trimmed.contains("temporary") {
-                        continue;
-                    }
-                    // Format: "inet6 fe80::1%en0 prefixlen 64 scopeid 0x4"
-                    // or:     "inet6 2001:db8::1 prefixlen 64"
-                    if let Some(addr_raw) = trimmed.split_whitespace().nth(1) {
-                        // Strip %interface suffix (e.g. "fe80::1%en0" → "fe80::1")
-                        let addr = addr_raw.split('%').next().unwrap_or(addr_raw);
-                        if addr == "::1" { continue; }
-                        // Skip loopback interface
-                        if current_iface == "lo0" { continue; }
-                        let scope = if addr.starts_with("fe80") { "link-local" } else { "global" };
-                        result.push((current_iface.clone(), addr.to_string(), scope.to_string()));
-                    }
-                }
-            }
-        }
-    }
-
-    // Sort: global first per interface
-    result.sort_by_key(|(_, _, scope)| {
-        match scope.as_str() {
-            "global" => 0,
-            "link-local" => 1,
-            _ => 2,
-        }
-    });
-    result
-}
-
-/// Format a contact/peer for display: "nickname #fingerprint" or just fingerprint.
-pub(crate) fn format_peer_display(nickname: &str, fingerprint: &str) -> String {
-    if nickname.is_empty() {
-        fingerprint.to_string()
-    } else {
-        format!("{nickname} #{fingerprint}")
-    }
-}
-
-/// Build a LayoutJob with nickname bold/large and #fingerprint smaller/gray.
-pub(crate) fn peer_display_job(nickname: &str, fingerprint: &str, base_size: f32, name_color: egui::Color32, dim_color: egui::Color32) -> egui::text::LayoutJob {
-    let mut job = egui::text::LayoutJob::default();
-    if nickname.is_empty() {
-        job.append(
-            fingerprint,
-            0.0,
-            egui::TextFormat {
-                font_id: egui::FontId::proportional(base_size),
-                color: name_color,
-                ..Default::default()
-            },
-        );
-    } else {
-        job.append(
-            nickname,
-            0.0,
-            egui::TextFormat {
-                font_id: egui::FontId::proportional(base_size + 1.0),
-                color: name_color,
-                ..Default::default()
-            },
-        );
-        job.append(
-            &format!(" #{fingerprint}"),
-            0.0,
-            egui::TextFormat {
-                font_id: egui::FontId::proportional(base_size - 2.0),
-                color: dim_color,
-                ..Default::default()
-            },
-        );
-    }
-    job
-}
-
-/// Censor an IP address: show first group, mask the rest.
-/// e.g. "2803:c600:d310:..." → "2803:****"
-pub(crate) fn censor_ip(ip: &str) -> String {
-    if ip == "::1" || ip.is_empty() {
-        return ip.to_string();
-    }
-    // Find the first ':' and keep everything before it
-    if let Some(pos) = ip.find(':') {
-        format!("{}:****", &ip[..pos])
-    } else if let Some(pos) = ip.find('.') {
-        // IPv4: show first octet
-        format!("{}.***.***", &ip[..pos])
-    } else {
-        "****".to_string()
-    }
-}
-
-/// Start playing the ringtone in a loop on a background thread.
-/// Returns a stop flag; set it to true to stop playback.
-fn start_ringtone() -> Arc<AtomicBool> {
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_clone = stop.clone();
-    std::thread::spawn(move || {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let path = format!("{}/.hostelD/ringtone.mp3", std::env::var("HOME").unwrap_or_default());
-        #[cfg(target_os = "windows")]
-        let path = format!("{}\\.hostelD\\ringtone.mp3", std::env::var("USERPROFILE").unwrap_or_default());
-
-        if !std::path::Path::new(&path).exists() {
-            return;
-        }
-
-        while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
-            #[cfg(target_os = "linux")]
-            let mut child = match std::process::Command::new("gst-play-1.0")
-                .arg(&path)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-            {
-                Ok(c) => c,
-                Err(_) => break,
-            };
-
-            #[cfg(target_os = "windows")]
-            let mut child = match std::process::Command::new("powershell")
-                .args([
-                    "-WindowStyle", "Hidden", "-Command",
-                    &format!(
-                        "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; \
-                         public class WinMM {{ [DllImport(\"winmm.dll\")] \
-                         public static extern int mciSendString(string cmd, System.Text.StringBuilder buf, int sz, IntPtr cb); }}'; \
-                         $null=[WinMM]::mciSendString('open \"{}\" alias hostelring', $null, 0, [IntPtr]::Zero); \
-                         $null=[WinMM]::mciSendString('play hostelring wait', $null, 0, [IntPtr]::Zero); \
-                         $null=[WinMM]::mciSendString('close hostelring', $null, 0, [IntPtr]::Zero)",
-                        path.replace('\\', "/")
-                    ),
-                ])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .creation_flags(0x08000000)
-                .spawn()
-            {
-                Ok(c) => c,
-                Err(_) => break,
-            };
-
-            #[cfg(target_os = "macos")]
-            let mut child = match std::process::Command::new("afplay")
-                .arg(&path)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-            {
-                Ok(c) => c,
-                Err(_) => break,
-            };
-
-            loop {
-                if stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
-                    child.kill().ok();
-                    child.wait().ok();
-                    return;
-                }
-                match child.try_wait() {
-                    Ok(Some(_)) => break, // Finished playing, loop again
-                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
-                    Err(_) => return,
-                }
-            }
-        }
-    });
-    stop
-}
-
-/// Play the notification sound once in a background thread.
-fn play_notification_sound() {
-    std::thread::spawn(|| {
-        #[cfg(target_os = "linux")]
-        let home = std::env::var("HOME").unwrap_or_default();
-        #[cfg(target_os = "windows")]
-        let home = std::env::var("USERPROFILE").unwrap_or_default();
-        #[cfg(target_os = "macos")]
-        let home = std::env::var("HOME").unwrap_or_default();
-
-        let sep = if cfg!(windows) { "\\" } else { "/" };
-        let path = format!("{home}{sep}.hostelD{sep}notification.mp3");
-
-        if !std::path::Path::new(&path).exists() {
-            return;
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            std::process::Command::new("gst-play-1.0")
-                .arg(&path)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn().ok();
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            std::process::Command::new("powershell")
-                .args([
-                    "-WindowStyle", "Hidden", "-Command",
-                    &format!(
-                        "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; \
-                         public class WinMM {{ [DllImport(\"winmm.dll\")] \
-                         public static extern int mciSendString(string cmd, System.Text.StringBuilder buf, int sz, IntPtr cb); }}'; \
-                         $null=[WinMM]::mciSendString('open \"{}\" alias hostelnotif', $null, 0, [IntPtr]::Zero); \
-                         $null=[WinMM]::mciSendString('play hostelnotif wait', $null, 0, [IntPtr]::Zero); \
-                         $null=[WinMM]::mciSendString('close hostelnotif', $null, 0, [IntPtr]::Zero)",
-                        path.replace('\\', "/")
-                    ),
-                ])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .creation_flags(0x08000000)
-                .spawn().ok();
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            std::process::Command::new("afplay")
-                .arg(&path)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn().ok();
-        }
-    });
-}
-
-/// Write the embedded notification sound to ~/.hostelD/ if it doesn't exist yet.
-fn ensure_notification_sound() {
-    #[cfg(target_os = "linux")]
-    let home = std::env::var("HOME").unwrap_or_default();
-    #[cfg(target_os = "windows")]
-    let home = std::env::var("USERPROFILE").unwrap_or_default();
-    #[cfg(target_os = "macos")]
-    let home = std::env::var("HOME").unwrap_or_default();
-
-    let sep = if cfg!(windows) { "\\" } else { "/" };
-    let path = format!("{home}{sep}.hostelD{sep}notification.mp3");
-
-    if !std::path::Path::new(&path).exists() {
-        let bytes = include_bytes!("../../assets/notification.mp3");
-        std::fs::write(&path, bytes).ok();
-    }
-}
-
-/// Send an OS-level desktop notification (notify-send on Linux, PowerShell balloon on Windows).
-fn send_desktop_notification(title: &str, body: &str) {
-    let t = title.to_string();
-    let b = body.to_string();
-    std::thread::spawn(move || {
-        #[cfg(target_os = "linux")]
-        {
-            std::process::Command::new("notify-send")
-                .args(["-u", "critical", "-a", "hostelD", &t, &b])
-                .spawn()
-                .ok();
-        }
-        #[cfg(target_os = "windows")]
-        {
-            let script = format!(
-                "[void] [System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms'); \
-                 $n = New-Object System.Windows.Forms.NotifyIcon; \
-                 $n.Icon = [System.Drawing.SystemIcons]::Information; \
-                 $n.Visible = $true; \
-                 $n.ShowBalloonTip(5000, '{}', '{}', 'Info'); \
-                 Start-Sleep -Seconds 6; $n.Dispose()",
-                t.replace('\'', "''"),
-                b.replace('\'', "''"),
-            );
-            std::process::Command::new("powershell")
-                .args(["-WindowStyle", "Hidden", "-Command", &script])
-                .creation_flags(0x08000000)
-                .spawn()
-                .ok();
-        }
-        #[cfg(target_os = "macos")]
-        {
-            let script = format!(
-                "display notification \"{}\" with title \"{}\"",
-                b.replace('\\', "\\\\").replace('"', "\\\""),
-                t.replace('\\', "\\\\").replace('"', "\\\""),
-            );
-            std::process::Command::new("osascript")
-                .args(["-e", &script])
-                .spawn()
-                .ok();
-        }
-    });
 }
 
 // ── Connection result sent from background thread ──
@@ -563,6 +167,9 @@ pub struct HostelApp {
     pub(crate) msg_peer_online: HashMap<String, bool>,
     pub(crate) msg_peer_presence: HashMap<String, crate::messaging::PresenceStatus>,
     pub(crate) msg_confirm_delete_chat: Option<String>,
+    pub(crate) msg_visible_count: HashMap<String, usize>,
+    /// After loading older messages, stores the old content height so next frame we can compensate scroll.
+    pub(crate) msg_scroll_compensate: Option<f32>,
     pub(crate) last_key_press: Instant,
     pub(crate) last_presence_sent: crate::messaging::PresenceStatus,
 
@@ -574,6 +181,9 @@ pub struct HostelApp {
     pub(crate) req_ip_input: String,
     pub(crate) req_port_input: String,
     pub(crate) req_status: String,
+
+    // Friends tab sub-tab
+    pub(crate) friends_sub_tab: FriendsSubTab,
 
     // IP privacy: censored by default
     pub(crate) show_ips: bool,
@@ -604,6 +214,21 @@ pub struct HostelApp {
 
     // Settings feedback
     pub(crate) port_saved_at: Option<Instant>,
+
+    // Avatar textures (loaded lazily, invalidated on change)
+    pub(crate) own_avatar_texture: Option<egui::TextureHandle>,
+    pub(crate) contact_avatar_textures: HashMap<String, egui::TextureHandle>,
+    pub(crate) default_avatar_texture: Option<egui::TextureHandle>,
+
+    // Crop editor state
+    pub(crate) show_crop_editor: bool,
+    pub(crate) crop_source_bytes: Option<Vec<u8>>,
+    pub(crate) crop_source_texture: Option<egui::TextureHandle>,
+    pub(crate) crop_source_dims: (u32, u32),
+    pub(crate) crop_offset: (f32, f32),
+    pub(crate) crop_size: f32,
+    pub(crate) crop_dragging: bool,
+    pub(crate) crop_drag_start: (f32, f32),
 }
 
 pub(crate) struct IncomingCallInfo {
@@ -672,7 +297,7 @@ impl HostelApp {
         let needs_firewall_prompt = settings.firewall_port != local_port;
 
         // Write embedded notification sound to ~/.hostelD/ if missing
-        ensure_notification_sound();
+        notifications::ensure_notification_sound();
 
         Self {
             screen: Screen::Setup,
@@ -735,6 +360,8 @@ impl HostelApp {
             msg_peer_online: HashMap::new(),
             msg_peer_presence: HashMap::new(),
             msg_confirm_delete_chat: None,
+            msg_visible_count: HashMap::new(),
+            msg_scroll_compensate: None,
             last_key_press: Instant::now(),
             last_presence_sent: crate::messaging::PresenceStatus::Online,
             file_transfer_progress: HashMap::new(),
@@ -742,6 +369,7 @@ impl HostelApp {
             req_ip_input: String::new(),
             req_port_input: String::new(),
             req_status: String::new(),
+            friends_sub_tab: FriendsSubTab::List,
             show_ips: false,
             incoming_call: None,
             incoming_call_attention: false,
@@ -756,6 +384,17 @@ impl HostelApp {
             show_firewall_prompt: needs_firewall_prompt,
             firewall_old_port: String::new(),
             port_saved_at: None,
+            own_avatar_texture: None,
+            contact_avatar_textures: HashMap::new(),
+            default_avatar_texture: None,
+            show_crop_editor: false,
+            crop_source_bytes: None,
+            crop_source_texture: None,
+            crop_source_dims: (0, 0),
+            crop_offset: (0.0, 0.0),
+            crop_size: 1.0,
+            crop_dragging: false,
+            crop_drag_start: (0.0, 0.0),
         }
     }
 
@@ -1158,6 +797,10 @@ impl eframe::App for HostelApp {
                             None,
                         );
                     }
+                    MsgEvent::AvatarReceived { contact_id } => {
+                        // Invalidate cached texture so it reloads from disk next frame
+                        self.contact_avatar_textures.remove(&contact_id);
+                    }
                     MsgEvent::IncomingCall { nickname, fingerprint, ip, port } => {
                         log_fmt!("[gui] IncomingCall event: nick='{}' fp='{}' ip='{}' port='{}' screen={}",
                             nickname, fingerprint, ip, port,
@@ -1259,8 +902,7 @@ impl eframe::App for HostelApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             match self.active_tab {
                 SidebarTab::Profile => self.draw_profile_tab(ui),
-                SidebarTab::Contacts => self.draw_contacts_tab(ui),
-                SidebarTab::Requests => self.draw_requests_tab(ui),
+                SidebarTab::Friends => self.draw_friends_tab(ui),
                 SidebarTab::Messages => self.draw_messages_tab(ui),
                 SidebarTab::Call => {
                     match &self.screen {
@@ -1289,6 +931,11 @@ impl eframe::App for HostelApp {
             self.draw_firewall_prompt(ctx);
         }
 
+        // ── Crop editor popup ──
+        if self.show_crop_editor {
+            self.draw_crop_editor(ctx);
+        }
+
         // Always schedule periodic repaints so we detect daemon events
         // (incoming calls, messages, peer status) even when idle.
         ctx.request_repaint_after(std::time::Duration::from_secs(4));
@@ -1302,241 +949,6 @@ impl eframe::App for HostelApp {
         // Force-terminate: daemon or audio threads may still be alive.
         std::process::exit(0);
     }
-}
-
-impl HostelApp {
-    fn draw_incoming_call_popup(&mut self, ctx: &egui::Context) {
-        let call_info = match &self.incoming_call {
-            Some(info) => info,
-            None => return,
-        };
-        let caller_job = peer_display_job(&call_info.nickname, &call_info.fingerprint, 16.0, self.settings.theme.text_primary(), self.settings.theme.text_dim());
-        let ip_display = if self.show_ips {
-            format!("[{}]:{}", call_info.ip, call_info.port)
-        } else {
-            format!("[{}]:{}", censor_ip(&call_info.ip), call_info.port)
-        };
-
-        let mut accept = false;
-        let mut reject = false;
-
-        egui::Window::new("Incoming Call")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.add_space(8.0);
-                ui.vertical_centered(|ui| {
-                    ui.label(
-                        egui::RichText::new("Incoming Call")
-                            .size(20.0)
-                            .strong()
-                            .color(self.settings.theme.accent()),
-                    );
-                    ui.add_space(8.0);
-                    ui.label(caller_job);
-                    ui.colored_label(self.settings.theme.text_muted(), &ip_display);
-                    ui.add_space(12.0);
-                });
-                ui.horizontal(|ui| {
-                    let accept_btn = egui::Button::new(
-                        egui::RichText::new("Accept").size(16.0).color(egui::Color32::WHITE),
-                    )
-                    .min_size(egui::vec2(120.0, 38.0))
-                    .fill(self.settings.theme.btn_positive());
-                    if ui.add(accept_btn).clicked() {
-                        accept = true;
-                    }
-
-                    let reject_btn = egui::Button::new(
-                        egui::RichText::new("Reject").size(16.0).color(egui::Color32::WHITE),
-                    )
-                    .min_size(egui::vec2(120.0, 38.0))
-                    .fill(self.settings.theme.btn_negative());
-                    if ui.add(reject_btn).clicked() {
-                        reject = true;
-                    }
-                });
-                ui.add_space(4.0);
-            });
-
-        if accept {
-            if let Some(info) = self.incoming_call.take() {
-                // Stop ringtone
-                if let Some(stop) = self.ringtone_stop.take() {
-                    stop.store(true, Ordering::Relaxed);
-                }
-                // Clear cooldown (no reject — we're accepting)
-                if let Some(tx) = &self.msg_cmd_tx {
-                    tx.send(MsgCommand::DismissIncomingCall { ip: info.ip.clone(), reject: false }).ok();
-                }
-                self.peer_ip = info.ip;
-                self.peer_port = info.port;
-                self.active_tab = SidebarTab::Call;
-                self.start_call();
-            }
-        }
-        if reject {
-            if let Some(info) = self.incoming_call.take() {
-                // Stop ringtone
-                if let Some(stop) = self.ringtone_stop.take() {
-                    stop.store(true, Ordering::Relaxed);
-                }
-                // Reject: daemon will complete handshake + send HANGUP to cut caller
-                if let Some(tx) = &self.msg_cmd_tx {
-                    tx.send(MsgCommand::DismissIncomingCall { ip: info.ip, reject: true }).ok();
-                }
-            }
-        }
-
-        ctx.request_repaint_after(std::time::Duration::from_millis(200));
-    }
-
-    fn draw_firewall_prompt(&mut self, ctx: &egui::Context) {
-        let is_port_change = !self.firewall_old_port.is_empty();
-        let port = self.local_port.clone();
-
-        let mut action = false;
-        let mut skip = false;
-
-        egui::Window::new("Firewall")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.add_space(8.0);
-                ui.vertical_centered(|ui| {
-                    if is_port_change {
-                        ui.label(
-                            egui::RichText::new(format!("Port changed to {}.", port))
-                                .size(15.0),
-                        );
-                        ui.label(
-                            egui::RichText::new("The old firewall rule will be replaced.")
-                                .size(14.0),
-                        );
-                    } else {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "hostelD needs to open UDP port {} in the firewall", port
-                            ))
-                            .size(15.0),
-                        );
-                        ui.label(
-                            egui::RichText::new("for calls and messages to work.")
-                                .size(14.0),
-                        );
-                    }
-                    ui.add_space(2.0);
-                    ui.colored_label(
-                        self.settings.theme.text_muted(),
-                        "This requires admin permission.",
-                    );
-                    ui.add_space(12.0);
-                });
-                ui.horizontal(|ui| {
-                    let action_label = if is_port_change { "Update" } else { "Open Port" };
-                    let action_btn = egui::Button::new(
-                        egui::RichText::new(action_label).size(15.0).color(egui::Color32::WHITE),
-                    )
-                    .min_size(egui::vec2(120.0, 36.0))
-                    .fill(self.settings.theme.btn_positive());
-                    if ui.add(action_btn).clicked() {
-                        action = true;
-                    }
-
-                    let skip_btn = egui::Button::new(
-                        egui::RichText::new("Skip").size(15.0),
-                    )
-                    .min_size(egui::vec2(120.0, 36.0));
-                    if ui.add(skip_btn).clicked() {
-                        skip = true;
-                    }
-                });
-                ui.add_space(4.0);
-            });
-
-        if action {
-            // Remove old rule if port changed
-            if is_port_change {
-                if let Ok(old_port) = self.firewall_old_port.parse::<u16>() {
-                    match crate::sysfirewall::remove_udp_port_rule(old_port) {
-                        Ok(true) => log_fmt!("[firewall] Removed old rule for UDP port {}", old_port),
-                        Ok(false) => log_fmt!("[firewall] No old rule found for UDP port {}", old_port),
-                        Err(e) => log_fmt!("[firewall] WARNING removing old rule: {}", e),
-                    }
-                }
-            }
-            // Add new rule
-            if let Ok(port_num) = port.parse::<u16>() {
-                match crate::sysfirewall::ensure_udp_port_open(port_num) {
-                    Ok(true) => log_fmt!("[firewall] Added rule for UDP port {}", port_num),
-                    Ok(false) => log_fmt!("[firewall] Rule already exists for UDP port {}", port_num),
-                    Err(e) => log_fmt!("[firewall] WARNING: {}", e),
-                }
-            }
-            // Update tracked port
-            self.settings.firewall_port = self.local_port.clone();
-            self.settings.save();
-            self.firewall_old_port.clear();
-            self.show_firewall_prompt = false;
-        }
-        if skip {
-            self.firewall_old_port.clear();
-            self.show_firewall_prompt = false;
-        }
-    }
-}
-
-/// Load a PNG from bytes, crop transparent padding, return (rgba, width, height).
-pub(crate) fn load_png_cropped(png_bytes: &[u8]) -> (Vec<u8>, u32, u32) {
-    let img = image::load_from_memory(png_bytes).expect("failed to decode PNG");
-    let rgba = img.to_rgba8();
-    let (w, h) = (rgba.width(), rgba.height());
-
-    // Find bounding box of non-transparent pixels
-    let mut min_x = w;
-    let mut min_y = h;
-    let mut max_x = 0u32;
-    let mut max_y = 0u32;
-    for y in 0..h {
-        for x in 0..w {
-            if rgba.get_pixel(x, y)[3] > 0 {
-                min_x = min_x.min(x);
-                min_y = min_y.min(y);
-                max_x = max_x.max(x);
-                max_y = max_y.max(y);
-            }
-        }
-    }
-
-    if max_x < min_x || max_y < min_y {
-        return (rgba.into_raw(), w, h);
-    }
-
-    let crop_w = max_x - min_x + 1;
-    let crop_h = max_y - min_y + 1;
-    let cropped = image::imageops::crop_imm(&rgba, min_x, min_y, crop_w, crop_h).to_image();
-    (cropped.into_raw(), crop_w, crop_h)
-}
-
-/// Load a PNG, crop transparent padding, downscale with Lanczos3, and create an egui texture.
-/// max_size caps the largest dimension (0 = no downscale).
-pub(crate) fn load_icon_texture_sized(ctx: &egui::Context, name: &str, png_bytes: &[u8], max_size: u32) -> egui::TextureHandle {
-    let (rgba, w, h) = load_png_cropped(png_bytes);
-    let img = image::RgbaImage::from_raw(w, h, rgba).unwrap();
-    let img = if max_size > 0 && (w > max_size || h > max_size) {
-        // Preserve aspect ratio: scale so largest dimension = max_size
-        let scale = max_size as f32 / w.max(h) as f32;
-        let nw = ((w as f32 * scale).round() as u32).max(1);
-        let nh = ((h as f32 * scale).round() as u32).max(1);
-        image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3)
-    } else {
-        img
-    };
-    let (fw, fh) = (img.width(), img.height());
-    let pixels = egui::ColorImage::from_rgba_unmultiplied([fw as usize, fh as usize], &img);
-    ctx.load_texture(name, pixels, egui::TextureOptions::LINEAR)
 }
 
 pub fn run() {

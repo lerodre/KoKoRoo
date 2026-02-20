@@ -13,7 +13,6 @@ use super::CHUNK_DATA_SIZE;
 /// Receives chunks in any order, tracks which arrived via a HashSet.
 /// When FILE_COMPLETE arrives, computes missing list and sends NACK or final ACK.
 pub struct ReceiverState {
-    pub transfer_id: u32,
     pub filename: String,
     pub file_size: u64,
     pub expected_sha256: [u8; 32],
@@ -63,7 +62,6 @@ impl ReceiverState {
             .map(|f| BufWriter::with_capacity(256 * 1024, f));
 
         ReceiverState {
-            transfer_id,
             filename,
             file_size,
             expected_sha256,

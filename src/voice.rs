@@ -56,7 +56,7 @@ pub fn call(peer_ip: &str, peer_port: &str, local_port: &str) {
     let peer_addr = format!("[{peer_ip}]:{peer_port}");
 
     if let Ok(port_num) = local_port.parse::<u16>() {
-        match crate::sysfirewall::ensure_udp_port_open(port_num) {
+        match crate::platform::ensure_udp_port_open(port_num) {
             Ok(true) => log_fmt!("[firewall] Added rule for UDP port {}", port_num),
             Ok(false) => log_fmt!("[firewall] Rule already exists for UDP port {}", port_num),
             Err(e) => log_fmt!("[firewall] WARNING: {}", e),
@@ -131,11 +131,11 @@ pub struct VoiceEngine {
     screen_thread: Option<thread::JoinHandle<()>>,
     /// System audio capture: active flag, stream handle, and producer for ring buffer
     sys_audio_active: Arc<AtomicBool>,
-    sys_audio_stream: Option<crate::sysaudio::SysAudioStream>,
+    sys_audio_stream: Option<crate::audio::SysAudioStream>,
     sys_audio_producer: Arc<Mutex<Option<HeapProd<f32>>>>,
     /// Wayland portal session (kept alive for the entire call)
     #[cfg(target_os = "linux")]
-    wayland_portal: Option<crate::wayland_capture::WaylandPortal>,
+    wayland_portal: Option<crate::screen::wayland::WaylandPortal>,
     /// Auto-banned IPs reported by the firewall during this call
     pub auto_banned_ips: Arc<Mutex<Vec<String>>>,
     /// Cloned session for screen capture thread to encrypt independently
@@ -182,7 +182,7 @@ impl VoiceEngine {
             if let Some(producer) = self.sys_audio_producer.lock().unwrap().take() {
                 self.sys_audio_active.store(true, Ordering::Relaxed);
                 let dev = if device_name.is_empty() { None } else { Some(device_name.as_str()) };
-                let (stream, leftover) = crate::sysaudio::start_system_audio_capture(
+                let (stream, leftover) = crate::audio::start_system_audio_capture(
                     producer,
                     self.sys_audio_active.clone(),
                     dev,
@@ -214,11 +214,11 @@ impl VoiceEngine {
 
         // Determine capture source: Wayland PipeWire or scrap (X11/Windows)
         #[cfg(target_os = "linux")]
-        let source = if crate::wayland_capture::is_wayland() {
+        let source = if crate::screen::wayland::is_wayland() {
             // Create portal session on first use, reuse for subsequent shares
             if self.wayland_portal.is_none() {
                 log_fmt!("[voice] Wayland detected, requesting screencast via portal...");
-                self.wayland_portal = crate::wayland_capture::WaylandPortal::request();
+                self.wayland_portal = crate::screen::wayland::WaylandPortal::request();
             }
             match self.wayland_portal.as_ref().and_then(|p| p.new_capture()) {
                 Some(capture) => {

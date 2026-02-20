@@ -37,14 +37,6 @@ pub enum Action {
 }
 
 impl Firewall {
-    pub fn new() -> Self {
-        Self {
-            ips: HashMap::new(),
-            blacklist: Vec::new(),
-            auto_ban_sink: None,
-        }
-    }
-
     /// Create a firewall pre-populated with banned IPs and an auto-ban sink.
     /// The sink receives IP strings whenever the firewall auto-blacklists someone.
     pub fn new_with_bans(banned: &[String], sink: Arc<Mutex<Vec<String>>>) -> Self {
@@ -135,24 +127,4 @@ impl Firewall {
         }
     }
 
-    /// Manually blacklist an IP.
-    pub fn ban(&mut self, ip: IpAddr) {
-        if !self.blacklist.contains(&ip) {
-            self.blacklist.push(ip);
-            eprintln!("[firewall] Manually blacklisted {ip}");
-        }
-    }
-
-    /// Remove an IP from the blacklist.
-    pub fn unban(&mut self, ip: IpAddr) {
-        self.blacklist.retain(|&i| i != ip);
-        if let Some(state) = self.ips.get_mut(&ip) {
-            state.strikes = 0;
-        }
-    }
-
-    /// Get the current blacklist.
-    pub fn blacklisted(&self) -> &[IpAddr] {
-        &self.blacklist
-    }
 }
