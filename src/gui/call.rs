@@ -350,33 +350,17 @@ impl HostelApp {
                 }
             }
 
+            // Spacer to push Hang Up to far right
+            let remaining = ui.available_width() - 110.0;
+            if remaining > 0.0 {
+                ui.add_space(remaining);
+            }
+
             let hangup_btn = egui::Button::new(
                 egui::RichText::new("Hang Up").size(16.0).color(egui::Color32::WHITE)
             ).min_size(egui::vec2(100.0, 35.0)).fill(self.settings.theme.btn_negative());
             if ui.add(hangup_btn).clicked() {
                 self.show_hangup_confirm = true;
-            }
-
-            if has_video {
-                let remaining = ui.available_width() - 250.0;
-                if remaining > 0.0 {
-                    ui.add_space(remaining);
-                }
-                let end_btn = egui::Button::new(
-                    egui::RichText::new("End Viewing").size(14.0).color(egui::Color32::WHITE)
-                ).min_size(egui::vec2(110.0, 35.0)).fill(egui::Color32::from_rgb(140, 80, 40));
-                if ui.add(end_btn).clicked() {
-                    self.screen_texture = None;
-                    self.last_frame_time = None;
-                }
-                let fs_btn = egui::Button::new(
-                    egui::RichText::new("Fullscreen").size(14.0).color(egui::Color32::WHITE)
-                ).min_size(egui::vec2(110.0, 35.0)).fill(egui::Color32::from_rgb(80, 80, 120));
-                if ui.add(fs_btn).clicked() {
-                    self.video_fullscreen = true;
-                    self.is_fullscreen = true;
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
-                }
             }
         });
 
@@ -625,6 +609,47 @@ impl HostelApp {
                 }
             });
 
+            // Hover overlay on video area
+            let pointer_in_video = ui.ctx().input(|i| {
+                i.pointer.hover_pos().map_or(false, |p| video_rect.contains(p))
+            });
+            let mouse_recent = self.last_mouse_move.elapsed().as_secs_f32() < 3.0;
+            if has_video && pointer_in_video && mouse_recent {
+                let overlay_w = 260.0;
+                let overlay_h = 45.0;
+                let overlay_x = video_rect.center().x - overlay_w / 2.0;
+                let overlay_y = video_rect.max.y - overlay_h - 12.0;
+                egui::Area::new(egui::Id::new("video_overlay"))
+                    .fixed_pos(egui::pos2(overlay_x, overlay_y))
+                    .order(egui::Order::Foreground)
+                    .show(ui.ctx(), |ui| {
+                        let frame = egui::Frame::none()
+                            .fill(egui::Color32::from_rgba_premultiplied(0, 0, 0, 160))
+                            .inner_margin(egui::Margin::same(6.0))
+                            .rounding(egui::Rounding::same(6.0));
+                        frame.show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let end_btn = egui::Button::new(
+                                    egui::RichText::new("End").size(14.0).color(egui::Color32::WHITE)
+                                ).min_size(egui::vec2(90.0, 30.0)).fill(egui::Color32::from_rgb(140, 80, 40));
+                                if ui.add(end_btn).clicked() {
+                                    self.screen_texture = None;
+                                    self.last_frame_time = None;
+                                }
+                                ui.add_space(8.0);
+                                let fs_btn = egui::Button::new(
+                                    egui::RichText::new("Fullscreen").size(14.0).color(egui::Color32::WHITE)
+                                ).min_size(egui::vec2(110.0, 30.0)).fill(egui::Color32::from_rgb(80, 80, 120));
+                                if ui.add(fs_btn).clicked() {
+                                    self.video_fullscreen = true;
+                                    self.is_fullscreen = true;
+                                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+                                }
+                            });
+                        });
+                    });
+            }
+
             // Chat on the right
             ui.allocate_new_ui(egui::UiBuilder::new().max_rect(chat_rect), |ui| {
                 self.draw_chat(ui);
@@ -690,25 +715,34 @@ impl HostelApp {
 
         let show_overlay = self.last_mouse_move.elapsed().as_secs_f32() < 3.0;
         if show_overlay {
+            let screen_rect = ui.ctx().screen_rect();
+            let overlay_w = 300.0;
+            let overlay_x = screen_rect.center().x - overlay_w / 2.0;
+            let overlay_y = screen_rect.max.y - 60.0;
             egui::Area::new(egui::Id::new("fs_overlay"))
-                .fixed_pos(egui::pos2(0.0, 0.0))
+                .fixed_pos(egui::pos2(overlay_x, overlay_y))
                 .order(egui::Order::Foreground)
                 .show(ui.ctx(), |ui| {
-                    let screen_width = ui.ctx().screen_rect().width();
                     let frame = egui::Frame::none()
                         .fill(egui::Color32::from_rgba_premultiplied(0, 0, 0, 160))
-                        .inner_margin(egui::Margin::same(8.0));
-                    frame.show(ui, |ui: &mut egui::Ui| {
-                        ui.set_min_width(screen_width);
-                        ui.horizontal(|ui: &mut egui::Ui| {
-                            ui.colored_label(
-                                egui::Color32::WHITE,
-                                egui::RichText::new("hostelD").size(16.0),
-                            );
-                            ui.separator();
+                        .inner_margin(egui::Margin::same(8.0))
+                        .rounding(egui::Rounding::same(6.0));
+                    frame.show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let end_btn = egui::Button::new(
+                                egui::RichText::new("End").size(14.0).color(egui::Color32::WHITE)
+                            ).min_size(egui::vec2(90.0, 30.0)).fill(egui::Color32::from_rgb(140, 80, 40));
+                            if ui.add(end_btn).clicked() {
+                                self.screen_texture = None;
+                                self.last_frame_time = None;
+                                self.video_fullscreen = false;
+                                self.is_fullscreen = false;
+                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                            }
+                            ui.add_space(8.0);
                             let exit_btn = egui::Button::new(
                                 egui::RichText::new("Exit Fullscreen").size(14.0).color(egui::Color32::WHITE)
-                            ).fill(egui::Color32::from_rgb(80, 80, 120));
+                            ).min_size(egui::vec2(130.0, 30.0)).fill(egui::Color32::from_rgb(80, 80, 120));
                             if ui.add(exit_btn).clicked() {
                                 self.video_fullscreen = false;
                                 self.is_fullscreen = false;
