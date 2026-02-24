@@ -196,6 +196,11 @@ impl MsgDaemon {
             if !self.process_commands() {
                 break; // Shutdown
             }
+            if self.socket.is_none() {
+                // No socket (yielded for voice call) — sleep to avoid busy-wait
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
             self.receive_packets();
             self.housekeep();
         }

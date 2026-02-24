@@ -700,15 +700,24 @@ pub fn start_engine(
             // Collect one audio frame
             let mut collected = 0;
             while collected < FRAME_SIZE {
-                if let Some(sample) = mic_consumer.try_pop() {
-                    pcm_frame[collected] = if mic_active_s.load(Ordering::Relaxed) {
-                        sample
+                // Drain all available samples in a burst
+                while collected < FRAME_SIZE {
+                    if let Some(sample) = mic_consumer.try_pop() {
+                        pcm_frame[collected] = if mic_active_s.load(Ordering::Relaxed) {
+                            sample
+                        } else {
+                            0.0
+                        };
+                        collected += 1;
                     } else {
-                        0.0
-                    };
-                    collected += 1;
-                } else {
-                    thread::sleep(std::time::Duration::from_millis(1));
+                        break;
+                    }
+                }
+
+                if collected < FRAME_SIZE {
+                    let remaining = FRAME_SIZE - collected;
+                    let sleep_us = (remaining as u64 * 1_000_000 / 48000) * 3 / 4;
+                    thread::sleep(std::time::Duration::from_micros(sleep_us.max(1000)));
                     if !running_s.load(Ordering::Relaxed) { break; }
                     // Also check for chat while waiting for audio
                     while let Ok(text) = outgoing_rx.try_recv() {
@@ -725,7 +734,6 @@ pub fn start_engine(
             if !running_s.load(Ordering::Relaxed) { break; }
 
             // ── Noise suppression: process 2x 480-sample RNNoise frames ──
-            // RNNoise expects samples in [-32768, 32767] range
             for half in 0..2 {
                 let offset = half * DENOISE_FRAME;
                 for i in 0..DENOISE_FRAME {
@@ -928,6 +936,7 @@ pub fn start_engine(
                 Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {}
                 Err(_) => {}
             }
+
         }
     });
 
