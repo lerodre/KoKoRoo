@@ -8,12 +8,16 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-/// Wrapper enum so voice.rs can hold either a cpal or SCK stream handle.
+/// Wrapper enum so voice.rs can hold any platform-specific stream handle.
 #[allow(dead_code)]
 pub enum SysAudioStream {
     Cpal(cpal::Stream),
     #[cfg(target_os = "macos")]
     Sck(super::sck::SckStream),
+    #[cfg(windows)]
+    Wasapi(super::process_loopback::WasapiLoopbackStream),
+    #[cfg(target_os = "linux")]
+    PipeWire(super::pipewire_capture::PipewireCapture),
 }
 
 impl SysAudioStream {
@@ -22,6 +26,10 @@ impl SysAudioStream {
         match self {
             #[cfg(target_os = "macos")]
             SysAudioStream::Sck(s) => s.take_producer(),
+            #[cfg(windows)]
+            SysAudioStream::Wasapi(s) => s.take_producer(),
+            #[cfg(target_os = "linux")]
+            SysAudioStream::PipeWire(s) => s.take_producer(),
             _ => None, // cpal streams don't hold the producer
         }
     }
@@ -72,14 +80,18 @@ pub fn list_loopback_devices() -> Vec<String> {
 
 /// Start capturing system/desktop audio into a ring buffer.
 ///
-/// - **Windows**: Uses WASAPI loopback (`output_device.build_input_stream()`).
-/// - **Linux**: Finds a PipeWire/PulseAudio "Monitor" input device, or falls back
-///   to `default_output_device().build_input_stream()`.
+/// On Windows and Linux, first attempts process-excluded capture (which filters
+/// out hostelD's own audio to prevent echo loops). Falls back to the legacy
+/// full-system capture if the platform API is unavailable.
+///
+/// - **Windows**: WASAPI process loopback → fallback to cpal WASAPI loopback.
+/// - **Linux**: PipeWire selective capture → fallback to cpal monitor device.
+/// - **macOS**: ScreenCaptureKit with `excludesCurrentProcessAudio` (always).
 ///
 /// If `device_name` is Some, find that specific device instead of using default.
-/// An empty string means use default.
+/// An empty string means use default. Device selection only applies to the
+/// legacy fallback path.
 ///
-/// Returns `Some(Stream)` on success — the stream captures while alive and stops on drop.
 /// Returns (stream, leftover_producer). On failure, the producer is returned
 /// so the caller can restore it for future retries.
 pub fn start_system_audio_capture(
@@ -89,11 +101,31 @@ pub fn start_system_audio_capture(
 ) -> (Option<SysAudioStream>, Option<HeapProd<f32>>) {
     #[cfg(windows)]
     {
-        (capture_wasapi_loopback(producer, active, device_name).map(SysAudioStream::Cpal), None)
+        // Try process-excluded capture first (excludes hostelD's own audio)
+        let (stream, leftover) = super::process_loopback::start_capture(producer, active.clone());
+        if let Some(s) = stream {
+            return (Some(SysAudioStream::Wasapi(s)), None);
+        }
+        // Fallback: legacy cpal loopback (captures all audio including our own)
+        if let Some(producer) = leftover {
+            log_fmt!("[sysaudio] falling back to cpal WASAPI loopback (no self-exclusion)");
+            return (capture_wasapi_loopback(producer, active, device_name).map(SysAudioStream::Cpal), None);
+        }
+        (None, None)
     }
     #[cfg(target_os = "linux")]
     {
-        (capture_linux_monitor(producer, active, device_name).map(SysAudioStream::Cpal), None)
+        // Try PipeWire selective capture first (excludes hostelD's own audio)
+        let (stream, leftover) = super::pipewire_capture::start_capture(producer, active.clone());
+        if let Some(s) = stream {
+            return (Some(SysAudioStream::PipeWire(s)), None);
+        }
+        // Fallback: legacy cpal monitor capture (captures all audio including our own)
+        if let Some(producer) = leftover {
+            log_fmt!("[sysaudio] falling back to cpal monitor capture (no self-exclusion)");
+            return (capture_linux_monitor(producer, active, device_name).map(SysAudioStream::Cpal), None);
+        }
+        (None, None)
     }
     #[cfg(target_os = "macos")]
     {

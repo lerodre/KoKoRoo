@@ -21,6 +21,7 @@ scrap = "0.5"
 env-libvpx-sys = { version = "5.1", features = ["generate"] }
 nokhwa = { version = "0.10", features = ["input-msmf"] }
 tokio = { version = "1", features = ["rt", "time", "macros"] }
+wasapi = "0.22"
 rfd = "0.15"
 
 [build-dependencies]
