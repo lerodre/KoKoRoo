@@ -11,7 +11,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use wasapi::{AudioCaptureClient, AudioClient, Direction, SampleType, StreamMode};
+use wasapi::{AudioCaptureClient, AudioClient, DeviceEnumerator, Direction, SampleType, StreamMode};
 
 /// Stream handle for WASAPI process-excluded loopback capture.
 ///
@@ -160,9 +160,12 @@ fn init_capture(
     let mut client = AudioClient::new_application_loopback_client(pid, false)
         .map_err(|e| format!("create loopback client: {e}"))?;
 
-    let mix_format = client
-        .get_mixformat()
-        .map_err(|e| format!("get mix format: {e}"))?;
+    // get_mixformat() returns E_NOTIMPL on process loopback clients.
+    // Get the format from the default render device instead.
+    let mix_format = DeviceEnumerator::new()
+        .and_then(|e| e.get_default_device(&Direction::Render))
+        .and_then(|d| d.get_device_format())
+        .map_err(|e| format!("get mix format from default device: {e}"))?;
 
     let channels = mix_format.get_nchannels() as usize;
     let sample_rate = mix_format.get_samplespersec();
