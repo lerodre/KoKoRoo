@@ -21,7 +21,6 @@ use std::thread;
 use std::time::Duration;
 
 use libspa::param::format::{FormatProperties, MediaSubtype, MediaType};
-use libspa::param::format_utils::parse_format;
 use pipewire as pw;
 use pw::stream::StreamFlags;
 use pw::types::ObjectType;
@@ -101,8 +100,8 @@ struct GraphState {
     our_pid: u32,
     /// Our sink stream's node ID (set after stream connects).
     our_node_id: Option<u32>,
-    /// Active links: audio_node_id → link proxy (kept alive to maintain the link).
-    links: HashMap<u32, pw::proxy::ProxyListener>,
+    /// Active links: audio_node_id → link listener (kept alive to maintain the link).
+    links: HashMap<u32, pw::link::LinkListener>,
 }
 
 /// Main PipeWire thread: creates the graph, monitors nodes, captures audio.
@@ -267,7 +266,7 @@ fn capture_thread(
                 global.id, app_name, node_pid, our_sink
             );
 
-            let link_result = core_for_add.create_object::<pw::link::Link, _>(
+            let link_result = core_for_add.create_object::<pw::link::Link>(
                 "link-factory",
                 &pipewire::properties::properties! {
                     "link.output.node" => global.id.to_string(),
@@ -282,7 +281,7 @@ fn capture_thread(
                     // When the listener is dropped, PipeWire cleans up the link.
                     let listener = link
                         .add_listener_local()
-                        .removed(|| {})
+                        .info(|_| {})
                         .register();
                     state_for_add.borrow_mut().links.insert(global.id, listener);
                 }
