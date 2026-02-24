@@ -84,6 +84,7 @@ pub(crate) struct CallInfo {
     pub(crate) screen_viewer: Arc<Mutex<ScreenViewer>>,
     pub(crate) screen_active: Arc<AtomicBool>,
     pub(crate) screen_cmd_tx: mpsc::Sender<ScreenCommand>,
+    pub(crate) viewer_joined: Arc<AtomicBool>,
     pub(crate) auto_banned_ips: Arc<Mutex<Vec<String>>>,
 }
 
@@ -147,6 +148,8 @@ pub struct HostelApp {
     pub(crate) selected_camera: usize,
     pub(crate) camera_names: Vec<String>,
 
+    pub(crate) viewing_screen: bool,
+    pub(crate) viewer_joined: Option<Arc<AtomicBool>>,
     pub(crate) auto_banned_ips: Option<Arc<Mutex<Vec<String>>>>,
 
     pub(crate) video_fullscreen: bool,
@@ -345,6 +348,8 @@ impl HostelApp {
             webcam_sharing: false,
             selected_camera: 0,
             camera_names: Vec::new(),
+            viewing_screen: false,
+            viewer_joined: None,
             auto_banned_ips: None,
             video_fullscreen: false,
             last_mouse_move: Instant::now(),
@@ -478,6 +483,7 @@ impl HostelApp {
                             screen_viewer: engine.screen_viewer.clone(),
                             screen_active: engine.screen_active.clone(),
                             screen_cmd_tx,
+                            viewer_joined: engine.viewer_joined.clone(),
                             auto_banned_ips: engine.auto_banned_ips.clone(),
                         };
                         *result.lock().unwrap() = Some(Ok(info));
@@ -488,6 +494,8 @@ impl HostelApp {
                                     ScreenCommand::StartScreen { quality, audio_device, display_index } => engine.start_screen_share(quality, audio_device, display_index),
                                     ScreenCommand::StartWebcam { quality, device_index } => engine.start_webcam_share(quality, device_index),
                                     ScreenCommand::Stop => engine.stop_screen_share(),
+                                    ScreenCommand::JoinViewing => engine.send_screen_join(),
+                                    ScreenCommand::LeaveViewing => engine.send_screen_leave(),
                                 }
                             }
                             thread::sleep(std::time::Duration::from_millis(100));
@@ -553,6 +561,8 @@ impl HostelApp {
         self.screen_viewer = None;
         self.screen_active = None;
         self.screen_cmd_tx = None;
+        self.viewing_screen = false;
+        self.viewer_joined = None;
         self.auto_banned_ips = None;
         self.video_fullscreen = false;
         self.last_frame_time = None;
@@ -590,6 +600,7 @@ impl eframe::App for HostelApp {
                         self.screen_viewer = Some(info.screen_viewer);
                         self.screen_active = Some(info.screen_active);
                         self.screen_cmd_tx = Some(info.screen_cmd_tx);
+                        self.viewer_joined = Some(info.viewer_joined);
                         self.auto_banned_ips = Some(info.auto_banned_ips);
                         self.chat_history = Some(ChatHistory::load(
                             &info.contact_id,

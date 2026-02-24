@@ -15,7 +15,7 @@ use vpx_sys::vpx_codec_cx_pkt_kind::VPX_CODEC_CX_FRAME_PKT;
 #[cfg(target_os = "linux")]
 pub mod wayland;
 
-use crate::crypto::{Session, PKT_SCREEN};
+use crate::crypto::{Session, PKT_SCREEN, PKT_SCREEN_OFFER};
 
 // ── Capture Source ──
 
@@ -97,6 +97,8 @@ pub enum ScreenCommand {
     StartScreen { quality: ScreenQuality, audio_device: Option<String>, display_index: usize },
     StartWebcam { quality: ScreenQuality, device_index: usize },
     Stop,
+    JoinViewing,
+    LeaveViewing,
 }
 
 /// List available displays with labels like "Display 1 (1920x1080)".
@@ -592,6 +594,10 @@ pub struct ScreenViewer {
     pub frame_height: u32,
     /// Set to true when peer sends PKT_SCREEN_STOP; cleared on next receive_chunk.
     pub stopped: bool,
+    /// Set to true when peer is sending PKT_SCREEN_OFFER beacons (screen share available).
+    pub offer_active: bool,
+    /// Timestamp of the last received PKT_SCREEN_OFFER (used to expire stale offers).
+    pub last_offer_time: Option<Instant>,
 }
 
 impl ScreenViewer {
@@ -603,6 +609,8 @@ impl ScreenViewer {
             frame_width: 1280,
             frame_height: 720,
             stopped: false,
+            offer_active: false,
+            last_offer_time: None,
         }
     }
 
@@ -649,17 +657,18 @@ pub fn capture_loop(
     running: Arc<AtomicBool>,
     quality: ScreenQuality,
     source: CaptureSource,
+    viewer_joined: Arc<AtomicBool>,
 ) {
     match source {
         CaptureSource::Scrap { display_index } => {
-            capture_loop_scrap(socket, session, peer_addr, active, running, quality, display_index);
+            capture_loop_scrap(socket, session, peer_addr, active, running, quality, display_index, viewer_joined);
         }
         #[cfg(target_os = "linux")]
         CaptureSource::PipeWire { capture } => {
-            capture_loop_pipewire(socket, session, peer_addr, active, running, quality, capture);
+            capture_loop_pipewire(socket, session, peer_addr, active, running, quality, capture, viewer_joined);
         }
         CaptureSource::Webcam { device_index } => {
-            capture_loop_webcam(socket, session, peer_addr, active, running, quality, device_index);
+            capture_loop_webcam(socket, session, peer_addr, active, running, quality, device_index, viewer_joined);
         }
     }
 }
@@ -673,6 +682,7 @@ fn capture_loop_pipewire(
     running: Arc<AtomicBool>,
     quality: ScreenQuality,
     capture: wayland::PortalCapture,
+    viewer_joined: Arc<AtomicBool>,
 ) {
     use std::sync::Mutex;
     use std::thread;
@@ -707,6 +717,15 @@ fn capture_loop_pipewire(
     let mut frame_count: u32 = 0;
 
     while active.load(Ordering::Relaxed) && running.load(Ordering::Relaxed) {
+        if !viewer_joined.load(Ordering::Relaxed) {
+            // Beacon mode: send offer, no capture
+            let offer = session.encrypt_packet(PKT_SCREEN_OFFER, &[]);
+            let _ = socket.send_to(&offer, peer_addr);
+            std::thread::sleep(Duration::from_secs(1));
+            frame_count = KEYFRAME_INTERVAL; // force keyframe on rejoin
+            continue;
+        }
+
         let frame_start = Instant::now();
 
         let frame = { frame_buf.lock().unwrap().take() };
@@ -753,6 +772,7 @@ fn capture_loop_webcam(
     running: Arc<AtomicBool>,
     quality: ScreenQuality,
     device_index: usize,
+    viewer_joined: Arc<AtomicBool>,
 ) {
     use nokhwa::pixel_format::RgbFormat;
     use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
@@ -799,6 +819,15 @@ fn capture_loop_webcam(
     let mut frame_count: u32 = 0;
 
     while active.load(Ordering::Relaxed) && running.load(Ordering::Relaxed) {
+        if !viewer_joined.load(Ordering::Relaxed) {
+            // Beacon mode: send offer, no capture
+            let offer = session.encrypt_packet(PKT_SCREEN_OFFER, &[]);
+            let _ = socket.send_to(&offer, peer_addr);
+            std::thread::sleep(Duration::from_secs(1));
+            frame_count = KEYFRAME_INTERVAL; // force keyframe on rejoin
+            continue;
+        }
+
         let frame_start = Instant::now();
 
         let frame = match camera.frame() {
@@ -887,6 +916,7 @@ fn capture_loop_scrap(
     running: Arc<AtomicBool>,
     quality: ScreenQuality,
     display_index: usize,
+    viewer_joined: Arc<AtomicBool>,
 ) {
     let displays = scrap::Display::all().unwrap_or_default();
     log_fmt!("[screen] found {} displays, requested index {}", displays.len(), display_index);
@@ -934,6 +964,15 @@ fn capture_loop_scrap(
     let mut wouldblock_count: u64 = 0;
 
     while active.load(Ordering::Relaxed) && running.load(Ordering::Relaxed) {
+        if !viewer_joined.load(Ordering::Relaxed) {
+            // Beacon mode: send offer, no capture
+            let offer = session.encrypt_packet(PKT_SCREEN_OFFER, &[]);
+            let _ = socket.send_to(&offer, peer_addr);
+            std::thread::sleep(Duration::from_secs(1));
+            frame_count = KEYFRAME_INTERVAL; // force keyframe on rejoin
+            continue;
+        }
+
         let frame_start = Instant::now();
 
         // Capture frame

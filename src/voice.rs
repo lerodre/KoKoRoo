@@ -9,11 +9,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Instant;
 
 use nnnoiseless::DenoiseState;
 
 use crate::chat;
-use crate::crypto::{self, Session, PKT_CHAT, PKT_HANGUP, PKT_HELLO, PKT_IDENTITY, PKT_SCREEN, PKT_SCREEN_STOP, PKT_VOICE};
+use crate::crypto::{self, Session, PKT_CHAT, PKT_HANGUP, PKT_HELLO, PKT_IDENTITY, PKT_SCREEN, PKT_SCREEN_STOP, PKT_SCREEN_OFFER, PKT_SCREEN_JOIN, PKT_VOICE};
 use crate::firewall::{Action, Firewall};
 use crate::identity::{self, Identity};
 use crate::screen::{ScreenQuality, ScreenViewer};
@@ -127,6 +128,8 @@ pub struct VoiceEngine {
     pub screen_viewer: Arc<Mutex<ScreenViewer>>,
     /// Flag: is screen sharing active (we are sharing)?
     pub screen_active: Arc<AtomicBool>,
+    /// Flag: has the remote viewer joined our screen share?
+    pub viewer_joined: Arc<AtomicBool>,
     /// Screen capture thread handle
     screen_thread: Option<thread::JoinHandle<()>>,
     /// System audio capture: active flag, stream handle, and producer for ring buffer
@@ -238,10 +241,11 @@ impl VoiceEngine {
         #[cfg(not(target_os = "linux"))]
         let source = crate::screen::CaptureSource::Scrap { display_index };
 
+        let viewer_joined = self.viewer_joined.clone();
         self.screen_thread = Some(thread::spawn(move || {
             log_fmt!("[voice] screen capture thread starting...");
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                crate::screen::capture_loop(socket, session, peer_addr, active.clone(), running, quality, source);
+                crate::screen::capture_loop(socket, session, peer_addr, active.clone(), running, quality, source, viewer_joined);
             })) {
                 Ok(()) => log_fmt!("[voice] screen capture thread exited normally"),
                 Err(e) => {
@@ -279,9 +283,10 @@ impl VoiceEngine {
         let running = self.running.clone();
 
         let source = crate::screen::CaptureSource::Webcam { device_index };
+        let viewer_joined = self.viewer_joined.clone();
 
         self.screen_thread = Some(thread::spawn(move || {
-            crate::screen::capture_loop(socket, session, peer_addr, active, running, quality, source);
+            crate::screen::capture_loop(socket, session, peer_addr, active, running, quality, source, viewer_joined);
             log_fmt!("[voice] webcam capture thread exited");
         }));
     }
@@ -290,6 +295,28 @@ impl VoiceEngine {
     pub fn confirm_contact(&mut self) {
         if let Some(contact) = self.pending_contact.take() {
             identity::save_contact(&contact);
+        }
+    }
+
+    /// Send PKT_SCREEN_JOIN(0x01) to tell the peer we want to receive their screen frames.
+    pub fn send_screen_join(&self) {
+        let pkt = {
+            let sess = self.session.lock().unwrap();
+            sess.encrypt_packet(PKT_SCREEN_JOIN, &[0x01])
+        };
+        for _ in 0..3 {
+            let _ = self.send_socket.send_to(&pkt, &self.peer_addr);
+        }
+    }
+
+    /// Send PKT_SCREEN_JOIN(0x00) to tell the peer we no longer want screen frames.
+    pub fn send_screen_leave(&self) {
+        let pkt = {
+            let sess = self.session.lock().unwrap();
+            sess.encrypt_packet(PKT_SCREEN_JOIN, &[0x00])
+        };
+        for _ in 0..3 {
+            let _ = self.send_socket.send_to(&pkt, &self.peer_addr);
         }
     }
 
@@ -750,11 +777,13 @@ pub fn start_engine(
     // ── Screen Viewer (shared with GUI) ──
     let screen_viewer = Arc::new(Mutex::new(ScreenViewer::new()));
     let screen_active = Arc::new(AtomicBool::new(false));
+    let viewer_joined = Arc::new(AtomicBool::new(false));
 
     // ── Receiver Thread: UDP → decrypt → voice/chat/screen dispatch ──
     let running_r = running.clone();
     let session_r = session.clone();
     let screen_viewer_r = screen_viewer.clone();
+    let viewer_joined_r = viewer_joined.clone();
     let reply_socket = socket.try_clone().unwrap();
     let identity_reply = our_identity_packet.clone();
     let peer_addr_for_recv = peer_addr.to_string();
@@ -860,6 +889,24 @@ pub fn start_engine(
                             log_fmt!("[voice] screen: peer stopped sharing");
                             if let Ok(mut viewer) = screen_viewer_r.lock() {
                                 viewer.stopped = true;
+                                viewer.offer_active = false;
+                            }
+                        }
+                        Some((PKT_SCREEN_OFFER, _)) => {
+                            // Remote peer is offering screen share (beacon)
+                            if let Ok(mut viewer) = screen_viewer_r.lock() {
+                                viewer.offer_active = true;
+                                viewer.last_offer_time = Some(Instant::now());
+                            }
+                        }
+                        Some((PKT_SCREEN_JOIN, data)) => {
+                            // Remote viewer is joining/leaving our screen share
+                            if data.first() == Some(&0x01) {
+                                log_fmt!("[voice] screen: viewer joined");
+                                viewer_joined_r.store(true, Ordering::Relaxed);
+                            } else {
+                                log_fmt!("[voice] screen: viewer left");
+                                viewer_joined_r.store(false, Ordering::Relaxed);
                             }
                         }
                         Some((PKT_HANGUP, _)) => {
@@ -947,6 +994,7 @@ pub fn start_engine(
         chat_rx: Some(incoming_rx),
         screen_viewer,
         screen_active,
+        viewer_joined,
         screen_thread: None,
         #[cfg(target_os = "linux")]
         wayland_portal: None,

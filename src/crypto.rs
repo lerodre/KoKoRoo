@@ -13,6 +13,8 @@ pub const PKT_CHAT: u8 = 0x04;     // chat message: [0x04][4-byte counter][encry
 pub const PKT_HANGUP: u8 = 0x05;   // hangup signal: [0x05][4-byte counter][encrypted empty]
 pub const PKT_SCREEN: u8 = 0x06;       // screen share: [0x06][4-byte counter][encrypted VP8 chunk]
 pub const PKT_SCREEN_STOP: u8 = 0x07;  // screen share ended: [0x07][4-byte counter][encrypted empty]
+pub const PKT_SCREEN_OFFER: u8 = 0x08; // screen offer beacon: [0x08][4-byte counter][encrypted empty]
+pub const PKT_SCREEN_JOIN: u8 = 0x09;  // screen join/leave: [0x09][4-byte counter][encrypted 0x01=join/0x00=leave]
 
 // Messaging daemon packet types (independent of voice calls)
 pub const PKT_MSG_HELLO: u8    = 0x10; // msg handshake: [0x10][32-byte ephemeral pubkey]

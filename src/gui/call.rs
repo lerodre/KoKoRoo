@@ -564,9 +564,61 @@ impl HostelApp {
                     // Peer stopped sharing — clear stale texture
                     self.screen_texture = None;
                     self.last_frame_time = None;
+                    self.viewing_screen = false;
                 }
             }
         }
+
+        // ── Detect peer screen offer ──
+        let peer_screen_offered = self.screen_viewer.as_ref().map_or(false, |v| {
+            if let Ok(viewer) = v.lock() {
+                viewer.offer_active && viewer.last_offer_time.map_or(false, |t| t.elapsed().as_secs() < 5)
+            } else {
+                false
+            }
+        });
+        // Auto-clear viewing_screen when offer expires and no video
+        if !peer_screen_offered && !has_video {
+            self.viewing_screen = false;
+        }
+
+        // ── Join Stream panel ──
+        if peer_screen_offered && !self.viewing_screen && !has_video {
+            ui.separator();
+            ui.add_space(20.0);
+            ui.vertical_centered(|ui| {
+                let panel_frame = egui::Frame::none()
+                    .fill(egui::Color32::from_rgba_premultiplied(30, 30, 40, 220))
+                    .inner_margin(egui::Margin::same(20.0))
+                    .rounding(egui::Rounding::same(10.0));
+                panel_frame.show(ui, |ui| {
+                    let peer_name = if self.peer_nickname.is_empty() {
+                        &self.peer_fingerprint
+                    } else {
+                        &self.peer_nickname
+                    };
+                    ui.label(
+                        egui::RichText::new(format!("{} is sharing their screen", peer_name))
+                            .size(16.0)
+                            .color(egui::Color32::WHITE),
+                    );
+                    ui.add_space(12.0);
+                    let join_btn = egui::Button::new(
+                        egui::RichText::new("Join Stream").size(16.0).color(egui::Color32::WHITE),
+                    )
+                    .min_size(egui::vec2(150.0, 38.0))
+                    .fill(self.settings.theme.btn_primary());
+                    if ui.add(join_btn).clicked() {
+                        if let Some(tx) = &self.screen_cmd_tx {
+                            let _ = tx.send(ScreenCommand::JoinViewing);
+                        }
+                        self.viewing_screen = true;
+                    }
+                });
+            });
+            ui.add_space(10.0);
+        }
+
         // ── Video + Chat layout ──
         if has_video {
             ui.separator();
@@ -633,6 +685,10 @@ impl HostelApp {
                                     egui::RichText::new("End").size(14.0).color(egui::Color32::WHITE)
                                 ).min_size(egui::vec2(90.0, 30.0)).fill(egui::Color32::from_rgb(140, 80, 40));
                                 if ui.add(end_btn).clicked() {
+                                    if let Some(tx) = &self.screen_cmd_tx {
+                                        let _ = tx.send(ScreenCommand::LeaveViewing);
+                                    }
+                                    self.viewing_screen = false;
                                     self.screen_texture = None;
                                     self.last_frame_time = None;
                                 }
@@ -733,6 +789,10 @@ impl HostelApp {
                                 egui::RichText::new("End").size(14.0).color(egui::Color32::WHITE)
                             ).min_size(egui::vec2(90.0, 30.0)).fill(egui::Color32::from_rgb(140, 80, 40));
                             if ui.add(end_btn).clicked() {
+                                if let Some(tx) = &self.screen_cmd_tx {
+                                    let _ = tx.send(ScreenCommand::LeaveViewing);
+                                }
+                                self.viewing_screen = false;
                                 self.screen_texture = None;
                                 self.last_frame_time = None;
                                 self.video_fullscreen = false;
