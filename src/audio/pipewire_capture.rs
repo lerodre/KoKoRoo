@@ -1,19 +1,19 @@
-//! Linux PipeWire selective system audio capture.
+//! Linux PipeWire system audio capture with process exclusion.
 //!
-//! Creates a virtual audio sink in the PipeWire graph and selectively links
-//! all audio output nodes EXCEPT hostelD's own, preventing voice echo loops
-//! when sharing system audio during calls.
+//! Captures all system audio EXCEPT hostelD's own playback, preventing
+//! the peer's voice from being echoed back during screen sharing.
 //!
 //! Architecture:
-//!   1. Create a PipeWire stream acting as an internal audio sink
-//!   2. Monitor the registry for Stream/Output/Audio nodes
-//!   3. Auto-link non-self nodes to our sink (by comparing PIDs)
-//!   4. Process callback pushes captured audio into the ring buffer
+//!   1. Create a virtual null-audio-sink ("capture mixer")
+//!   2. Create a capture stream that AUTOCONNECTS to the mixer's monitor
+//!   3. Monitor the registry for audio output nodes AND their ports
+//!   4. Link non-hostelD output ports → mixer input ports (explicit port IDs)
+//!   5. Process callback downmixes stereo f32 → mono → ring buffer
 
 use ringbuf::traits::Producer;
 use ringbuf::HeapProd;
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -25,10 +25,7 @@ use pipewire as pw;
 use pw::stream::StreamFlags;
 use pw::types::ObjectType;
 
-/// Stream handle for PipeWire selective system audio capture.
-///
-/// Captures all system audio except the current process, using a virtual
-/// sink and selective link management in the PipeWire graph.
+/// Stream handle for PipeWire system audio capture.
 pub struct PipewireCapture {
     active: Arc<AtomicBool>,
     quit_flag: Arc<AtomicBool>,
@@ -37,7 +34,6 @@ pub struct PipewireCapture {
 }
 
 impl PipewireCapture {
-    /// Recover the ring buffer producer for reuse after stopping capture.
     pub fn take_producer(&self) -> Option<HeapProd<f32>> {
         self.producer.lock().ok()?.take()
     }
@@ -53,11 +49,6 @@ impl Drop for PipewireCapture {
     }
 }
 
-/// Start capturing system audio while excluding the current process.
-///
-/// Returns `(Some(capture), None)` on success.
-/// Returns `(None, Some(producer))` if PipeWire is unavailable, giving back
-/// the producer so the caller can retry with a fallback method.
 pub fn start_capture(
     producer: HeapProd<f32>,
     active: Arc<AtomicBool>,
@@ -94,7 +85,89 @@ pub fn start_capture(
     )
 }
 
-/// Main PipeWire thread: creates the graph, monitors nodes, captures audio.
+const MIXER_NODE_NAME: &str = "hostelD-capture-mixer";
+
+/// Port info tracked from the registry.
+#[derive(Clone, Debug)]
+struct PortInfo {
+    global_id: u32,
+    node_id: u32,
+    direction: String, // "out" or "in"
+    channel: String,   // "FL", "FR", "MONO", etc.
+}
+
+/// Try to create links between a source node's output ports and the mixer's
+/// input ports. Uses explicit port IDs for reliable linking.
+fn try_link_node_to_mixer(
+    core_ptr: *const pw::core::Core,
+    source_node_id: u32,
+    mixer_node_id: u32,
+    ports: &HashMap<u32, PortInfo>,
+    linked_ports: &mut HashSet<u32>,
+) -> u32 {
+    // Collect output ports of source node
+    let out_ports: Vec<&PortInfo> = ports
+        .values()
+        .filter(|p| p.node_id == source_node_id && p.direction == "out")
+        .collect();
+
+    // Collect input ports of mixer node
+    let in_ports: Vec<&PortInfo> = ports
+        .values()
+        .filter(|p| p.node_id == mixer_node_id && p.direction == "in")
+        .collect();
+
+    let mut created = 0u32;
+    let core_ref = unsafe { &*core_ptr };
+
+    // Match by channel name (FL→FL, FR→FR) or by index if names don't match
+    for out_port in &out_ports {
+        if linked_ports.contains(&out_port.global_id) {
+            continue;
+        }
+
+        // Find matching input port by channel
+        let matching_in = in_ports
+            .iter()
+            .find(|p| p.channel == out_port.channel)
+            .or_else(|| {
+                // Fallback: match by position (first out → first in, etc.)
+                let out_idx = out_ports
+                    .iter()
+                    .position(|p| p.global_id == out_port.global_id)
+                    .unwrap_or(0);
+                in_ports.get(out_idx)
+            })
+            .copied();
+
+        if let Some(in_port) = matching_in {
+            let result = core_ref.create_object::<pw::link::Link>(
+                "link-factory",
+                &pipewire::properties::properties! {
+                    "link.output.node" => source_node_id.to_string(),
+                    "link.output.port" => out_port.global_id.to_string(),
+                    "link.input.node" => mixer_node_id.to_string(),
+                    "link.input.port" => in_port.global_id.to_string(),
+                    "object.linger" => "true",
+                },
+            );
+            match result {
+                Ok(_) => {
+                    linked_ports.insert(out_port.global_id);
+                    created += 1;
+                }
+                Err(e) => {
+                    log_fmt!(
+                        "[sysaudio] link failed: out port {} → in port {}: {}",
+                        out_port.global_id, in_port.global_id, e
+                    );
+                }
+            }
+        }
+    }
+    created
+}
+
 fn capture_thread(
     producer: Arc<Mutex<Option<HeapProd<f32>>>>,
     active: Arc<AtomicBool>,
@@ -115,17 +188,27 @@ fn capture_thread(
     let our_pid = std::process::id();
     log_fmt!("[sysaudio] PipeWire connected, our PID={}", our_pid);
 
-    // Raw pointer to core for use in `'static` closures (required by PipeWire-rs).
-    // SAFETY: `core` lives on the stack for the entire function. `mainloop.run()`
-    // blocks until quit, and `_registry_listener` is declared after `core` so it
-    // drops first (Rust drops locals in reverse declaration order).
     let core_ptr = &*core as *const pw::core::Core;
 
-    // Shared state for callbacks — all types are `'static` so closures compile.
-    let our_node_id: Rc<Cell<Option<u32>>> = Rc::new(Cell::new(None));
-    let linked_nodes: Rc<RefCell<HashSet<u32>>> = Rc::new(RefCell::new(HashSet::new()));
+    // ── Step 1: Create virtual null sink ──
+    let _null_sink = core
+        .create_object::<pw::node::Node>(
+            "adapter",
+            &pipewire::properties::properties! {
+                "factory.name" => "support.null-audio-sink",
+                "node.name" => MIXER_NODE_NAME,
+                "node.description" => "hostelD Capture Mixer",
+                "media.class" => "Audio/Sink",
+                "audio.channels" => "2",
+                "audio.rate" => "48000",
+                "object.linger" => "false",
+            },
+        )
+        .map_err(|e| format!("create null sink: {e}"))?;
 
-    // ── Create our capture stream (acts as an internal audio sink) ──
+    log_fmt!("[sysaudio] null sink '{}' created", MIXER_NODE_NAME);
+
+    // ── Step 2: Create capture stream targeting the mixer ──
     let stream = pw::stream::StreamBox::new(
         &core,
         "hostelD-audio-capture",
@@ -134,42 +217,51 @@ fn capture_thread(
             *pw::keys::MEDIA_CATEGORY => "Capture",
             *pw::keys::MEDIA_ROLE => "Communication",
             *pw::keys::NODE_NAME => "hostelD-system-capture",
-            "media.class" => "Audio/Sink/Internal",
+            "media.class" => "Stream/Input/Audio",
+            "stream.capture.sink" => "true",
+            "node.target" => MIXER_NODE_NAME,
         },
     )
     .map_err(|e| format!("create Stream: {e}"))?;
 
-    // Stream state listener: grab our node ID once connected
-    let node_id_for_stream = our_node_id.clone();
+    let process_count = Rc::new(Cell::new(0u64));
     let _stream_listener = stream
         .add_local_listener::<()>()
-        .state_changed(move |stream, _data, _old, new| {
-            if matches!(new, pw::stream::StreamState::Streaming) {
-                let node_id = stream.node_id();
-                log_fmt!("[sysaudio] PipeWire sink stream connected, node_id={}", node_id);
-                node_id_for_stream.set(Some(node_id));
-            }
+        .state_changed(move |_stream, _data, _old, new| {
+            log_fmt!("[sysaudio] stream state: {:?} -> {:?}", _old, new);
         })
-        .process(move |stream, _data| {
-            if let Some(mut buffer) = stream.dequeue_buffer() {
-                let datas = buffer.datas_mut();
-                if datas.is_empty() {
-                    return;
-                }
-                let data = &mut datas[0];
-                // Read chunk size before taking mutable data slice
-                let chunk_size = data.chunk().size() as usize;
-                if let Some(slice) = data.data() {
-                    let available = chunk_size.min(slice.len());
-                    if let Ok(mut guard) = producer.lock() {
-                        if let Some(ref mut prod) = *guard {
-                            // Audio format: f32 stereo interleaved → mono downmix
-                            // Each frame = 2 channels × 4 bytes = 8 bytes
-                            let frame_bytes = 8;
-                            for frame in slice[..available].chunks_exact(frame_bytes) {
-                                let l = f32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]);
-                                let r = f32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
-                                let _ = prod.try_push((l + r) * 0.5);
+        .process({
+            let process_count = process_count.clone();
+            move |stream, _data| {
+                if let Some(mut buffer) = stream.dequeue_buffer() {
+                    let datas = buffer.datas_mut();
+                    if datas.is_empty() {
+                        return;
+                    }
+                    let data = &mut datas[0];
+                    let chunk_size = data.chunk().size() as usize;
+                    if let Some(slice) = data.data() {
+                        let available = chunk_size.min(slice.len());
+                        let count = process_count.get();
+                        if count < 5 || (count % 2000 == 0) {
+                            log_fmt!(
+                                "[sysaudio] process cb #{}: chunk={} avail={}",
+                                count, chunk_size, available
+                            );
+                        }
+                        process_count.set(count + 1);
+                        if let Ok(mut guard) = producer.lock() {
+                            if let Some(ref mut prod) = *guard {
+                                let frame_bytes = 8;
+                                for frame in slice[..available].chunks_exact(frame_bytes) {
+                                    let l = f32::from_le_bytes([
+                                        frame[0], frame[1], frame[2], frame[3],
+                                    ]);
+                                    let r = f32::from_le_bytes([
+                                        frame[4], frame[5], frame[6], frame[7],
+                                    ]);
+                                    let _ = prod.try_push((l + r) * 0.5);
+                                }
                             }
                         }
                     }
@@ -179,118 +271,236 @@ fn capture_thread(
         .register()
         .map_err(|e| format!("register stream listener: {e}"))?;
 
-    // Build audio format parameters
     let param_bytes = build_audio_format_params();
     let pod = libspa::pod::Pod::from_bytes(&param_bytes)
         .ok_or_else(|| "invalid audio format pod".to_string())?;
     let mut params = vec![pod];
 
-    // Do NOT use AUTOCONNECT — we manage links manually via the registry
-    // listener. AUTOCONNECT would let the session manager connect us to
-    // the default audio source (microphone), causing mic audio to leak in.
     stream
         .connect(
             libspa::utils::Direction::Input,
             None,
-            StreamFlags::MAP_BUFFERS | StreamFlags::RT_PROCESS,
+            StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS | StreamFlags::RT_PROCESS,
             &mut params,
         )
         .map_err(|e| format!("connect stream: {e}"))?;
 
-    // ── Monitor registry for audio output nodes ──
+    // ── Step 3: Registry — track nodes, ports, and create links ──
     let registry = core
         .get_registry()
         .map_err(|e| format!("get registry: {e}"))?;
 
-    let node_id_for_reg = our_node_id.clone();
-    let linked_for_add = linked_nodes.clone();
-    let linked_for_remove = linked_nodes.clone();
+    // Shared state
+    let mixer_node_id: Rc<Cell<Option<u32>>> = Rc::new(Cell::new(None));
+    // Nodes eligible for linking: node_id → (app_name, pid)
+    let eligible_nodes: Rc<RefCell<HashMap<u32, (String, u32)>>> =
+        Rc::new(RefCell::new(HashMap::new()));
+    // All known ports: global_id → PortInfo
+    let all_ports: Rc<RefCell<HashMap<u32, PortInfo>>> =
+        Rc::new(RefCell::new(HashMap::new()));
+    // Ports we've already linked
+    let linked_ports: Rc<RefCell<HashSet<u32>>> =
+        Rc::new(RefCell::new(HashSet::new()));
+    // Nodes we've fully linked (both channels)
+    let linked_nodes: Rc<RefCell<HashSet<u32>>> =
+        Rc::new(RefCell::new(HashSet::new()));
+
+    let mixer_id_c = mixer_node_id.clone();
+    let eligible_c = eligible_nodes.clone();
+    let ports_c = all_ports.clone();
+    let lports_c = linked_ports.clone();
+    let lnodes_c = linked_nodes.clone();
+    let lnodes_rm = linked_nodes.clone();
+    let ports_rm = all_ports.clone();
 
     let _registry_listener = registry
         .add_listener_local()
         .global(move |global| {
-            // Only care about Node objects
-            if global.type_ != ObjectType::Node {
-                return;
-            }
             let props = match &global.props {
                 Some(p) => p,
                 None => return,
             };
             let props = props.as_ref();
 
-            // Only care about audio output streams (apps playing audio)
-            let media_class = match props.get("media.class") {
-                Some(c) => c,
-                None => return,
-            };
-            if media_class != "Stream/Output/Audio" {
-                return;
-            }
+            match global.type_ {
+                ObjectType::Node => {
+                    // Check if this is our mixer
+                    if let Some(name) = props.get("node.name") {
+                        if name == MIXER_NODE_NAME {
+                            log_fmt!("[sysaudio] mixer node_id={}", global.id);
+                            mixer_id_c.set(Some(global.id));
+                            // Try linking any eligible nodes that were discovered before mixer
+                            let eligible = eligible_c.borrow();
+                            let ports = ports_c.borrow();
+                            let mut lp = lports_c.borrow_mut();
+                            let mut ln = lnodes_c.borrow_mut();
+                            for (&nid, (app, _pid)) in eligible.iter() {
+                                if ln.contains(&nid) {
+                                    continue;
+                                }
+                                let n = try_link_node_to_mixer(
+                                    core_ptr, nid, global.id, &ports, &mut lp,
+                                );
+                                if n > 0 {
+                                    log_fmt!(
+                                        "[sysaudio] linked {} ports for '{}' (node {}) → mixer",
+                                        n, app, nid
+                                    );
+                                    ln.insert(nid);
+                                }
+                            }
+                            return;
+                        }
+                    }
 
-            // Check PID to exclude our own app's audio
-            let pid_str = props.get("application.process.id").unwrap_or("");
-            let node_pid: u32 = pid_str.parse().unwrap_or(0);
-            let app_name = props.get("application.name").unwrap_or("unknown");
+                    // Check for audio output streams
+                    let media_class = match props.get("media.class") {
+                        Some(c) => c,
+                        None => return,
+                    };
+                    if media_class != "Stream/Output/Audio" {
+                        return;
+                    }
 
-            if node_pid == our_pid {
-                log_fmt!(
-                    "[sysaudio] skipping own audio node {} (app={}, PID={})",
-                    global.id, app_name, node_pid
-                );
-                return;
-            }
+                    // PID check — try multiple property names
+                    let pid_str = props
+                        .get("pipewire.sec.pid")
+                        .or_else(|| props.get("application.process.id"))
+                        .unwrap_or("");
+                    let node_pid: u32 = pid_str.parse().unwrap_or(0);
+                    let app_name = props
+                        .get("application.name")
+                        .unwrap_or("unknown");
 
-            let our_sink = match node_id_for_reg.get() {
-                Some(id) => id,
-                None => {
+                    // Also check node.name for hostelD
+                    let node_name = props.get("node.name").unwrap_or("");
+                    let is_self = node_pid == our_pid
+                        || (node_pid == 0 && node_name.contains("hostelD"));
+
+                    if is_self {
+                        log_fmt!(
+                            "[sysaudio] SKIP own node {} (app={}, PID={}, name={})",
+                            global.id, app_name, node_pid, node_name
+                        );
+                        return;
+                    }
+
                     log_fmt!(
-                        "[sysaudio] sink not ready yet, skipping node {} (app={})",
-                        global.id, app_name
+                        "[sysaudio] eligible node {} (app={}, PID={})",
+                        global.id, app_name, node_pid
                     );
-                    return;
+                    eligible_c
+                        .borrow_mut()
+                        .insert(global.id, (app_name.to_string(), node_pid));
+
+                    // Try linking immediately if mixer and ports are ready
+                    if let Some(mixer) = mixer_id_c.get() {
+                        let ports = ports_c.borrow();
+                        let mut lp = lports_c.borrow_mut();
+                        let mut ln = lnodes_c.borrow_mut();
+                        if !ln.contains(&global.id) {
+                            let n = try_link_node_to_mixer(
+                                core_ptr, global.id, mixer, &ports, &mut lp,
+                            );
+                            if n > 0 {
+                                log_fmt!(
+                                    "[sysaudio] linked {} ports for '{}' (node {}) → mixer",
+                                    n, app_name, global.id
+                                );
+                                ln.insert(global.id);
+                            }
+                        }
+                    }
                 }
-            };
 
-            // Skip if already linked
-            if !linked_for_add.borrow_mut().insert(global.id) {
-                return;
-            }
+                ObjectType::Port => {
+                    // Track port info for linking
+                    let node_id_str = match props.get("node.id") {
+                        Some(s) => s,
+                        None => return,
+                    };
+                    let node_id: u32 = match node_id_str.parse() {
+                        Ok(v) => v,
+                        Err(_) => return,
+                    };
+                    let direction = props.get("port.direction").unwrap_or("").to_string();
+                    let channel = props
+                        .get("audio.channel")
+                        .unwrap_or(
+                            props.get("port.name").unwrap_or("unknown"),
+                        )
+                        .to_string();
 
-            // Create a link from this app's output to our capture sink
-            log_fmt!(
-                "[sysaudio] linking audio node {} (app={}, PID={}) → sink {}",
-                global.id, app_name, node_pid, our_sink
-            );
+                    let port_info = PortInfo {
+                        global_id: global.id,
+                        node_id,
+                        direction: direction.clone(),
+                        channel: channel.clone(),
+                    };
 
-            // SAFETY: core_ptr is valid for the entire mainloop.run() duration.
-            // See safety comment at the declaration site above.
-            let core_ref = unsafe { &*core_ptr };
-            let link_result = core_ref.create_object::<pw::link::Link>(
-                "link-factory",
-                &pipewire::properties::properties! {
-                    "link.output.node" => global.id.to_string(),
-                    "link.input.node" => our_sink.to_string(),
-                    "object.linger" => "true",
-                },
-            );
+                    ports_c.borrow_mut().insert(global.id, port_info);
 
-            match link_result {
-                Ok(_link) => {
-                    // Link persists server-side (linger=true) until one endpoint
-                    // disappears. The proxy can safely drop here.
+                    // When a new output port appears for an eligible node, try linking
+                    if direction == "out" {
+                        let eligible = eligible_c.borrow();
+                        if eligible.contains_key(&node_id) {
+                            if let Some(mixer) = mixer_id_c.get() {
+                                let ports = ports_c.borrow();
+                                let mut lp = lports_c.borrow_mut();
+                                let mut ln = lnodes_c.borrow_mut();
+                                if !ln.contains(&node_id) {
+                                    let n = try_link_node_to_mixer(
+                                        core_ptr, node_id, mixer, &ports, &mut lp,
+                                    );
+                                    if n > 0 {
+                                        let app = &eligible[&node_id].0;
+                                        log_fmt!(
+                                            "[sysaudio] linked {} ports for '{}' (node {}) → mixer",
+                                            n, app, node_id
+                                        );
+                                        ln.insert(node_id);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // When a new input port appears for the mixer, try linking pending nodes
+                    if direction == "in" {
+                        if let Some(mixer) = mixer_id_c.get() {
+                            if node_id == mixer {
+                                let eligible = eligible_c.borrow();
+                                let ports = ports_c.borrow();
+                                let mut lp = lports_c.borrow_mut();
+                                let mut ln = lnodes_c.borrow_mut();
+                                for (&nid, (app, _)) in eligible.iter() {
+                                    if ln.contains(&nid) {
+                                        continue;
+                                    }
+                                    let n = try_link_node_to_mixer(
+                                        core_ptr, nid, mixer, &ports, &mut lp,
+                                    );
+                                    if n > 0 {
+                                        log_fmt!(
+                                            "[sysaudio] linked {} ports for '{}' (node {}) → mixer",
+                                            n, app, nid
+                                        );
+                                        ln.insert(nid);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
-                Err(e) => {
-                    log_fmt!("[sysaudio] failed to create link for node {}: {}", global.id, e);
-                    linked_for_add.borrow_mut().remove(&global.id);
-                }
+
+                _ => {}
             }
         })
         .global_remove(move |id| {
-            // Clean up tracking when an audio node disappears
-            if linked_for_remove.borrow_mut().remove(&id) {
-                log_fmt!("[sysaudio] audio node {} removed, link cleaned up", id);
+            if lnodes_rm.borrow_mut().remove(&id) {
+                log_fmt!("[sysaudio] node {} removed", id);
             }
+            ports_rm.borrow_mut().remove(&id);
         })
         .register();
 
@@ -315,8 +525,6 @@ fn capture_thread(
     Ok(())
 }
 
-/// Build SPA audio format parameters for our capture stream.
-/// Requests f32 stereo at 48kHz.
 fn build_audio_format_params() -> Vec<u8> {
     use libspa::pod::serialize::PodSerializer;
     use libspa::pod::Value;
@@ -324,34 +532,16 @@ fn build_audio_format_params() -> Vec<u8> {
     let obj = libspa::pod::object!(
         libspa::utils::SpaTypes::ObjectParamFormat,
         libspa::param::ParamType::EnumFormat,
-        libspa::pod::property!(
-            FormatProperties::MediaType,
-            Id,
-            MediaType::Audio
-        ),
-        libspa::pod::property!(
-            FormatProperties::MediaSubtype,
-            Id,
-            MediaSubtype::Raw
-        ),
+        libspa::pod::property!(FormatProperties::MediaType, Id, MediaType::Audio),
+        libspa::pod::property!(FormatProperties::MediaSubtype, Id, MediaSubtype::Raw),
         libspa::pod::property!(
             FormatProperties::AudioFormat,
-            Choice,
-            Enum,
-            Id,
+            Choice, Enum, Id,
             libspa::param::audio::AudioFormat::F32LE,
             libspa::param::audio::AudioFormat::F32LE
         ),
-        libspa::pod::property!(
-            FormatProperties::AudioRate,
-            Int,
-            48000
-        ),
-        libspa::pod::property!(
-            FormatProperties::AudioChannels,
-            Int,
-            2
-        ),
+        libspa::pod::property!(FormatProperties::AudioRate, Int, 48000),
+        libspa::pod::property!(FormatProperties::AudioChannels, Int, 2),
     );
 
     PodSerializer::serialize(
