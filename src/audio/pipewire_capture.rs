@@ -12,8 +12,8 @@
 
 use ringbuf::traits::Producer;
 use ringbuf::HeapProd;
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -94,16 +94,6 @@ pub fn start_capture(
     )
 }
 
-/// State shared between registry listener callbacks and the main loop.
-struct GraphState {
-    /// Our own PID — nodes from this process are excluded.
-    our_pid: u32,
-    /// Our sink stream's node ID (set after stream connects).
-    our_node_id: Option<u32>,
-    /// Active links: audio_node_id → link listener (kept alive to maintain the link).
-    links: HashMap<u32, pw::link::LinkListener>,
-}
-
 /// Main PipeWire thread: creates the graph, monitors nodes, captures audio.
 fn capture_thread(
     producer: Arc<Mutex<Option<HeapProd<f32>>>>,
@@ -125,12 +115,15 @@ fn capture_thread(
     let our_pid = std::process::id();
     log_fmt!("[sysaudio] PipeWire connected, our PID={}", our_pid);
 
-    // Shared graph state for registry callbacks
-    let state = Rc::new(RefCell::new(GraphState {
-        our_pid,
-        our_node_id: None,
-        links: HashMap::new(),
-    }));
+    // Raw pointer to core for use in `'static` closures (required by PipeWire-rs).
+    // SAFETY: `core` lives on the stack for the entire function. `mainloop.run()`
+    // blocks until quit, and `_registry_listener` is declared after `core` so it
+    // drops first (Rust drops locals in reverse declaration order).
+    let core_ptr = &*core as *const pw::core::Core;
+
+    // Shared state for callbacks — all types are `'static` so closures compile.
+    let our_node_id: Rc<Cell<Option<u32>>> = Rc::new(Cell::new(None));
+    let linked_nodes: Rc<RefCell<HashSet<u32>>> = Rc::new(RefCell::new(HashSet::new()));
 
     // ── Create our capture stream (acts as an internal audio sink) ──
     let stream = pw::stream::StreamBox::new(
@@ -147,14 +140,14 @@ fn capture_thread(
     .map_err(|e| format!("create Stream: {e}"))?;
 
     // Stream state listener: grab our node ID once connected
-    let state_for_stream = state.clone();
+    let node_id_for_stream = our_node_id.clone();
     let _stream_listener = stream
         .add_local_listener::<()>()
         .state_changed(move |stream, _data, _old, new| {
             if matches!(new, pw::stream::StreamState::Streaming) {
                 let node_id = stream.node_id();
                 log_fmt!("[sysaudio] PipeWire sink stream connected, node_id={}", node_id);
-                state_for_stream.borrow_mut().our_node_id = Some(node_id);
+                node_id_for_stream.set(Some(node_id));
             }
         })
         .process(move |stream, _data| {
@@ -163,9 +156,10 @@ fn capture_thread(
                 if datas.is_empty() {
                     return;
                 }
-                let data = &datas[0];
+                let data = &mut datas[0];
+                // Read chunk size before taking mutable data slice
+                let chunk_size = data.chunk().size() as usize;
                 if let Some(slice) = data.data() {
-                    let chunk_size = data.chunk().size() as usize;
                     let available = chunk_size.min(slice.len());
                     if let Ok(mut guard) = producer.lock() {
                         if let Some(ref mut prod) = *guard {
@@ -208,9 +202,9 @@ fn capture_thread(
         .get_registry()
         .map_err(|e| format!("get registry: {e}"))?;
 
-    let state_for_add = state.clone();
-    let core_for_links = Rc::new(core);
-    let core_for_add = core_for_links.clone();
+    let node_id_for_reg = our_node_id.clone();
+    let linked_for_add = linked_nodes.clone();
+    let linked_for_remove = linked_nodes.clone();
 
     let _registry_listener = registry
         .add_listener_local()
@@ -239,8 +233,7 @@ fn capture_thread(
             let node_pid: u32 = pid_str.parse().unwrap_or(0);
             let app_name = props.get("application.name").unwrap_or("unknown");
 
-            let s = state_for_add.borrow();
-            if node_pid == s.our_pid {
+            if node_pid == our_pid {
                 log_fmt!(
                     "[sysaudio] skipping own audio node {} (app={}, PID={})",
                     global.id, app_name, node_pid
@@ -248,7 +241,7 @@ fn capture_thread(
                 return;
             }
 
-            let our_sink = match s.our_node_id {
+            let our_sink = match node_id_for_reg.get() {
                 Some(id) => id,
                 None => {
                     log_fmt!(
@@ -258,7 +251,11 @@ fn capture_thread(
                     return;
                 }
             };
-            drop(s); // release borrow before mutable borrow
+
+            // Skip if already linked
+            if !linked_for_add.borrow_mut().insert(global.id) {
+                return;
+            }
 
             // Create a link from this app's output to our capture sink
             log_fmt!(
@@ -266,33 +263,32 @@ fn capture_thread(
                 global.id, app_name, node_pid, our_sink
             );
 
-            let link_result = core_for_add.create_object::<pw::link::Link>(
+            // SAFETY: core_ptr is valid for the entire mainloop.run() duration.
+            // See safety comment at the declaration site above.
+            let core_ref = unsafe { &*core_ptr };
+            let link_result = core_ref.create_object::<pw::link::Link>(
                 "link-factory",
                 &pipewire::properties::properties! {
                     "link.output.node" => global.id.to_string(),
                     "link.input.node" => our_sink.to_string(),
-                    "object.linger" => "false",
+                    "object.linger" => "true",
                 },
             );
 
             match link_result {
-                Ok(link) => {
-                    // Keep the link's listener alive to maintain the connection.
-                    // When the listener is dropped, PipeWire cleans up the link.
-                    let listener = link
-                        .add_listener_local()
-                        .info(|_| {})
-                        .register();
-                    state_for_add.borrow_mut().links.insert(global.id, listener);
+                Ok(_link) => {
+                    // Link persists server-side (linger=true) until one endpoint
+                    // disappears. The proxy can safely drop here.
                 }
                 Err(e) => {
                     log_fmt!("[sysaudio] failed to create link for node {}: {}", global.id, e);
+                    linked_for_add.borrow_mut().remove(&global.id);
                 }
             }
         })
         .global_remove(move |id| {
-            // Clean up link when an audio node disappears
-            if state.borrow_mut().links.remove(&id).is_some() {
+            // Clean up tracking when an audio node disappears
+            if linked_for_remove.borrow_mut().remove(&id) {
                 log_fmt!("[sysaudio] audio node {} removed, link cleaned up", id);
             }
         })
