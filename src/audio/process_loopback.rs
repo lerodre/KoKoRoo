@@ -52,7 +52,7 @@ pub fn start_capture(
     let pid = std::process::id();
 
     // Quick API availability check before consuming the producer
-    if AudioClient::new_application_loopback_client(pid, false).is_err() {
+    if AudioClient::new_application_loopback_client(pid, true).is_err() {
         log_fmt!("[sysaudio] WASAPI process loopback not available (Windows too old?)");
         return (None, Some(producer));
     }
@@ -157,7 +157,7 @@ fn capture_loop(
 fn init_capture(
     pid: u32,
 ) -> Result<(AudioClient, AudioCaptureClient, wasapi::Handle, usize, usize, bool), String> {
-    let mut client = AudioClient::new_application_loopback_client(pid, false)
+    let mut client = AudioClient::new_application_loopback_client(pid, true)
         .map_err(|e| format!("create loopback client: {e}"))?;
 
     let mix_format = client
