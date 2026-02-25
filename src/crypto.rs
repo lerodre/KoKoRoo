@@ -42,6 +42,20 @@ pub const PKT_MSG_CONFIRM: u8       = 0x23; // identity-bound key upgrade confir
 pub const PKT_MSG_AVATAR_OFFER: u8  = 0x24; // avatar offer: encrypted [32B sha256][4B total_size LE]
 pub const PKT_MSG_AVATAR_DATA: u8   = 0x25; // avatar chunk: encrypted [2B chunk_index LE][up to 1200B data]
 
+// Group call packet types (shared-key encryption with sender_index nonces)
+pub const PKT_GRP_HELLO: u8        = 0x30; // join request: [0x30][32B ephemeral pubkey][16B group_id]
+pub const PKT_GRP_VOICE: u8        = 0x31; // voice: [0x31][2B sender_idx][4B counter][ciphertext+tag]
+pub const PKT_GRP_CHAT: u8         = 0x32; // chat: [0x32][2B sender_idx][4B counter][encrypted text]
+pub const PKT_GRP_HANGUP: u8       = 0x33; // member leaving
+pub const PKT_GRP_ROSTER: u8       = 0x34; // leader → all: encrypted JSON roster
+pub const PKT_GRP_PING: u8         = 0x35; // leader probes member: encrypted 8B timestamp
+pub const PKT_GRP_PONG: u8         = 0x36; // member responds: encrypted 8B echo
+pub const PKT_GRP_LEADER: u8       = 0x37; // new leader announcement: encrypted 32B pubkey
+pub const PKT_GRP_INVITE: u8       = 0x38; // invite via messaging daemon
+pub const PKT_GRP_ALIVE: u8        = 0x39; // failover: "I'm alive" discovery
+pub const PKT_GRP_SPEED_DATA: u8   = 0x3A; // failover: speed test burst payload
+pub const PKT_GRP_SPEED_RESULT: u8 = 0x3B; // failover: speed test result
+
 /// Size of an X25519 public key.
 pub const PUBKEY_SIZE: usize = 32;
 
@@ -276,4 +290,116 @@ pub fn fingerprint(pubkey: &[u8; 32]) -> String {
     hasher.update(b"hostelD-fingerprint");
     let hash = hasher.finalize();
     format!("hD-{:02X}{:02X}{:02X}{:02X}", hash[0], hash[1], hash[2], hash[3])
+}
+
+// ── Group encryption (shared key with sender_index-based nonces) ──
+
+/// Group HELLO packet: [0x30][32B ephemeral pubkey][16B group_id_bytes]
+pub const GRP_HELLO_SIZE: usize = 1 + PUBKEY_SIZE + 16;
+
+/// Build a group HELLO packet.
+pub fn build_grp_hello(pubkey: &[u8; 32], group_id: &[u8; 16]) -> [u8; GRP_HELLO_SIZE] {
+    let mut pkt = [0u8; GRP_HELLO_SIZE];
+    pkt[0] = PKT_GRP_HELLO;
+    pkt[1..33].copy_from_slice(pubkey);
+    pkt[33..49].copy_from_slice(group_id);
+    pkt
+}
+
+/// Parse a group HELLO packet. Returns (ephemeral_pubkey, group_id_bytes).
+pub fn parse_grp_hello(data: &[u8]) -> Option<([u8; 32], [u8; 16])> {
+    if data.len() < GRP_HELLO_SIZE || data[0] != PKT_GRP_HELLO {
+        return None;
+    }
+    let mut pubkey = [0u8; 32];
+    pubkey.copy_from_slice(&data[1..33]);
+    let mut group_id = [0u8; 16];
+    group_id.copy_from_slice(&data[33..49]);
+    Some((pubkey, group_id))
+}
+
+/// Convert a hex group_id string (32 chars) to 16 raw bytes.
+pub fn group_id_to_bytes(group_id: &str) -> Option<[u8; 16]> {
+    if group_id.len() != 32 {
+        return None;
+    }
+    let mut bytes = [0u8; 16];
+    for i in 0..16 {
+        bytes[i] = u8::from_str_radix(&group_id[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(bytes)
+}
+
+/// Convert 16 raw bytes to a hex group_id string (32 chars).
+pub fn group_id_from_bytes(bytes: &[u8; 16]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Encrypt a group packet using the shared group key.
+///
+/// Nonce = [sender_index LE u16][counter LE u32][0x00; 6] = 12 bytes.
+/// Packet = [1B type][2B sender_index LE][4B counter LE][ciphertext + 16B tag]
+pub fn grp_encrypt(
+    cipher: &ChaCha20Poly1305,
+    sender_index: u16,
+    counter: u32,
+    pkt_type: u8,
+    plaintext: &[u8],
+) -> Vec<u8> {
+    let mut nonce_bytes = [0u8; NONCE_SIZE];
+    nonce_bytes[..2].copy_from_slice(&sender_index.to_le_bytes());
+    nonce_bytes[2..6].copy_from_slice(&counter.to_le_bytes());
+    let nonce = Nonce::from(nonce_bytes);
+
+    let ciphertext = cipher.encrypt(&nonce, plaintext)
+        .expect("group encryption failed");
+
+    let mut packet = Vec::with_capacity(1 + 2 + 4 + ciphertext.len());
+    packet.push(pkt_type);
+    packet.extend_from_slice(&sender_index.to_le_bytes());
+    packet.extend_from_slice(&counter.to_le_bytes());
+    packet.extend_from_slice(&ciphertext);
+    packet
+}
+
+/// Decrypt a group packet using the shared group key.
+///
+/// Returns (pkt_type, sender_index, plaintext) or None if decryption fails.
+/// Minimum size: 1 (type) + 2 (sender_index) + 4 (counter) + 16 (tag) = 23 bytes.
+pub fn grp_decrypt(
+    cipher: &ChaCha20Poly1305,
+    packet: &[u8],
+) -> Option<(u8, u16, Vec<u8>)> {
+    if packet.len() < 1 + 2 + 4 + TAG_SIZE {
+        return None;
+    }
+    let pkt_type = packet[0];
+    let sender_index = u16::from_le_bytes([packet[1], packet[2]]);
+    let counter = u32::from_le_bytes([packet[3], packet[4], packet[5], packet[6]]);
+
+    let mut nonce_bytes = [0u8; NONCE_SIZE];
+    nonce_bytes[..2].copy_from_slice(&sender_index.to_le_bytes());
+    nonce_bytes[2..6].copy_from_slice(&counter.to_le_bytes());
+    let nonce = Nonce::from(nonce_bytes);
+
+    let ciphertext = &packet[7..];
+    cipher.decrypt(&nonce, ciphertext)
+        .ok()
+        .map(|plain| (pkt_type, sender_index, plain))
+}
+
+/// Create a ChaCha20Poly1305 cipher from a raw 32-byte group key.
+pub fn grp_cipher_from_key(key: &[u8; 32]) -> ChaCha20Poly1305 {
+    ChaCha20Poly1305::new_from_slice(key).expect("key size mismatch")
+}
+
+/// Extract sender_index from a group packet header without decrypting.
+/// Used by the relay leader to identify the sender and forward.
+pub fn grp_read_header(packet: &[u8]) -> Option<(u8, u16)> {
+    if packet.len() < 3 {
+        return None;
+    }
+    let pkt_type = packet[0];
+    let sender_index = u16::from_le_bytes([packet[1], packet[2]]);
+    Some((pkt_type, sender_index))
 }

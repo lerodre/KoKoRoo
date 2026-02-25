@@ -49,6 +49,45 @@ impl MsgDaemon {
                     log_fmt!("[daemon]   after: notified_calls={} rejected_ips={}", self.notified_calls.len(), self.rejected_ips.len());
                 }
 
+                MsgCommand::SendGroupInvite { contact_id, peer_addr, peer_pubkey, group_json } => {
+                    log_fmt!("[daemon] SendGroupInvite to contact={} addr={}", contact_id, peer_addr);
+                    // Find connected peer session
+                    if let Some(addr) = self.contact_addrs.get(&contact_id) {
+                        if let Some(peer) = self.peers.get(addr) {
+                            if peer.is_connected() {
+                                if let Some(ref socket) = self.socket {
+                                    protocol::send_group_invite(peer, socket, &group_json).ok();
+                                    log_fmt!("[daemon]   invite sent ({} bytes)", group_json.len());
+                                }
+                            } else {
+                                log_fmt!("[daemon]   peer not connected, initiating handshake");
+                                // Initiate connection, then try again
+                                if let Some(ref socket) = self.socket {
+                                    if let Some(session) = protocol::initiate_handshake(
+                                        socket, &contact_id, peer_addr, peer_pubkey,
+                                    ) {
+                                        self.contact_addrs.insert(contact_id.clone(), peer_addr);
+                                        self.hello_retries.insert(peer_addr, 0);
+                                        self.peers.insert(peer_addr, session);
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Not connected — initiate connection
+                        log_fmt!("[daemon]   no session, initiating handshake");
+                        if let Some(ref socket) = self.socket {
+                            if let Some(session) = protocol::initiate_handshake(
+                                socket, &contact_id, peer_addr, peer_pubkey,
+                            ) {
+                                self.contact_addrs.insert(contact_id.clone(), peer_addr);
+                                self.hello_retries.insert(peer_addr, 0);
+                                self.peers.insert(peer_addr, session);
+                            }
+                        }
+                    }
+                }
+
                 MsgCommand::YieldSocket => {
                     log_fmt!("[daemon] YieldSocket — releasing socket for voice call");
                     // Cancel all active file transfers

@@ -206,3 +206,83 @@ pub fn encode_chat_text(text: &str) -> Vec<u8> {
 pub fn decode_chat_text(data: &[u8]) -> Option<String> {
     String::from_utf8(data.to_vec()).ok()
 }
+
+// ── Group chat persistence ──
+
+fn group_chats_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".hostelD").join("groups").join("chats")
+}
+
+/// A single group chat message for persistent storage.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GroupChatMessage {
+    pub sender_fingerprint: String,
+    pub sender_nickname: String,
+    pub text: String,
+    pub timestamp: u64,
+}
+
+/// Persistent group chat history, encrypted at rest with local identity key.
+pub struct GroupChatHistory {
+    pub group_id: String,
+    pub messages: Vec<GroupChatMessage>,
+    storage_cipher: ChaCha20Poly1305,
+}
+
+impl GroupChatHistory {
+    /// Load group chat history from disk (or create empty).
+    pub fn load(group_id: &str, identity_secret: &[u8; 32]) -> Self {
+        let storage_cipher = crypto::derive_storage_key(identity_secret);
+        let dir = group_chats_dir();
+        fs::create_dir_all(&dir).ok();
+
+        let path = dir.join(format!("{group_id}.enc"));
+        let messages = if path.exists() {
+            match fs::read(&path) {
+                Ok(encrypted) => {
+                    match crypto::decrypt_local(&storage_cipher, &encrypted) {
+                        Some(plaintext) => {
+                            serde_json::from_slice(&plaintext).unwrap_or_default()
+                        }
+                        None => Vec::new(),
+                    }
+                }
+                Err(_) => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+
+        GroupChatHistory { group_id: group_id.to_string(), messages, storage_cipher }
+    }
+
+    /// Add a message and save to disk.
+    pub fn add_message(&mut self, sender_fingerprint: String, sender_nickname: String, text: String) {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        self.messages.push(GroupChatMessage {
+            sender_fingerprint,
+            sender_nickname,
+            text,
+            timestamp,
+        });
+
+        self.save();
+    }
+
+    /// Save all messages to encrypted file.
+    pub fn save(&self) {
+        let dir = group_chats_dir();
+        fs::create_dir_all(&dir).ok();
+
+        let json = serde_json::to_vec(&self.messages).expect("Failed to serialize group chat");
+        let encrypted = crypto::encrypt_local(&self.storage_cipher, &json);
+
+        let path = dir.join(format!("{}.enc", self.group_id));
+        fs::write(path, encrypted).expect("Failed to write group chat history");
+    }
+}

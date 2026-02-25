@@ -2,7 +2,7 @@ use eframe::egui;
 use super::{HostelApp, SidebarTab, load_icon_texture_sized};
 
 impl HostelApp {
-    pub(crate) fn draw_sidebar(&mut self, ui: &mut egui::Ui, in_call: bool) {
+    pub(crate) fn draw_sidebar(&mut self, ui: &mut egui::Ui, in_call: bool, in_group_call: bool) {
         ui.add_space(8.0);
 
         // Logo: load texture once (cropped + downscaled with Lanczos3 for crisp display)
@@ -39,6 +39,7 @@ impl HostelApp {
                 (SidebarTab::Profile, "Profile".to_string(), 0),
                 (SidebarTab::Friends, "Friends".to_string(), friends_badge),
                 (SidebarTab::Messages, "Messages".to_string(), total_unread),
+                (SidebarTab::Groups, "Groups".to_string(), 0),
                 (SidebarTab::Call, "Call".to_string(), 0),
                 (SidebarTab::Settings, "Settings".to_string(), 0),
                 (SidebarTab::Appearance, "Colors".to_string(), 0),
@@ -51,7 +52,13 @@ impl HostelApp {
                 let tab = *tab;
                 let badge_count = *badge_count;
                 let is_selected = self.active_tab == tab;
-                let enabled = !in_call || tab == SidebarTab::Call || tab == SidebarTab::Appearance;
+                let enabled = if in_call {
+                    tab == SidebarTab::Call || tab == SidebarTab::Appearance
+                } else if in_group_call {
+                    tab == SidebarTab::Groups || tab == SidebarTab::Appearance
+                } else {
+                    true
+                };
 
                 let text = egui::RichText::new(label.as_str()).size(13.0);
                 let text = if !enabled {

@@ -7,6 +7,7 @@ use crate::crypto::{
     PKT_MSG_IP_ANNOUNCE, PKT_MSG_PEER_QUERY, PKT_MSG_PEER_RESPONSE,
     PKT_MSG_PRESENCE,
     PKT_MSG_AVATAR_OFFER, PKT_MSG_AVATAR_DATA,
+    PKT_GRP_INVITE,
 };
 use crate::identity::Identity;
 
@@ -523,4 +524,24 @@ pub fn handle_avatar_data(data: &[u8], peer: &mut PeerSession) -> Option<(u16, V
     let chunk_index = u16::from_le_bytes(idx_bytes);
     let chunk_data = plain[2..].to_vec();
     Some((chunk_index, chunk_data))
+}
+
+/// Send a group invite (full Group JSON) via existing pairwise session.
+pub fn send_group_invite(
+    peer: &PeerSession,
+    socket: &UdpSocket,
+    group_json: &[u8],
+) -> Result<(), String> {
+    let pkt = peer.encrypt_packet(PKT_GRP_INVITE, group_json).ok_or("no session")?;
+    socket.send_to(&pkt, peer.peer_addr).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Handle an incoming group invite. Returns the raw Group JSON bytes.
+pub fn handle_group_invite(data: &[u8], peer: &mut PeerSession) -> Option<Vec<u8>> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
+    if pkt_type != PKT_GRP_INVITE || plain.is_empty() {
+        return None;
+    }
+    Some(plain)
 }

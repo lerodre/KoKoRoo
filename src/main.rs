@@ -22,6 +22,8 @@ mod filetransfer;
 mod screen;
 mod platform;
 mod avatar;
+mod group;
+mod group_voice;
 mod voice;
 mod ui;
 

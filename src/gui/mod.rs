@@ -5,6 +5,7 @@ mod call;
 mod settings;
 mod error;
 mod messages;
+mod groups;
 mod network;
 mod notifications;
 mod popups;
@@ -17,10 +18,14 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
-use crate::chat::ChatHistory;
+use crate::chat::{ChatHistory, GroupChatHistory};
+use crate::group::{self, Group, GroupMember};
+use crate::group_voice::{GroupCallInfo, GroupChatMsg, GroupRole};
 use crate::identity::{self, Contact, Identity, Settings};
 use crate::messaging::{MsgCommand, MsgDaemon, MsgEvent};
 use crate::screen::{ScreenCommand, ScreenViewer};
+
+use groups::GroupView;
 
 // Re-export functions used by submodules via super::
 pub(crate) use network::{get_best_ipv6, get_adapter_names, format_peer_display, peer_display_job, censor_ip};
@@ -42,6 +47,7 @@ pub(crate) enum SidebarTab {
     Profile,
     Friends,
     Messages,
+    Groups,
     Call,
     Settings,
     Appearance,
@@ -232,6 +238,28 @@ pub struct HostelApp {
     pub(crate) crop_size: f32,
     pub(crate) crop_dragging: bool,
     pub(crate) crop_drag_start: (f32, f32),
+
+    // Groups
+    pub(crate) groups: Vec<Group>,
+    pub(crate) group_view: GroupView,
+    pub(crate) group_create_name: String,
+    pub(crate) group_selected_members: Vec<bool>,
+    pub(crate) group_detail_idx: Option<usize>,
+
+    // Group call state
+    pub(crate) group_call_running: Arc<AtomicBool>,
+    pub(crate) group_call_mic: Arc<AtomicBool>,
+    pub(crate) group_call_hangup: Option<Arc<AtomicBool>>,
+    pub(crate) group_call_chat_tx: Option<mpsc::Sender<String>>,
+    pub(crate) group_call_chat_rx: Option<mpsc::Receiver<GroupChatMsg>>,
+    pub(crate) group_call_roster_rx: Option<mpsc::Receiver<Vec<GroupMember>>>,
+    pub(crate) group_call_chat_input: String,
+    pub(crate) group_call_messages: Vec<GroupChatMsg>,
+    pub(crate) group_call_members: Vec<GroupMember>,
+    pub(crate) group_call_group: Option<Group>,
+    pub(crate) group_call_role: Option<GroupRole>,
+    pub(crate) group_chat_history: Option<GroupChatHistory>,
+    pub(crate) group_connect_result: Arc<std::sync::Mutex<Option<Result<GroupCallInfo, String>>>>,
 }
 
 pub(crate) struct IncomingCallInfo {
@@ -247,6 +275,7 @@ impl HostelApp {
         let identity = Identity::load_or_create();
         let settings = Settings::load();
         let contacts = identity::load_all_contacts();
+        let groups = group::load_all_groups();
         let best_ipv6 = get_best_ipv6(&settings.network_adapter);
 
         let selected_input = if !settings.mic.is_empty() {
@@ -400,6 +429,24 @@ impl HostelApp {
             crop_size: 1.0,
             crop_dragging: false,
             crop_drag_start: (0.0, 0.0),
+            groups,
+            group_view: GroupView::List,
+            group_create_name: String::new(),
+            group_selected_members: Vec::new(),
+            group_detail_idx: None,
+            group_call_running: Arc::new(AtomicBool::new(false)),
+            group_call_mic: Arc::new(AtomicBool::new(true)),
+            group_call_hangup: None,
+            group_call_chat_tx: None,
+            group_call_chat_rx: None,
+            group_call_roster_rx: None,
+            group_call_chat_input: String::new(),
+            group_call_messages: Vec::new(),
+            group_call_members: Vec::new(),
+            group_call_group: None,
+            group_call_role: None,
+            group_chat_history: None,
+            group_connect_result: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -578,6 +625,131 @@ impl HostelApp {
             tx.send(MsgCommand::ReclaimSocket).ok();
         }
     }
+
+    pub(crate) fn start_group_call(&mut self, as_leader: bool) {
+        let idx = match self.group_detail_idx {
+            Some(i) if i < self.groups.len() => i,
+            _ => return,
+        };
+
+        // Yield socket from messaging daemon
+        if let Some(tx) = &self.msg_cmd_tx {
+            tx.send(MsgCommand::YieldSocket).ok();
+        }
+
+        // Save settings
+        self.settings.mic = self.devices.input_names.get(self.selected_input)
+            .cloned().unwrap_or_default();
+        self.settings.speakers = self.devices.output_names.get(self.selected_output)
+            .cloned().unwrap_or_default();
+        self.settings.save();
+
+        // Fresh arcs
+        self.group_call_running.store(false, Ordering::Relaxed);
+        self.group_call_running = Arc::new(AtomicBool::new(true));
+        self.group_call_mic = Arc::new(AtomicBool::new(true));
+        self.group_connect_result = Arc::new(std::sync::Mutex::new(None));
+        self.group_call_members.clear();
+
+        // Load chat history for this group
+        let group = &self.groups[idx];
+        let history = GroupChatHistory::load(&group.group_id, &self.identity.secret);
+        // Prepopulate messages from history
+        self.group_call_messages = history.messages.iter().map(|m| {
+            GroupChatMsg {
+                sender_index: 0,
+                sender_nickname: m.sender_nickname.clone(),
+                text: m.text.clone(),
+            }
+        }).collect();
+        self.group_chat_history = Some(history);
+
+        self.group_view = GroupView::Connecting;
+
+        let group = self.groups[idx].clone();
+        let local_port = self.local_port.clone();
+        let running = self.group_call_running.clone();
+        let mic_active = self.group_call_mic.clone();
+        let result = self.group_connect_result.clone();
+        let input_idx = self.selected_input;
+        let output_idx = self.selected_output;
+        let my_pubkey = self.identity.pubkey;
+
+        let my_sender_index = group.members.iter()
+            .find(|m| m.pubkey == my_pubkey)
+            .map(|m| m.sender_index)
+            .unwrap_or(0);
+
+        thread::spawn(move || {
+            // Wait for daemon to yield socket
+            thread::sleep(std::time::Duration::from_millis(500));
+
+            let host = cpal::default_host();
+            let input_device = host.input_devices().ok().and_then(|mut d| d.nth(input_idx));
+            let output_device = host.output_devices().ok().and_then(|mut d| d.nth(output_idx));
+
+            let (input_device, output_device) = match (input_device, output_device) {
+                (Some(i), Some(o)) => (i, o),
+                _ => {
+                    *result.lock().unwrap() = Some(Err("Audio device not found".into()));
+                    return;
+                }
+            };
+
+            let call_result = if as_leader {
+                crate::group_voice::start_as_leader(
+                    group, &input_device, &output_device, &local_port,
+                    running, mic_active, my_sender_index,
+                )
+            } else {
+                // For member: find the admin/leader's address
+                let leader = group.members.iter()
+                    .find(|m| m.is_admin && m.pubkey != my_pubkey)
+                    .or_else(|| group.members.first());
+                match leader {
+                    Some(l) if !l.address.is_empty() && !l.port.is_empty() => {
+                        let leader_addr = format!("[{}]:{}", l.address, l.port);
+                        crate::group_voice::start_as_member(
+                            group, &leader_addr, &input_device, &output_device,
+                            &local_port, running, mic_active, my_sender_index,
+                        )
+                    }
+                    _ => Err("No leader address available".into()),
+                }
+            };
+
+            *result.lock().unwrap() = Some(call_result);
+        });
+    }
+
+    pub(crate) fn cleanup_group_call(&mut self) {
+        self.group_call_running.store(false, Ordering::Relaxed);
+        if let Some(ref h) = self.group_call_hangup {
+            h.store(true, Ordering::Relaxed);
+        }
+        // Save chat history before clearing
+        if let Some(ref h) = self.group_chat_history {
+            h.save();
+        }
+        self.group_chat_history = None;
+        self.group_call_hangup = None;
+        self.group_call_chat_tx = None;
+        self.group_call_chat_rx = None;
+        self.group_call_roster_rx = None;
+        self.group_call_chat_input.clear();
+        self.group_call_messages.clear();
+        self.group_call_members.clear();
+        self.group_call_group = None;
+        self.group_call_role = None;
+        *self.group_connect_result.lock().unwrap() = None;
+        self.group_view = GroupView::List;
+        self.group_detail_idx = None;
+
+        // Reclaim socket
+        if let Some(tx) = &self.msg_cmd_tx {
+            tx.send(MsgCommand::ReclaimSocket).ok();
+        }
+    }
 }
 
 impl eframe::App for HostelApp {
@@ -688,6 +860,59 @@ impl eframe::App for HostelApp {
 
             let repaint_ms = if self.screen_texture.is_some() { 33 } else { 200 };
             ctx.request_repaint_after(std::time::Duration::from_millis(repaint_ms));
+        }
+
+        // Check for group call connecting result
+        if matches!(self.group_view, GroupView::Connecting) {
+            let grp_result = self.group_connect_result.lock().unwrap().take();
+            if let Some(res) = grp_result {
+                match res {
+                    Ok(info) => {
+                        self.group_call_group = Some(info.group);
+                        self.group_call_role = Some(info.role);
+                        self.group_call_hangup = Some(info.local_hangup);
+                        self.group_call_chat_tx = Some(info.chat_tx);
+                        self.group_call_chat_rx = Some(info.chat_rx);
+                        self.group_call_roster_rx = Some(info.roster_rx);
+                        self.group_call_members = self.group_call_group.as_ref()
+                            .map(|g| g.members.clone())
+                            .unwrap_or_default();
+                        self.group_view = GroupView::InCall;
+                    }
+                    Err(e) => {
+                        log_fmt!("[group] call failed: {}", e);
+                        self.cleanup_group_call();
+                    }
+                }
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+
+        // Poll group call chat messages + roster updates + detect hangup
+        if matches!(self.group_view, GroupView::InCall) {
+            if let Some(rx) = &self.group_call_chat_rx {
+                while let Ok(msg) = rx.try_recv() {
+                    // Persist to group chat history
+                    if let Some(ref mut hist) = self.group_chat_history {
+                        hist.add_message(
+                            String::new(), // fingerprint not available here
+                            msg.sender_nickname.clone(),
+                            msg.text.clone(),
+                        );
+                    }
+                    self.group_call_messages.push(msg);
+                }
+            }
+            if let Some(rx) = &self.group_call_roster_rx {
+                while let Ok(roster) = rx.try_recv() {
+                    self.group_call_members = roster;
+                }
+            }
+            if !self.group_call_running.load(Ordering::Relaxed) {
+                self.cleanup_group_call();
+                return;
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
 
         // Poll messaging daemon events
@@ -835,6 +1060,18 @@ impl eframe::App for HostelApp {
                             self.incoming_call_attention = true;
                         }
                     }
+                    MsgEvent::IncomingGroupInvite { from_nickname, group_json } => {
+                        // Auto-accept: deserialize and save the group locally
+                        if let Ok(grp) = serde_json::from_slice::<Group>(&group_json) {
+                            // Don't add duplicates
+                            if !self.groups.iter().any(|g| g.group_id == grp.group_id) {
+                                log_fmt!("[gui] group invite from {}: '{}' ({} members)",
+                                    from_nickname, grp.name, grp.members.len());
+                                group::save_group(&grp);
+                                self.groups.push(grp);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -884,8 +1121,11 @@ impl eframe::App for HostelApp {
 
         // Force Call tab when call is active
         let in_call = matches!(self.screen, Screen::Connecting | Screen::KeyWarning | Screen::InCall | Screen::Error(_));
+        let in_group_call = matches!(self.group_view, GroupView::Connecting | GroupView::InCall);
         if in_call {
             self.active_tab = SidebarTab::Call;
+        } else if in_group_call {
+            self.active_tab = SidebarTab::Groups;
         }
 
         // Video-only fullscreen: skip all UI except video + overlay
@@ -906,7 +1146,7 @@ impl eframe::App for HostelApp {
             .frame(sidebar_frame)
             .show_separator_line(false)
             .show(ctx, |ui| {
-                self.draw_sidebar(ui, in_call);
+                self.draw_sidebar(ui, in_call, in_group_call);
             });
 
         // ── Central panel: dispatch by active tab ──
@@ -915,6 +1155,7 @@ impl eframe::App for HostelApp {
                 SidebarTab::Profile => self.draw_profile_tab(ui),
                 SidebarTab::Friends => self.draw_friends_tab(ui),
                 SidebarTab::Messages => self.draw_messages_tab(ui),
+                SidebarTab::Groups => self.draw_groups_tab(ui),
                 SidebarTab::Call => {
                     match &self.screen {
                         Screen::Setup => self.draw_call_tab(ui),

@@ -54,6 +54,8 @@ pub enum MsgCommand {
     BroadcastAvatar { avatar_data: Vec<u8>, sha256: [u8; 32] },
     /// Send our avatar to a specific contact (e.g. on new contact add).
     SendAvatarTo { contact_id: String, avatar_data: Vec<u8>, sha256: [u8; 32] },
+    /// Send a group invite to a contact (encrypted via pairwise session).
+    SendGroupInvite { contact_id: String, peer_addr: SocketAddr, peer_pubkey: [u8; 32], group_json: Vec<u8> },
     /// Voice call starting — daemon must release the UDP socket.
     YieldSocket,
     /// Voice call ended — daemon can reclaim the UDP socket.
@@ -90,4 +92,6 @@ pub enum MsgEvent {
     FileTransferFailed { contact_id: String, transfer_id: u32, reason: String },
     /// A contact's avatar was received and saved.
     AvatarReceived { contact_id: String },
+    /// Incoming group invite from a contact.
+    IncomingGroupInvite { from_nickname: String, group_json: Vec<u8> },
 }
