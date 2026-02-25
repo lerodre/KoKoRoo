@@ -297,7 +297,14 @@ impl HostelApp {
             // Chat input bar at bottom
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                 ui.horizontal(|ui| {
-                    let te = ui.text_edit_singleline(&mut self.group_detail_chat_input);
+                    let send_w = 50.0;
+                    let input_w = (ui.available_width() - send_w - 8.0).max(60.0);
+                    let te = ui.add(
+                        egui::TextEdit::singleline(&mut self.group_detail_chat_input)
+                            .desired_width(input_w)
+                            .hint_text("Type a message...")
+                            .frame(true),
+                    );
                     let enter = te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     if enter || ui.button("Send").clicked() {
                         send_detail_chat = true;
