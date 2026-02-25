@@ -294,11 +294,13 @@ impl HostelApp {
                     });
             }
 
-            // Chat input bar at bottom
+            // Chat input bar at bottom — constrained to chat_w
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                ui.set_max_width(chat_w - 8.0);
                 ui.horizontal(|ui| {
-                    let send_w = 50.0;
-                    let input_w = (ui.available_width() - send_w - 8.0).max(60.0);
+                    let send_w = 48.0;
+                    let spacing = ui.spacing().item_spacing.x;
+                    let input_w = (ui.available_width() - send_w - spacing).max(60.0);
                     let te = ui.add(
                         egui::TextEdit::singleline(&mut self.group_detail_chat_input)
                             .desired_width(input_w)
@@ -306,7 +308,7 @@ impl HostelApp {
                             .frame(true),
                     );
                     let enter = te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    if enter || ui.button("Send").clicked() {
+                    if ui.button("Send").clicked() || enter {
                         send_detail_chat = true;
                         te.request_focus();
                     }
