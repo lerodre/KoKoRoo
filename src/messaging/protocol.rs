@@ -7,7 +7,7 @@ use crate::crypto::{
     PKT_MSG_IP_ANNOUNCE, PKT_MSG_PEER_QUERY, PKT_MSG_PEER_RESPONSE,
     PKT_MSG_PRESENCE,
     PKT_MSG_AVATAR_OFFER, PKT_MSG_AVATAR_DATA,
-    PKT_GRP_INVITE,
+    PKT_GRP_INVITE, PKT_GRP_MSG_CHAT,
 };
 use crate::identity::Identity;
 
@@ -544,4 +544,29 @@ pub fn handle_group_invite(data: &[u8], peer: &mut PeerSession) -> Option<Vec<u8
         return None;
     }
     Some(plain)
+}
+
+/// Send a group chat message to a peer via the messaging daemon.
+/// Payload: group_id (32 hex chars) + '\n' + text
+pub fn send_group_chat(
+    peer: &PeerSession,
+    socket: &UdpSocket,
+    group_id: &str,
+    text: &str,
+) -> Result<(), String> {
+    let payload = format!("{}\n{}", group_id, text);
+    let pkt = peer.encrypt_packet(PKT_GRP_MSG_CHAT, payload.as_bytes()).ok_or("no session")?;
+    socket.send_to(&pkt, peer.peer_addr).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Handle an incoming group chat message. Returns (group_id, text).
+pub fn handle_group_chat(data: &[u8], peer: &mut PeerSession) -> Option<(String, String)> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
+    if pkt_type != PKT_GRP_MSG_CHAT || plain.is_empty() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&plain);
+    let (gid, text) = s.split_once('\n')?;
+    Some((gid.to_string(), text.to_string()))
 }

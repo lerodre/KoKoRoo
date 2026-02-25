@@ -55,6 +55,7 @@ pub const PKT_GRP_INVITE: u8       = 0x38; // invite via messaging daemon
 pub const PKT_GRP_ALIVE: u8        = 0x39; // failover: "I'm alive" discovery
 pub const PKT_GRP_SPEED_DATA: u8   = 0x3A; // failover: speed test burst payload
 pub const PKT_GRP_SPEED_RESULT: u8 = 0x3B; // failover: speed test result
+pub const PKT_GRP_MSG_CHAT: u8    = 0x3C; // group chat via messaging daemon (offline)
 
 /// Size of an X25519 public key.
 pub const PUBKEY_SIZE: usize = 32;

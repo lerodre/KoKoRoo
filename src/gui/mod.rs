@@ -248,6 +248,7 @@ pub struct HostelApp {
     pub(crate) group_create_name: String,
     pub(crate) group_selected_members: Vec<bool>,
     pub(crate) group_detail_idx: Option<usize>,
+    pub(crate) group_detail_chat_input: String,
 
     // Group call state
     pub(crate) group_call_running: Arc<AtomicBool>,
@@ -445,6 +446,7 @@ impl HostelApp {
             group_create_name: String::new(),
             group_selected_members: Vec::new(),
             group_detail_idx: None,
+            group_detail_chat_input: String::new(),
             group_call_running: Arc::new(AtomicBool::new(false)),
             group_call_mic: Arc::new(AtomicBool::new(true)),
             group_call_hangup: None,
@@ -1086,6 +1088,29 @@ impl eframe::App for HostelApp {
                                     group_name: grp.name.clone(),
                                     member_count: grp.members.len(),
                                     group_json,
+                                });
+                            }
+                        }
+                    }
+                    MsgEvent::IncomingGroupChat { group_id, sender_nickname, text } => {
+                        // Save to group chat history
+                        use crate::chat::GroupChatHistory;
+                        let mut history = GroupChatHistory::load(&group_id, &self.identity.secret);
+                        history.add_message(String::new(), sender_nickname.clone(), text.clone());
+
+                        // If currently viewing this group, update the live messages
+                        if let Some(idx) = self.group_detail_idx {
+                            if idx < self.groups.len() && self.groups[idx].group_id == group_id {
+                                // Detail view reloads history from disk each frame
+                            }
+                        }
+                        // If in a group call for this group, push to live messages
+                        if let Some(ref g) = self.group_call_group {
+                            if g.group_id == group_id && matches!(self.group_view, groups::GroupView::InCall) {
+                                self.group_call_messages.push(crate::group_voice::GroupChatMsg {
+                                    sender_index: 0,
+                                    sender_nickname,
+                                    text,
                                 });
                             }
                         }

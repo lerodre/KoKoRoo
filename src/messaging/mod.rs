@@ -56,6 +56,8 @@ pub enum MsgCommand {
     SendAvatarTo { contact_id: String, avatar_data: Vec<u8>, sha256: [u8; 32] },
     /// Send a group invite to a contact (encrypted via pairwise session).
     SendGroupInvite { contact_id: String, peer_addr: SocketAddr, peer_pubkey: [u8; 32], group_json: Vec<u8> },
+    /// Send a group chat message to a specific member via pairwise session.
+    SendGroupChat { contact_id: String, peer_addr: SocketAddr, peer_pubkey: [u8; 32], group_id: String, text: String },
     /// Voice call starting — daemon must release the UDP socket.
     YieldSocket,
     /// Voice call ended — daemon can reclaim the UDP socket.
@@ -94,4 +96,6 @@ pub enum MsgEvent {
     AvatarReceived { contact_id: String },
     /// Incoming group invite from a contact.
     IncomingGroupInvite { from_nickname: String, group_json: Vec<u8> },
+    /// Incoming group chat message via messaging daemon.
+    IncomingGroupChat { group_id: String, sender_nickname: String, text: String },
 }

@@ -11,7 +11,7 @@ use crate::crypto::{
     PKT_MSG_FILE_CHUNK, PKT_MSG_FILE_ACK, PKT_MSG_FILE_COMPLETE, PKT_MSG_FILE_CANCEL,
     PKT_MSG_FILE_NACK,
     PKT_MSG_AVATAR_OFFER, PKT_MSG_AVATAR_DATA,
-    PKT_GRP_INVITE,
+    PKT_GRP_INVITE, PKT_GRP_MSG_CHAT,
 };
 use crate::identity::{self};
 use crate::filetransfer;
@@ -832,6 +832,20 @@ impl MsgDaemon {
                             self.event_tx.send(MsgEvent::IncomingGroupInvite {
                                 from_nickname,
                                 group_json,
+                            }).ok();
+                        }
+                    }
+                }
+
+                PKT_GRP_MSG_CHAT => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((group_id, text)) = protocol::handle_group_chat(data, peer) {
+                            peer.touch();
+                            let sender_nickname = peer.peer_nickname.clone();
+                            self.event_tx.send(MsgEvent::IncomingGroupChat {
+                                group_id,
+                                sender_nickname,
+                                text,
                             }).ok();
                         }
                     }

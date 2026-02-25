@@ -219,123 +219,181 @@ impl HostelApp {
                 }
             });
         });
+        ui.separator();
 
-        // ── Members section: full-width header bar + alternating rows ──
-        let full_w = ui.available_width();
-        let header_rect = ui.allocate_space(egui::vec2(full_w, 28.0)).1;
-        ui.painter().rect_filled(header_rect, 0.0, self.settings.theme.sidebar_bg());
-        ui.painter().text(
-            egui::pos2(header_rect.min.x + 10.0, header_rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            format!("Members ({})", member_count),
-            egui::FontId::proportional(13.0),
-            self.settings.theme.text_primary(),
+        // ── 2-column layout: Chat (left) | Members sidebar (right) ──
+        let available = ui.available_rect_before_wrap();
+        let clip = ui.clip_rect();
+        let sep_w = 1.0;
+        let members_w = 180.0_f32.max(available.width() * 0.22).min(240.0);
+        let chat_w = (available.width() - members_w - sep_w - 4.0).max(100.0);
+
+        // Background for right sidebar
+        let bg_rect = egui::Rect::from_min_max(
+            egui::pos2(available.min.x + chat_w + sep_w + 4.0, clip.min.y),
+            egui::pos2(clip.max.x, clip.max.y),
         );
-        // Separator lines around header
-        let stroke = egui::Stroke::new(1.0, self.settings.theme.text_muted());
-        ui.painter().hline(header_rect.x_range(), header_rect.min.y, stroke);
-        ui.painter().hline(header_rect.x_range(), header_rect.max.y, stroke);
+        ui.painter().rect_filled(bg_rect, 0.0, self.settings.theme.sidebar_bg());
 
-        if member_count > 8 {
-            ui.colored_label(
-                self.settings.theme.btn_negative(),
-                format!("  >8 members — call quality may degrade"),
-            );
-        }
+        // Vertical separator between chat and members
+        let sep_x = available.min.x + chat_w + 2.0;
+        ui.painter().vline(sep_x, clip.y_range(), egui::Stroke::new(sep_w, self.settings.theme.text_muted()));
 
-        // Member rows with alternating colors
+        let chat_rect = egui::Rect::from_min_size(
+            available.min,
+            egui::vec2(chat_w, available.height()),
+        );
+        let members_rect = egui::Rect::from_min_size(
+            egui::pos2(available.min.x + chat_w + sep_w + 4.0, available.min.y),
+            egui::vec2(members_w - 4.0, available.height()),
+        );
+
+        // ── Left panel: Chat + input ──
+        let mut send_detail_chat = false;
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(chat_rect), |ui| {
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new("Chat").strong().size(13.0));
+            ui.add_space(4.0);
+
+            let history = GroupChatHistory::load(&grp_id, &identity_secret);
+            let input_h = 34.0;
+            let chat_h = (ui.available_height() - input_h - 8.0).max(40.0);
+
+            if history.messages.is_empty() {
+                ui.add_space(40.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new("No messages yet")
+                            .color(self.settings.theme.text_muted()),
+                    );
+                });
+                // Fill remaining space before input
+                let remaining = (chat_h - 60.0).max(0.0);
+                ui.add_space(remaining);
+            } else {
+                egui::ScrollArea::vertical()
+                    .max_height(chat_h)
+                    .stick_to_bottom(true)
+                    .id_salt("grp_detail_chat")
+                    .show(ui, |ui| {
+                        for msg in &history.messages {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(
+                                    egui::RichText::new(ChatHistory::format_time(msg.timestamp))
+                                        .size(11.0)
+                                        .color(self.settings.theme.text_muted()),
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!("[{}]", msg.sender_nickname))
+                                        .strong()
+                                        .color(self.settings.theme.btn_primary()),
+                                );
+                                ui.label(&msg.text);
+                            });
+                        }
+                    });
+            }
+
+            // Chat input bar at bottom
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                ui.horizontal(|ui| {
+                    let te = ui.text_edit_singleline(&mut self.group_detail_chat_input);
+                    let enter = te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if enter || ui.button("Send").clicked() {
+                        send_detail_chat = true;
+                        te.request_focus();
+                    }
+                });
+            });
+        });
+
+        // ── Right sidebar: Members ──
         let color_even = self.settings.theme.panel_bg();
         let color_odd = self.settings.theme.sidebar_bg();
 
-        for (i, member) in members.iter().enumerate() {
-            let bg = if i % 2 == 0 { color_even } else { color_odd };
-            let row_rect = ui.allocate_space(egui::vec2(full_w, 26.0)).1;
-            ui.painter().rect_filled(row_rect, 0.0, bg);
-
-            let mut x = row_rect.min.x + 12.0;
-            let cy = row_rect.center().y;
-
-            // Nickname
-            let nick_galley = ui.painter().layout_no_wrap(
-                member.nickname.clone(),
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(members_rect), |ui| {
+            // Header bar
+            let header_w = ui.available_width();
+            let header_rect = ui.allocate_space(egui::vec2(header_w, 28.0)).1;
+            ui.painter().rect_filled(header_rect, 0.0, self.settings.theme.sidebar_bg());
+            ui.painter().text(
+                egui::pos2(header_rect.min.x + 8.0, header_rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                format!("Members ({})", member_count),
                 egui::FontId::proportional(13.0),
                 self.settings.theme.text_primary(),
             );
-            ui.painter().galley(egui::pos2(x, cy - nick_galley.size().y / 2.0), nick_galley.clone(), self.settings.theme.text_primary());
-            x += nick_galley.size().x + 8.0;
+            let hline_stroke = egui::Stroke::new(1.0, self.settings.theme.text_muted());
+            ui.painter().hline(header_rect.x_range(), header_rect.max.y, hline_stroke);
 
-            // Role
-            let role_text = if member.is_admin { "admin" } else { "member" };
-            let role_color = if member.is_admin { self.settings.theme.btn_primary() } else { self.settings.theme.text_muted() };
-            let role_galley = ui.painter().layout_no_wrap(
-                role_text.to_string(),
-                egui::FontId::proportional(11.0),
-                role_color,
-            );
-            ui.painter().galley(egui::pos2(x, cy - role_galley.size().y / 2.0), role_galley.clone(), role_color);
-            x += role_galley.size().x + 6.0;
-
-            // (you) marker
-            if member.pubkey == my_pubkey {
-                let you_galley = ui.painter().layout_no_wrap(
-                    "(you)".to_string(),
-                    egui::FontId::proportional(11.0),
-                    self.settings.theme.text_muted(),
+            if member_count > 8 {
+                ui.colored_label(
+                    self.settings.theme.btn_negative(),
+                    ">8 — quality may degrade",
                 );
-                ui.painter().galley(egui::pos2(x, cy - you_galley.size().y / 2.0), you_galley, self.settings.theme.text_muted());
             }
-        }
 
-        // Bottom separator after members
-        ui.painter().hline(
-            ui.available_rect_before_wrap().x_range(),
-            ui.cursor().min.y,
-            stroke,
-        );
-
-        // ── Chat history (read-only, not in a call) ──
-        ui.add_space(6.0);
-        ui.label(
-            egui::RichText::new("Chat")
-                .strong()
-                .size(13.0),
-        );
-        ui.add_space(4.0);
-
-        let history = GroupChatHistory::load(&grp_id, &identity_secret);
-        let chat_h = ui.available_height() - 4.0;
-
-        if history.messages.is_empty() {
-            ui.add_space(20.0);
-            ui.vertical_centered(|ui| {
-                ui.label(
-                    egui::RichText::new("No messages yet")
-                        .color(self.settings.theme.text_muted()),
-                );
-            });
-        } else {
+            // Member rows — alternating colors, Nickname + Role only
             egui::ScrollArea::vertical()
-                .max_height(chat_h.max(80.0))
-                .stick_to_bottom(true)
-                .id_salt("grp_detail_chat")
+                .id_salt("detail_members")
                 .show(ui, |ui| {
-                    for msg in &history.messages {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(
-                                egui::RichText::new(ChatHistory::format_time(msg.timestamp))
-                                    .size(11.0)
-                                    .color(self.settings.theme.text_muted()),
+                    let row_w = ui.available_width();
+                    for (i, member) in members.iter().enumerate() {
+                        let bg = if i % 2 == 0 { color_even } else { color_odd };
+                        let row_rect = ui.allocate_space(egui::vec2(row_w, 26.0)).1;
+                        ui.painter().rect_filled(row_rect, 0.0, bg);
+
+                        let mut x = row_rect.min.x + 8.0;
+                        let cy = row_rect.center().y;
+
+                        // Nickname
+                        let nick_galley = ui.painter().layout_no_wrap(
+                            member.nickname.clone(),
+                            egui::FontId::proportional(13.0),
+                            self.settings.theme.text_primary(),
+                        );
+                        ui.painter().galley(
+                            egui::pos2(x, cy - nick_galley.size().y / 2.0),
+                            nick_galley.clone(),
+                            self.settings.theme.text_primary(),
+                        );
+                        x += nick_galley.size().x + 6.0;
+
+                        // Role badge
+                        let role_text = if member.is_admin { "admin" } else { "member" };
+                        let role_color = if member.is_admin {
+                            self.settings.theme.btn_primary()
+                        } else {
+                            self.settings.theme.text_muted()
+                        };
+                        let role_galley = ui.painter().layout_no_wrap(
+                            role_text.to_string(),
+                            egui::FontId::proportional(11.0),
+                            role_color,
+                        );
+                        ui.painter().galley(
+                            egui::pos2(x, cy - role_galley.size().y / 2.0),
+                            role_galley.clone(),
+                            role_color,
+                        );
+                        x += role_galley.size().x + 5.0;
+
+                        // (you)
+                        if member.pubkey == my_pubkey {
+                            let you_galley = ui.painter().layout_no_wrap(
+                                "(you)".to_string(),
+                                egui::FontId::proportional(11.0),
+                                self.settings.theme.text_muted(),
                             );
-                            ui.label(
-                                egui::RichText::new(format!("[{}]", msg.sender_nickname))
-                                    .strong()
-                                    .color(self.settings.theme.btn_primary()),
+                            ui.painter().galley(
+                                egui::pos2(x, cy - you_galley.size().y / 2.0),
+                                you_galley,
+                                self.settings.theme.text_muted(),
                             );
-                            ui.label(&msg.text);
-                        });
+                        }
                     }
                 });
-        }
+        });
 
         // Deferred actions
         if go_back {
@@ -344,6 +402,40 @@ impl HostelApp {
         }
         if start_call {
             self.start_group_call(is_admin);
+        }
+        if send_detail_chat {
+            let text = self.group_detail_chat_input.trim().to_string();
+            if !text.is_empty() {
+                // Save to local history
+                let my_nickname = self.settings.nickname.clone();
+                {
+                    let mut history = GroupChatHistory::load(&grp_id, &self.identity.secret);
+                    history.add_message(String::new(), my_nickname.clone(), text.clone());
+                }
+                // Send to all other group members via messaging daemon
+                if let Some(tx) = &self.msg_cmd_tx {
+                    for member in &members {
+                        if member.pubkey == my_pubkey {
+                            continue;
+                        }
+                        if member.address.is_empty() || member.port.is_empty() {
+                            continue;
+                        }
+                        let addr_str = format!("[{}]:{}", member.address, member.port);
+                        if let Ok(addr) = addr_str.parse() {
+                            let contact_id = identity::derive_contact_id(&my_pubkey, &member.pubkey);
+                            tx.send(crate::messaging::MsgCommand::SendGroupChat {
+                                contact_id,
+                                peer_addr: addr,
+                                peer_pubkey: member.pubkey,
+                                group_id: grp_id.clone(),
+                                text: text.clone(),
+                            }).ok();
+                        }
+                    }
+                }
+            }
+            self.group_detail_chat_input.clear();
         }
     }
 
