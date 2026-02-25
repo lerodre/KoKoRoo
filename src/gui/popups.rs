@@ -4,6 +4,7 @@ use eframe::egui;
 
 use super::HostelApp;
 use super::network::{peer_display_job, censor_ip};
+use crate::group::{self, Group};
 use crate::messaging::MsgCommand;
 
 impl HostelApp {
@@ -186,6 +187,87 @@ impl HostelApp {
         if skip {
             self.firewall_old_port.clear();
             self.show_firewall_prompt = false;
+        }
+    }
+
+    pub(crate) fn draw_incoming_group_invite_popup(&mut self, ctx: &egui::Context) {
+        let info = match &self.incoming_group_invite {
+            Some(i) => i,
+            None => return,
+        };
+
+        let from = info.from_nickname.clone();
+        let name = info.group_name.clone();
+        let count = info.member_count;
+
+        let mut accept = false;
+        let mut reject = false;
+
+        egui::Window::new("Group Invitation")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.add_space(8.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new("Group Invitation")
+                            .size(20.0)
+                            .strong()
+                            .color(self.settings.theme.accent()),
+                    );
+                    ui.add_space(10.0);
+                    ui.label(
+                        egui::RichText::new(format!("{} invited you to", from))
+                            .size(14.0),
+                    );
+                    ui.label(
+                        egui::RichText::new(&name)
+                            .size(16.0)
+                            .strong(),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(format!("{} members", count))
+                            .size(12.0)
+                            .color(self.settings.theme.text_muted()),
+                    );
+                    ui.add_space(12.0);
+                });
+                ui.horizontal(|ui| {
+                    let accept_btn = egui::Button::new(
+                        egui::RichText::new("Accept").size(16.0).color(egui::Color32::WHITE),
+                    )
+                    .min_size(egui::vec2(120.0, 38.0))
+                    .fill(self.settings.theme.btn_positive());
+                    if ui.add(accept_btn).clicked() {
+                        accept = true;
+                    }
+
+                    let reject_btn = egui::Button::new(
+                        egui::RichText::new("Reject").size(16.0).color(egui::Color32::WHITE),
+                    )
+                    .min_size(egui::vec2(120.0, 38.0))
+                    .fill(self.settings.theme.btn_negative());
+                    if ui.add(reject_btn).clicked() {
+                        reject = true;
+                    }
+                });
+                ui.add_space(4.0);
+            });
+
+        if accept {
+            if let Some(info) = self.incoming_group_invite.take() {
+                if let Ok(grp) = serde_json::from_slice::<Group>(&info.group_json) {
+                    if !self.groups.iter().any(|g| g.group_id == grp.group_id) {
+                        group::save_group(&grp);
+                        self.groups.push(grp);
+                    }
+                }
+            }
+        }
+        if reject {
+            self.incoming_group_invite = None;
         }
     }
 }

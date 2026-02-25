@@ -204,6 +204,9 @@ pub struct HostelApp {
     // Ringtone playback (background thread)
     pub(crate) ringtone_stop: Option<Arc<AtomicBool>>,
 
+    // Group invite popup
+    pub(crate) incoming_group_invite: Option<IncomingGroupInviteInfo>,
+
     // Notification sound cooldown
     pub(crate) last_notification_sound: Option<Instant>,
 
@@ -267,6 +270,13 @@ pub(crate) struct IncomingCallInfo {
     pub(crate) fingerprint: String,
     pub(crate) ip: String,
     pub(crate) port: String,
+}
+
+pub(crate) struct IncomingGroupInviteInfo {
+    pub(crate) from_nickname: String,
+    pub(crate) group_name: String,
+    pub(crate) member_count: usize,
+    pub(crate) group_json: Vec<u8>,
 }
 
 impl HostelApp {
@@ -407,6 +417,7 @@ impl HostelApp {
             show_ips: false,
             incoming_call: None,
             incoming_call_attention: false,
+            incoming_group_invite: None,
             ringtone_stop: None,
             last_notification_sound: None,
             logo_texture: None,
@@ -1061,14 +1072,21 @@ impl eframe::App for HostelApp {
                         }
                     }
                     MsgEvent::IncomingGroupInvite { from_nickname, group_json } => {
-                        // Auto-accept: deserialize and save the group locally
+                        // Show popup for user to accept/reject
                         if let Ok(grp) = serde_json::from_slice::<Group>(&group_json) {
-                            // Don't add duplicates
                             if !self.groups.iter().any(|g| g.group_id == grp.group_id) {
                                 log_fmt!("[gui] group invite from {}: '{}' ({} members)",
                                     from_nickname, grp.name, grp.members.len());
-                                group::save_group(&grp);
-                                self.groups.push(grp);
+                                send_desktop_notification(
+                                    "hostelD — Group Invitation",
+                                    &format!("{} invited you to '{}'", from_nickname, grp.name),
+                                );
+                                self.incoming_group_invite = Some(IncomingGroupInviteInfo {
+                                    from_nickname,
+                                    group_name: grp.name.clone(),
+                                    member_count: grp.members.len(),
+                                    group_json,
+                                });
                             }
                         }
                     }
@@ -1176,6 +1194,11 @@ impl eframe::App for HostelApp {
         // ── Incoming call popup (overlay on top of everything) ──
         if self.incoming_call.is_some() {
             self.draw_incoming_call_popup(ctx);
+        }
+
+        // ── Group invite popup ──
+        if self.incoming_group_invite.is_some() {
+            self.draw_incoming_group_invite_popup(ctx);
         }
 
         // ── Firewall prompt popup ──

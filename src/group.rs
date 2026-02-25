@@ -72,6 +72,7 @@ pub fn save_group(group: &Group) {
 }
 
 /// Load a group from disk by its ID.
+#[allow(dead_code)]
 pub fn load_group(group_id: &str) -> Option<Group> {
     let path = groups_dir().join(format!("{}.json", group_id));
     let data = fs::read_to_string(path).ok()?;
@@ -108,11 +109,13 @@ pub fn delete_group(group_id: &str) {
 }
 
 /// Find a member in the group by pubkey.
+#[allow(dead_code)]
 pub fn find_member_by_pubkey<'a>(group: &'a Group, pubkey: &[u8; 32]) -> Option<&'a GroupMember> {
     group.members.iter().find(|m| &m.pubkey == pubkey)
 }
 
 /// Find a member in the group by sender_index.
+#[allow(dead_code)]
 pub fn find_member_by_index(group: &Group, sender_index: u16) -> Option<&GroupMember> {
     group.members.iter().find(|m| m.sender_index == sender_index)
 }

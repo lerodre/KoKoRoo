@@ -190,135 +190,171 @@ impl HostelApp {
             }
         };
 
-        ui.add_space(8.0);
-
         // Collect info before mutable borrow
         let grp_name = self.groups[idx].name.clone();
         let grp_id = self.groups[idx].group_id.clone();
         let grp_created = self.groups[idx].created_at.clone();
         let member_count = self.groups[idx].members.len();
+        let members: Vec<GroupMember> = self.groups[idx].members.clone();
         let my_pubkey = self.identity.pubkey;
-        let is_admin = self.groups[idx].members.iter()
-            .any(|m| m.pubkey == my_pubkey && m.is_admin);
+        let is_admin = members.iter().any(|m| m.pubkey == my_pubkey && m.is_admin);
+        let identity_secret = self.identity.secret;
+        let theme = self.settings.theme.clone();
 
         let mut go_back = false;
         let mut start_call = false;
 
+        // ── Top bar: Back + Group name + info + Call button ──
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
             if ui.button("<- Back").clicked() {
                 go_back = true;
             }
+            ui.add_space(4.0);
             ui.heading(&grp_name);
-        });
-
-        ui.separator();
-        ui.add_space(8.0);
-
-        // Group info
-        ui.label(format!("Group ID: {}", &grp_id[..16]));
-        ui.label(format!("Created: {}", grp_created));
-        if member_count > 8 {
+            ui.add_space(8.0);
             ui.label(
-                egui::RichText::new(format!("Warning: {} members (>8 may affect quality)", member_count))
-                    .color(self.settings.theme.btn_negative()),
+                egui::RichText::new(format!("ID: {}...", &grp_id[..12]))
+                    .size(11.0)
+                    .color(theme.text_muted()),
             );
-        }
-        ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new(&grp_created)
+                    .size(11.0)
+                    .color(theme.text_muted()),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let label = if is_admin { "Start Call (Leader)" } else { "Join Call" };
+                let call_btn = egui::Button::new(
+                    egui::RichText::new(label).strong().color(egui::Color32::WHITE),
+                ).fill(theme.btn_positive());
+                if ui.add(call_btn).clicked() {
+                    start_call = true;
+                }
+            });
+        });
+        ui.separator();
 
-        // Member list
-        ui.label(egui::RichText::new(format!("Members ({})", member_count)).strong());
-        ui.add_space(4.0);
+        // ── 2-column layout: Chat (left) | Members (right) ──
+        let available = ui.available_rect_before_wrap();
+        let clip = ui.clip_rect();
+        let sep_w = 1.0;
+        let members_w = 200.0_f32.max(available.width() * 0.28).min(280.0);
+        let chat_w = (available.width() - members_w - sep_w - 4.0).max(100.0);
 
-        egui::ScrollArea::vertical().max_height(250.0).id_salt("detail_members").show(ui, |ui| {
-            for member in &self.groups[idx].members {
-                let frame = egui::Frame::none()
-                    .fill(self.settings.theme.panel_bg())
-                    .rounding(egui::Rounding::same(4.0))
-                    .inner_margin(egui::Margin::same(8.0))
-                    .outer_margin(egui::Margin::symmetric(0.0, 2.0));
+        // Background for right panel
+        let bg_rect = egui::Rect::from_min_max(
+            egui::pos2(available.min.x + chat_w + sep_w + 4.0, clip.min.y),
+            egui::pos2(clip.max.x, clip.max.y),
+        );
+        ui.painter().rect_filled(bg_rect, 0.0, theme.sidebar_bg());
 
-                frame.show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(&member.nickname).strong(),
-                        );
-                        ui.label(
-                            egui::RichText::new(&member.fingerprint)
-                                .size(11.0)
-                                .color(self.settings.theme.text_muted()),
-                        );
-                        if member.is_admin {
-                            ui.label(
-                                egui::RichText::new("admin")
-                                    .size(10.0)
-                                    .color(self.settings.theme.btn_primary()),
-                            );
-                        }
-                        if member.pubkey == my_pubkey {
-                            ui.label(
-                                egui::RichText::new("(you)")
-                                    .size(10.0)
-                                    .color(self.settings.theme.text_muted()),
-                            );
+        // Vertical separator
+        let sep_x = available.min.x + chat_w + 2.0;
+        ui.painter().vline(sep_x, clip.y_range(), egui::Stroke::new(sep_w, theme.text_muted()));
+
+        let chat_rect = egui::Rect::from_min_size(
+            available.min,
+            egui::vec2(chat_w, available.height()),
+        );
+        let members_rect = egui::Rect::from_min_size(
+            egui::pos2(available.min.x + chat_w + sep_w + 4.0, available.min.y),
+            egui::vec2(members_w - 4.0, available.height()),
+        );
+
+        // ── Left panel: Chat history ──
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(chat_rect), |ui| {
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new("Chat").strong().size(13.0));
+            ui.add_space(4.0);
+
+            let history = GroupChatHistory::load(&grp_id, &identity_secret);
+            let chat_h = ui.available_height() - 4.0;
+
+            if history.messages.is_empty() {
+                ui.add_space(20.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new("No messages yet")
+                            .color(theme.text_muted()),
+                    );
+                });
+            } else {
+                egui::ScrollArea::vertical()
+                    .max_height(chat_h.max(80.0))
+                    .stick_to_bottom(true)
+                    .id_salt("grp_detail_chat")
+                    .show(ui, |ui| {
+                        for msg in &history.messages {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(
+                                    egui::RichText::new(ChatHistory::format_time(msg.timestamp))
+                                        .size(11.0)
+                                        .color(theme.text_muted()),
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!("[{}]", msg.sender_nickname))
+                                        .strong()
+                                        .color(theme.btn_primary()),
+                                );
+                                ui.label(&msg.text);
+                            });
                         }
                     });
-                });
             }
         });
 
-        ui.add_space(12.0);
-        ui.separator();
-        ui.add_space(8.0);
+        // ── Right panel: Members ──
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(members_rect), |ui| {
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new(format!("Members ({})", member_count)).strong().size(13.0));
+            if member_count > 8 {
+                ui.label(
+                    egui::RichText::new(format!(">8 members — quality may degrade"))
+                        .size(11.0)
+                        .color(theme.btn_negative()),
+                );
+            }
+            ui.add_space(4.0);
 
-        // Chat history preview
-        ui.label(egui::RichText::new("Chat History").strong());
-        ui.add_space(4.0);
-
-        let history = GroupChatHistory::load(&grp_id, &self.identity.secret);
-        if history.messages.is_empty() {
-            ui.label(
-                egui::RichText::new("No messages yet")
-                    .color(self.settings.theme.text_muted()),
-            );
-        } else {
-            let recent = if history.messages.len() > 50 {
-                &history.messages[history.messages.len() - 50..]
-            } else {
-                &history.messages
-            };
             egui::ScrollArea::vertical()
-                .max_height(150.0)
-                .stick_to_bottom(true)
-                .id_salt("grp_detail_chat")
+                .id_salt("detail_members")
                 .show(ui, |ui| {
-                    for msg in recent {
-                        ui.horizontal_wrapped(|ui| {
+                    for member in &members {
+                        let frame = egui::Frame::none()
+                            .fill(theme.panel_bg())
+                            .rounding(egui::Rounding::same(4.0))
+                            .inner_margin(egui::Margin::same(8.0))
+                            .outer_margin(egui::Margin::symmetric(0.0, 2.0));
+
+                        frame.show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(&member.nickname).strong(),
+                                );
+                                let role_label = if member.is_admin { "admin" } else { "member" };
+                                let role_color = if member.is_admin { theme.btn_primary() } else { theme.text_muted() };
+                                ui.label(
+                                    egui::RichText::new(role_label)
+                                        .size(10.0)
+                                        .color(role_color),
+                                );
+                                if member.pubkey == my_pubkey {
+                                    ui.label(
+                                        egui::RichText::new("(you)")
+                                            .size(10.0)
+                                            .color(theme.text_muted()),
+                                    );
+                                }
+                            });
                             ui.label(
-                                egui::RichText::new(ChatHistory::format_time(msg.timestamp))
+                                egui::RichText::new(&member.fingerprint)
                                     .size(11.0)
-                                    .color(self.settings.theme.text_muted()),
+                                    .color(theme.text_muted()),
                             );
-                            ui.label(
-                                egui::RichText::new(format!("[{}]", msg.sender_nickname))
-                                    .strong()
-                                    .color(self.settings.theme.btn_primary()),
-                            );
-                            ui.label(&msg.text);
                         });
                     }
                 });
-        }
-
-        ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(8.0);
-
-        // Call buttons
-        ui.horizontal(|ui| {
-            let label = if is_admin { "Start Call (Leader)" } else { "Join Call" };
-            if ui.button(label).clicked() {
-                start_call = true;
-            }
         });
 
         // Deferred actions

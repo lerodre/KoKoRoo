@@ -36,6 +36,7 @@ pub enum GroupRole {
 /// A group chat message with sender info.
 #[derive(Clone)]
 pub struct GroupChatMsg {
+    #[allow(dead_code)]
     pub sender_index: u16,
     pub sender_nickname: String,
     pub text: String,
@@ -45,7 +46,9 @@ pub struct GroupChatMsg {
 pub struct GroupCallInfo {
     pub group: Group,
     pub role: GroupRole,
+    #[allow(dead_code)]
     pub running: Arc<AtomicBool>,
+    #[allow(dead_code)]
     pub mic_active: Arc<AtomicBool>,
     pub chat_tx: mpsc::Sender<String>,
     pub chat_rx: mpsc::Receiver<GroupChatMsg>,
@@ -55,6 +58,7 @@ pub struct GroupCallInfo {
 
 /// Leader tracks each connected member at runtime.
 struct ConnectedMember {
+    #[allow(dead_code)]
     sender_index: u16,
     peer_addr: SocketAddr,
     last_activity: Instant,
@@ -275,17 +279,21 @@ pub fn start_as_leader(
                                     .find(|m| m.sender_index == si)
                                     .map(|m| m.nickname.clone())
                                     .unwrap_or_else(|| format!("member-{}", si));
+                                log_fmt!("[group-chat] leader recv from si={} '{}': '{}'", si, nickname, text);
                                 let _ = relay_chat_in.send(GroupChatMsg {
                                     sender_index: si,
                                     sender_nickname: nickname,
                                     text,
                                 });
+                            } else {
+                                log_fmt!("[group-chat] leader failed to decrypt chat pkt ({} bytes)", n);
                             }
 
                             // Relay to all OTHER members
                             let conn = relay_connected.lock().unwrap();
                             for (idx, member) in conn.iter() {
                                 if *idx != sender_index {
+                                    log_fmt!("[group-chat] leader relay chat to si={} addr={}", idx, member.peer_addr);
                                     let _ = relay_socket.send_to(&recv_buf[..n], member.peer_addr);
                                 }
                             }
@@ -348,6 +356,7 @@ pub fn start_as_leader(
             // Outgoing chat
             if let Ok(rx) = chat_out_rx_sender.lock() {
                 while let Ok(text) = rx.try_recv() {
+                    log_fmt!("[group-chat] leader sending own chat: '{}'", text);
                     let counter = sender_counter.fetch_add(1, Ordering::Relaxed);
                     let pkt = crypto::grp_encrypt(&sender_cipher, my_sender_index, counter, PKT_GRP_CHAT, text.as_bytes());
                     let conn = sender_connected.lock().unwrap();
@@ -697,11 +706,14 @@ pub fn start_as_member(
                                     .find(|m| m.sender_index == si)
                                     .map(|m| m.nickname.clone())
                                     .unwrap_or_else(|| format!("member-{}", si));
+                                log_fmt!("[group-chat] member recv from si={} '{}': '{}'", si, nickname, text);
                                 let _ = chat_in_tx.send(GroupChatMsg {
                                     sender_index: si,
                                     sender_nickname: nickname,
                                     text,
                                 });
+                            } else {
+                                log_fmt!("[group-chat] member failed to decrypt chat pkt ({} bytes)", n);
                             }
                         }
 
@@ -807,6 +819,7 @@ pub fn start_as_member(
 
             // Outgoing chat
             while let Ok(text) = chat_out_rx.try_recv() {
+                log_fmt!("[group-chat] member sending chat to leader {}: '{}'", current_leader, text);
                 let counter = sender_counter2.fetch_add(1, Ordering::Relaxed);
                 let pkt = crypto::grp_encrypt(
                     &sender_cipher2, my_sender_index, counter,
