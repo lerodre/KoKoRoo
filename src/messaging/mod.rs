@@ -2,6 +2,7 @@ pub mod daemon;
 pub mod session;
 pub mod protocol;
 pub mod outbox;
+pub mod pending_invites;
 mod commands;
 mod packets;
 mod housekeep;
@@ -58,6 +59,10 @@ pub enum MsgCommand {
     SendGroupInvite { contact_id: String, peer_addr: SocketAddr, peer_pubkey: [u8; 32], group_json: Vec<u8> },
     /// Send a group chat message to a specific member via pairwise session.
     SendGroupChat { contact_id: String, peer_addr: SocketAddr, peer_pubkey: [u8; 32], group_id: String, text: String },
+    /// Accept an incoming group invite (send ACK to the inviter).
+    AcceptGroupInvite { contact_id: String, group_id: String },
+    /// Reject an incoming group invite (send NACK to the inviter).
+    RejectGroupInvite { contact_id: String, group_id: String },
     /// Voice call starting — daemon must release the UDP socket.
     YieldSocket,
     /// Voice call ended — daemon can reclaim the UDP socket.
@@ -98,4 +103,6 @@ pub enum MsgEvent {
     IncomingGroupInvite { from_nickname: String, group_json: Vec<u8> },
     /// Incoming group chat message via messaging daemon.
     IncomingGroupChat { group_id: String, sender_nickname: String, text: String },
+    /// A peer rejected our group invite — remove them from the group.
+    GroupInviteRejected { contact_id: String, group_id: String },
 }

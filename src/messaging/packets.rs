@@ -12,6 +12,7 @@ use crate::crypto::{
     PKT_MSG_FILE_NACK,
     PKT_MSG_AVATAR_OFFER, PKT_MSG_AVATAR_DATA,
     PKT_GRP_INVITE, PKT_GRP_MSG_CHAT,
+    PKT_GRP_INVITE_ACK, PKT_GRP_INVITE_NACK,
 };
 use crate::identity::{self};
 use crate::filetransfer;
@@ -176,6 +177,14 @@ impl MsgDaemon {
                             for msg in &mut outbox.messages {
                                 protocol::send_chat_message(peer, socket, msg.seq, &msg.text).ok();
                                 msg.attempts += 1;
+                            }
+                            // Flush pending group invites (reactive — triggered on peer connect)
+                            if let Some(store) = self.pending_invites.get_mut(&contact_id) {
+                                for invite in &mut store.invites {
+                                    protocol::send_group_invite(peer, socket, &invite.group_json).ok();
+                                    invite.attempts += 1;
+                                }
+                                store.save();
                             }
                             // Reset retry state
                             self.retry_state.insert(contact_id, (Instant::now(), 0));
@@ -846,6 +855,36 @@ impl MsgDaemon {
                                 group_id,
                                 sender_nickname,
                                 text,
+                            }).ok();
+                        }
+                    }
+                }
+
+                PKT_GRP_INVITE_ACK => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some(group_id) = protocol::handle_group_invite_ack(data, peer) {
+                            peer.touch();
+                            let cid = peer.contact_id.clone();
+                            log_fmt!("[daemon] group invite ACK from {} for group={}", cid, group_id);
+                            if let Some(store) = self.pending_invites.get_mut(&cid) {
+                                store.remove(&group_id);
+                            }
+                        }
+                    }
+                }
+
+                PKT_GRP_INVITE_NACK => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some(group_id) = protocol::handle_group_invite_nack(data, peer) {
+                            peer.touch();
+                            let cid = peer.contact_id.clone();
+                            log_fmt!("[daemon] group invite NACK from {} for group={}", cid, group_id);
+                            if let Some(store) = self.pending_invites.get_mut(&cid) {
+                                store.remove(&group_id);
+                            }
+                            self.event_tx.send(MsgEvent::GroupInviteRejected {
+                                contact_id: cid,
+                                group_id,
                             }).ok();
                         }
                     }

@@ -1092,6 +1092,14 @@ impl eframe::App for HostelApp {
                             }
                         }
                     }
+                    MsgEvent::GroupInviteRejected { contact_id, group_id } => {
+                        // Peer rejected our group invite — remove them from the group
+                        if let Some(grp) = self.groups.iter_mut().find(|g| g.group_id == group_id) {
+                            if let Some(contact) = self.contacts.iter().find(|c| c.contact_id == contact_id) {
+                                group::remove_member(grp, &contact.pubkey);
+                            }
+                        }
+                    }
                     MsgEvent::IncomingGroupChat { group_id, sender_nickname, text } => {
                         // Save to group chat history
                         use crate::chat::GroupChatHistory;

@@ -261,13 +261,34 @@ impl HostelApp {
                 if let Ok(grp) = serde_json::from_slice::<Group>(&info.group_json) {
                     if !self.groups.iter().any(|g| g.group_id == grp.group_id) {
                         group::save_group(&grp);
+                        // Send ACK to inviter via daemon
+                        if let Some(tx) = &self.msg_cmd_tx {
+                            if let Some(contact) = self.contacts.iter().find(|c| c.pubkey == grp.created_by) {
+                                tx.send(MsgCommand::AcceptGroupInvite {
+                                    contact_id: contact.contact_id.clone(),
+                                    group_id: grp.group_id.clone(),
+                                }).ok();
+                            }
+                        }
                         self.groups.push(grp);
                     }
                 }
             }
         }
         if reject {
-            self.incoming_group_invite = None;
+            if let Some(info) = self.incoming_group_invite.take() {
+                if let Ok(grp) = serde_json::from_slice::<Group>(&info.group_json) {
+                    // Send NACK to inviter via daemon
+                    if let Some(tx) = &self.msg_cmd_tx {
+                        if let Some(contact) = self.contacts.iter().find(|c| c.pubkey == grp.created_by) {
+                            tx.send(MsgCommand::RejectGroupInvite {
+                                contact_id: contact.contact_id.clone(),
+                                group_id: grp.group_id.clone(),
+                            }).ok();
+                        }
+                    }
+                }
+            }
         }
     }
 }

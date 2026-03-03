@@ -8,6 +8,7 @@ use crate::filetransfer::sender::SenderState;
 use crate::filetransfer::receiver::ReceiverState;
 
 use super::outbox::Outbox;
+use super::pending_invites::PendingInviteStore;
 use super::protocol;
 use super::session::PeerSession;
 use super::{MsgCommand, MsgEvent};
@@ -92,6 +93,8 @@ pub struct MsgDaemon {
     pub(super) command_rx: mpsc::Receiver<MsgCommand>,
     pub(super) event_tx: mpsc::Sender<MsgEvent>,
     pub(super) outboxes: HashMap<String, Outbox>,
+    /// Pending group invites per contact (queued when peer is offline).
+    pub(super) pending_invites: HashMap<String, PendingInviteStore>,
     /// Last outbox retry time per contact_id, plus current backoff tier index.
     pub(super) retry_state: HashMap<String, (Instant, usize)>,
     pub(super) last_keepalive: Instant,
@@ -161,6 +164,7 @@ impl MsgDaemon {
             command_rx,
             event_tx,
             outboxes: HashMap::new(),
+            pending_invites: HashMap::new(),
             retry_state: HashMap::new(),
             last_keepalive: Instant::now(),
             hello_retries: HashMap::new(),
@@ -214,6 +218,10 @@ impl MsgDaemon {
         // Save all outboxes
         for outbox in self.outboxes.values() {
             outbox.save();
+        }
+        // Save all pending invite stores
+        for store in self.pending_invites.values() {
+            store.save();
         }
     }
 

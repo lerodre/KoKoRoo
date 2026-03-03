@@ -51,38 +51,65 @@ impl MsgDaemon {
 
                 MsgCommand::SendGroupInvite { contact_id, peer_addr, peer_pubkey, group_json } => {
                     log_fmt!("[daemon] SendGroupInvite to contact={} addr={}", contact_id, peer_addr);
-                    // Find connected peer session
+                    let mut sent = false;
+                    // Find connected peer session — send immediately if possible
                     if let Some(addr) = self.contact_addrs.get(&contact_id) {
                         if let Some(peer) = self.peers.get(addr) {
                             if peer.is_connected() {
                                 if let Some(ref socket) = self.socket {
                                     protocol::send_group_invite(peer, socket, &group_json).ok();
                                     log_fmt!("[daemon]   invite sent ({} bytes)", group_json.len());
-                                }
-                            } else {
-                                log_fmt!("[daemon]   peer not connected, initiating handshake");
-                                // Initiate connection, then try again
-                                if let Some(ref socket) = self.socket {
-                                    if let Some(session) = protocol::initiate_handshake(
-                                        socket, &contact_id, peer_addr, peer_pubkey,
-                                    ) {
-                                        self.contact_addrs.insert(contact_id.clone(), peer_addr);
-                                        self.hello_retries.insert(peer_addr, 0);
-                                        self.peers.insert(peer_addr, session);
-                                    }
+                                    sent = true;
                                 }
                             }
                         }
-                    } else {
-                        // Not connected — initiate connection
-                        log_fmt!("[daemon]   no session, initiating handshake");
-                        if let Some(ref socket) = self.socket {
-                            if let Some(session) = protocol::initiate_handshake(
-                                socket, &contact_id, peer_addr, peer_pubkey,
-                            ) {
-                                self.contact_addrs.insert(contact_id.clone(), peer_addr);
-                                self.hello_retries.insert(peer_addr, 0);
-                                self.peers.insert(peer_addr, session);
+                    }
+                    if !sent {
+                        // Peer offline — enqueue invite for reactive flush on connect
+                        let group_id = serde_json::from_slice::<serde_json::Value>(&group_json)
+                            .ok()
+                            .and_then(|v| v.get("group_id").and_then(|g| g.as_str().map(|s| s.to_string())))
+                            .unwrap_or_default();
+                        log_fmt!("[daemon]   peer offline, enqueuing invite for group={}", group_id);
+                        let store = self.pending_invites.entry(contact_id.clone())
+                            .or_insert_with(|| super::pending_invites::PendingInviteStore::load(&contact_id, &self.identity.secret));
+                        store.enqueue(group_id, group_json);
+                        // Initiate handshake so invite is sent reactively on connect
+                        if !self.contact_addrs.contains_key(&contact_id) {
+                            if let Some(ref socket) = self.socket {
+                                if let Some(session) = protocol::initiate_handshake(
+                                    socket, &contact_id, peer_addr, peer_pubkey,
+                                ) {
+                                    self.contact_addrs.insert(contact_id.clone(), peer_addr);
+                                    self.hello_retries.insert(peer_addr, 0);
+                                    self.peers.insert(peer_addr, session);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                MsgCommand::AcceptGroupInvite { contact_id, group_id } => {
+                    log_fmt!("[daemon] AcceptGroupInvite contact={} group={}", contact_id, group_id);
+                    if let Some(addr) = self.contact_addrs.get(&contact_id) {
+                        if let Some(peer) = self.peers.get(addr) {
+                            if peer.is_connected() {
+                                if let Some(ref socket) = self.socket {
+                                    protocol::send_group_invite_ack(peer, socket, &group_id).ok();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                MsgCommand::RejectGroupInvite { contact_id, group_id } => {
+                    log_fmt!("[daemon] RejectGroupInvite contact={} group={}", contact_id, group_id);
+                    if let Some(addr) = self.contact_addrs.get(&contact_id) {
+                        if let Some(peer) = self.peers.get(addr) {
+                            if peer.is_connected() {
+                                if let Some(ref socket) = self.socket {
+                                    protocol::send_group_invite_nack(peer, socket, &group_id).ok();
+                                }
                             }
                         }
                     }

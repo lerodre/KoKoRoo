@@ -108,6 +108,19 @@ pub fn delete_group(group_id: &str) {
     fs::remove_file(chat_path).ok();
 }
 
+/// Remove a member from a group by pubkey. Saves the group if a member was removed.
+/// Returns true if a member was actually removed.
+pub fn remove_member(group: &mut Group, pubkey: &[u8; 32]) -> bool {
+    let before = group.members.len();
+    group.members.retain(|m| &m.pubkey != pubkey);
+    if group.members.len() != before {
+        save_group(group);
+        true
+    } else {
+        false
+    }
+}
+
 /// Find a member in the group by pubkey.
 #[allow(dead_code)]
 pub fn find_member_by_pubkey<'a>(group: &'a Group, pubkey: &[u8; 32]) -> Option<&'a GroupMember> {

@@ -8,6 +8,7 @@ use crate::crypto::{
     PKT_MSG_PRESENCE,
     PKT_MSG_AVATAR_OFFER, PKT_MSG_AVATAR_DATA,
     PKT_GRP_INVITE, PKT_GRP_MSG_CHAT,
+    PKT_GRP_INVITE_ACK, PKT_GRP_INVITE_NACK,
 };
 use crate::identity::Identity;
 
@@ -569,4 +570,44 @@ pub fn handle_group_chat(data: &[u8], peer: &mut PeerSession) -> Option<(String,
     let s = String::from_utf8_lossy(&plain);
     let (gid, text) = s.split_once('\n')?;
     Some((gid.to_string(), text.to_string()))
+}
+
+/// Send a group invite ACK (peer accepted). Payload: group_id UTF-8 string.
+pub fn send_group_invite_ack(
+    peer: &PeerSession,
+    socket: &UdpSocket,
+    group_id: &str,
+) -> Result<(), String> {
+    let pkt = peer.encrypt_packet(PKT_GRP_INVITE_ACK, group_id.as_bytes()).ok_or("no session")?;
+    socket.send_to(&pkt, peer.peer_addr).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Handle an incoming group invite ACK. Returns the group_id.
+pub fn handle_group_invite_ack(data: &[u8], peer: &mut PeerSession) -> Option<String> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
+    if pkt_type != PKT_GRP_INVITE_ACK || plain.is_empty() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&plain).to_string())
+}
+
+/// Send a group invite NACK (peer rejected). Payload: group_id UTF-8 string.
+pub fn send_group_invite_nack(
+    peer: &PeerSession,
+    socket: &UdpSocket,
+    group_id: &str,
+) -> Result<(), String> {
+    let pkt = peer.encrypt_packet(PKT_GRP_INVITE_NACK, group_id.as_bytes()).ok_or("no session")?;
+    socket.send_to(&pkt, peer.peer_addr).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Handle an incoming group invite NACK. Returns the group_id.
+pub fn handle_group_invite_nack(data: &[u8], peer: &mut PeerSession) -> Option<String> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
+    if pkt_type != PKT_GRP_INVITE_NACK || plain.is_empty() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&plain).to_string())
 }
