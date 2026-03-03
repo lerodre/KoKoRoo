@@ -360,10 +360,22 @@ impl HostelApp {
 
                     let avatar_size = 28.0;
                     let spacing = ui.spacing().item_spacing.x;
+                    let mut prev_sender: Option<&str> = None;
 
                     for msg in &history.messages {
                         let is_own = msg.sender_fingerprint.is_empty()
                             || msg.sender_fingerprint == self.identity.fingerprint;
+                        let same_sender = prev_sender == Some(msg.sender_nickname.as_str());
+                        prev_sender = Some(msg.sender_nickname.as_str());
+
+                        if same_sender {
+                            // Continuation — just the text, indented
+                            ui.horizontal_wrapped(|ui| {
+                                ui.add_space(avatar_size + spacing);
+                                ui.add(egui::Label::new(&msg.text).wrap());
+                            });
+                            continue;
+                        }
 
                         ui.add_space(3.0);
 
@@ -761,9 +773,21 @@ impl HostelApp {
 
                 let avatar_size = 28.0;
                 let spacing = ui.spacing().item_spacing.x;
+                let mut prev_call_sender: Option<&str> = None;
 
                 for msg in &self.group_call_messages {
                     let is_own = msg.sender_nickname == self.settings.nickname;
+                    let same_sender = prev_call_sender == Some(msg.sender_nickname.as_str());
+                    prev_call_sender = Some(msg.sender_nickname.as_str());
+
+                    if same_sender {
+                        // Continuation — just the text, indented
+                        ui.horizontal_wrapped(|ui| {
+                            ui.add_space(avatar_size + spacing);
+                            ui.add(egui::Label::new(&msg.text).wrap());
+                        });
+                        continue;
+                    }
 
                     ui.add_space(3.0);
 
