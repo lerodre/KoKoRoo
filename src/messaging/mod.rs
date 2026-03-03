@@ -58,7 +58,7 @@ pub enum MsgCommand {
     /// Send a group invite to a contact (encrypted via pairwise session).
     SendGroupInvite { contact_id: String, peer_addr: SocketAddr, peer_pubkey: [u8; 32], group_json: Vec<u8> },
     /// Send a group chat message to a specific member via pairwise session.
-    SendGroupChat { contact_id: String, peer_addr: SocketAddr, peer_pubkey: [u8; 32], group_id: String, text: String },
+    SendGroupChat { contact_id: String, peer_addr: SocketAddr, peer_pubkey: [u8; 32], group_id: String, channel_id: String, text: String },
     /// Accept an incoming group invite (send ACK to the inviter).
     AcceptGroupInvite { contact_id: String, group_id: String },
     /// Reject an incoming group invite (send NACK to the inviter).
@@ -107,7 +107,7 @@ pub enum MsgEvent {
     IncomingGroupInvite { from_nickname: String, group_json: Vec<u8> },
     /// Incoming group chat message via messaging daemon.
     /// `sender_fingerprint` is derived from the peer's verified pubkey (never from peer-supplied data).
-    IncomingGroupChat { group_id: String, sender_fingerprint: String, sender_nickname: String, text: String },
+    IncomingGroupChat { group_id: String, channel_id: String, sender_fingerprint: String, sender_nickname: String, text: String },
     /// A peer rejected our group invite — remove them from the group.
     GroupInviteRejected { contact_id: String, group_id: String },
     /// A group metadata update was received from an admin.

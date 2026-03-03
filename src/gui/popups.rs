@@ -258,8 +258,11 @@ impl HostelApp {
 
         if accept {
             if let Some(info) = self.incoming_group_invite.take() {
-                if let Ok(grp) = serde_json::from_slice::<Group>(&info.group_json) {
+                if let Ok(mut grp) = serde_json::from_slice::<Group>(&info.group_json) {
                     if !self.groups.iter().any(|g| g.group_id == grp.group_id) {
+                        group::ensure_general_channel(&mut grp);
+                        group::ensure_fallback_channel(&mut grp);
+                        group::ensure_general_voice_channel(&mut grp);
                         group::save_group(&grp);
                         // Send ACK to inviter via daemon
                         if let Some(tx) = &self.msg_cmd_tx {

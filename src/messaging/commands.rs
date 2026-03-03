@@ -115,12 +115,12 @@ impl MsgDaemon {
                     }
                 }
 
-                MsgCommand::SendGroupChat { contact_id, peer_addr: _, peer_pubkey: _, group_id, text } => {
+                MsgCommand::SendGroupChat { contact_id, peer_addr: _, peer_pubkey: _, group_id, channel_id, text } => {
                     if let Some(addr) = self.contact_addrs.get(&contact_id) {
                         if let Some(peer) = self.peers.get(addr) {
                             if peer.is_connected() {
                                 if let Some(ref socket) = self.socket {
-                                    protocol::send_group_chat(peer, socket, &group_id, &text).ok();
+                                    protocol::send_group_chat(peer, socket, &group_id, &channel_id, &text).ok();
                                 }
                             }
                         }

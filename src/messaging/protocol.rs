@@ -549,28 +549,35 @@ pub fn handle_group_invite(data: &[u8], peer: &mut PeerSession) -> Option<Vec<u8
 }
 
 /// Send a group chat message to a peer via the messaging daemon.
-/// Payload: group_id (32 hex chars) + '\n' + text
+/// Payload: group_id + '\n' + channel_id + '\n' + text
 pub fn send_group_chat(
     peer: &PeerSession,
     socket: &UdpSocket,
     group_id: &str,
+    channel_id: &str,
     text: &str,
 ) -> Result<(), String> {
-    let payload = format!("{}\n{}", group_id, text);
+    let payload = format!("{}\n{}\n{}", group_id, channel_id, text);
     let pkt = peer.encrypt_packet(PKT_GRP_MSG_CHAT, payload.as_bytes()).ok_or("no session")?;
     socket.send_to(&pkt, peer.peer_addr).map_err(|e| e.to_string())?;
     Ok(())
 }
 
-/// Handle an incoming group chat message. Returns (group_id, text).
-pub fn handle_group_chat(data: &[u8], peer: &mut PeerSession) -> Option<(String, String)> {
+/// Handle an incoming group chat message. Returns (group_id, channel_id, text).
+/// Backward compatible: if only one '\n' (old format), channel_id defaults to "general".
+pub fn handle_group_chat(data: &[u8], peer: &mut PeerSession) -> Option<(String, String, String)> {
     let (pkt_type, plain) = peer.decrypt_packet(data)?;
     if pkt_type != PKT_GRP_MSG_CHAT || plain.is_empty() {
         return None;
     }
     let s = String::from_utf8_lossy(&plain);
-    let (gid, text) = s.split_once('\n')?;
-    Some((gid.to_string(), text.to_string()))
+    // Try 3-part split first (new format)
+    let parts: Vec<&str> = s.splitn(3, '\n').collect();
+    match parts.len() {
+        3 => Some((parts[0].to_string(), parts[1].to_string(), parts[2].to_string())),
+        2 => Some((parts[0].to_string(), "general".to_string(), parts[1].to_string())),
+        _ => None,
+    }
 }
 
 /// Send a group invite ACK (peer accepted). Payload: group_id UTF-8 string.

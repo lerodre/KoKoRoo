@@ -226,20 +226,30 @@ pub struct GroupChatMessage {
 /// Persistent group chat history, encrypted at rest with local identity key.
 pub struct GroupChatHistory {
     pub group_id: String,
+    pub channel_id: String,
     pub messages: Vec<GroupChatMessage>,
     storage_cipher: ChaCha20Poly1305,
 }
 
 impl GroupChatHistory {
     /// Load group chat history from disk (or create empty).
-    pub fn load(group_id: &str, identity_secret: &[u8; 32]) -> Self {
+    /// Uses per-channel files: `{group_id}_{channel_id}.enc`.
+    /// If `channel_id == "general"` and only the old `{group_id}.enc` exists, migrates it.
+    pub fn load(group_id: &str, channel_id: &str, identity_secret: &[u8; 32]) -> Self {
         let storage_cipher = crypto::derive_storage_key(identity_secret);
         let dir = group_chats_dir();
         fs::create_dir_all(&dir).ok();
 
-        let path = dir.join(format!("{group_id}.enc"));
-        let messages = if path.exists() {
-            match fs::read(&path) {
+        let new_path = dir.join(format!("{}_{}.enc", group_id, channel_id));
+        let old_path = dir.join(format!("{}.enc", group_id));
+
+        // Migration: if loading "general" and old file exists but new doesn't, rename.
+        if channel_id == "general" && !new_path.exists() && old_path.exists() {
+            fs::rename(&old_path, &new_path).ok();
+        }
+
+        let messages = if new_path.exists() {
+            match fs::read(&new_path) {
                 Ok(encrypted) => {
                     match crypto::decrypt_local(&storage_cipher, &encrypted) {
                         Some(plaintext) => {
@@ -254,7 +264,12 @@ impl GroupChatHistory {
             Vec::new()
         };
 
-        GroupChatHistory { group_id: group_id.to_string(), messages, storage_cipher }
+        GroupChatHistory {
+            group_id: group_id.to_string(),
+            channel_id: channel_id.to_string(),
+            messages,
+            storage_cipher,
+        }
     }
 
     /// Add a message and save to disk.
@@ -282,7 +297,35 @@ impl GroupChatHistory {
         let json = serde_json::to_vec(&self.messages).expect("Failed to serialize group chat");
         let encrypted = crypto::encrypt_local(&self.storage_cipher, &json);
 
-        let path = dir.join(format!("{}.enc", self.group_id));
+        let path = dir.join(format!("{}_{}.enc", self.group_id, self.channel_id));
         fs::write(path, encrypted).expect("Failed to write group chat history");
     }
+}
+
+/// Migrate messages from a deleted channel into the fallback channel.
+/// Each message is prefixed with `[from #{channel_name}]`.
+pub fn migrate_messages_to_fallback(
+    group_id: &str,
+    source_channel_id: &str,
+    source_channel_name: &str,
+    identity_secret: &[u8; 32],
+) {
+    let source = GroupChatHistory::load(group_id, source_channel_id, identity_secret);
+    if source.messages.is_empty() {
+        return;
+    }
+    let mut fallback = GroupChatHistory::load(group_id, "fallback", identity_secret);
+    for msg in &source.messages {
+        fallback.messages.push(GroupChatMessage {
+            sender_fingerprint: msg.sender_fingerprint.clone(),
+            sender_nickname: msg.sender_nickname.clone(),
+            text: format!("[from #{}] {}", source_channel_name, msg.text),
+            timestamp: msg.timestamp,
+        });
+    }
+    fallback.save();
+    // Delete source file
+    let dir = group_chats_dir();
+    let path = dir.join(format!("{}_{}.enc", group_id, source_channel_id));
+    fs::remove_file(path).ok();
 }

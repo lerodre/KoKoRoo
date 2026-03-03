@@ -1,11 +1,11 @@
 use eframe::egui;
-use std::sync::atomic::Ordering;
 
-use super::{HostelApp, load_avatar_texture};
+use super::{HostelApp, load_avatar_texture, load_icon_texture_sized};
+use crate::screen::ScreenCommand;
 use crate::avatar;
 use crate::chat::{ChatHistory, GroupChatHistory};
 use crate::group::{self, Group, GroupMember};
-use crate::group_voice::{GroupChatMsg, GroupRole};
+use crate::groupcall::GroupRole;
 use crate::identity;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -21,7 +21,7 @@ pub(crate) enum GroupView {
 impl HostelApp {
     pub(crate) fn draw_groups_tab(&mut self, ui: &mut egui::Ui) {
         match self.group_view {
-            GroupView::List | GroupView::Detail | GroupView::Settings => {
+            GroupView::List | GroupView::Detail | GroupView::Settings | GroupView::InCall | GroupView::Connecting => {
                 // Always 3-column: icon strip (48px) + channels (140px) + detail/placeholder
                 let available = ui.available_rect_before_wrap();
                 let clip = ui.clip_rect();
@@ -89,8 +89,10 @@ impl HostelApp {
                 ui.allocate_new_ui(egui::UiBuilder::new().max_rect(detail_rect), |ui| {
                     if self.group_settings_idx.is_some() && self.group_view == GroupView::Settings {
                         self.draw_group_settings(ui);
+                    } else if self.group_detail_idx.is_some() && self.group_view == GroupView::Connecting {
+                        self.draw_group_connecting(ui);
                     } else if self.group_detail_idx.is_some()
-                        && (self.group_view == GroupView::Detail || self.group_view == GroupView::Settings)
+                        && (self.group_view == GroupView::Detail || self.group_view == GroupView::Settings || self.group_view == GroupView::InCall)
                     {
                         self.draw_group_detail(ui);
                     } else {
@@ -108,7 +110,9 @@ impl HostelApp {
                 if let Some(idx) = open_idx {
                     self.group_detail_idx = Some(idx);
                     self.group_settings_idx = None;
-                    self.group_selected_channel = 0;
+                    self.group_selected_channel = "general".to_string();
+                    self.group_channel_creating = false;
+                    self.group_channel_create_name.clear();
                     self.group_view = GroupView::Detail;
                 }
                 if go_create {
@@ -118,8 +122,6 @@ impl HostelApp {
                 }
             }
             GroupView::Create => self.draw_group_create(ui),
-            GroupView::Connecting => self.draw_group_connecting(ui),
-            GroupView::InCall => self.draw_group_call(ui),
         }
     }
 
@@ -199,6 +201,20 @@ impl HostelApp {
             }
         };
 
+        // Check if selected channel is a voice channel
+        let selected_channel_id = self.group_selected_channel.clone();
+        let is_voice_channel = self.groups[idx].voice_channels.iter()
+            .any(|ch| ch.channel_id == selected_channel_id && !ch.deleted);
+
+        if is_voice_channel {
+            if self.group_call_channel_id.as_deref() == Some(&selected_channel_id) {
+                self.draw_group_voice_active(ui);
+            } else {
+                self.draw_group_voice_idle(ui);
+            }
+            return;
+        }
+
         let grp_name = self.groups[idx].name.clone();
         let grp_id = self.groups[idx].group_id.clone();
         let member_count = self.groups[idx].members.len();
@@ -207,7 +223,6 @@ impl HostelApp {
         let is_admin = members.iter().any(|m| m.pubkey == my_pubkey && m.is_admin);
         let identity_secret = self.identity.secret;
 
-        let mut start_call = false;
         let mut open_settings = false;
 
         // Pre-compute column widths so the header can be constrained to chat area
@@ -216,7 +231,7 @@ impl HostelApp {
         let members_w = 180.0_f32.max(avail_for_split.width() * 0.22).min(240.0);
         let chat_w = (avail_for_split.width() - members_w - sep_w - 4.0).max(100.0);
 
-        // ── Top bar: Group avatar + name + Settings + Call button ──
+        // ── Top bar: Group avatar + name + Settings ──
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.set_max_width(chat_w);
@@ -248,13 +263,6 @@ impl HostelApp {
 
             ui.heading(&grp_name);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let label = if is_admin { "Start Call (Leader)" } else { "Join Call" };
-                let call_btn = egui::Button::new(
-                    egui::RichText::new(label).strong().color(egui::Color32::WHITE),
-                ).fill(self.settings.theme.btn_positive());
-                if ui.add(call_btn).clicked() {
-                    start_call = true;
-                }
                 if is_admin {
                     let settings_btn = egui::Button::new(
                         egui::RichText::new("Settings").size(12.0),
@@ -300,12 +308,23 @@ impl HostelApp {
 
         // ── Left panel: Chat + input ──
         let mut send_detail_chat = false;
+        let selected_channel_id = self.group_selected_channel.clone();
+        let is_fallback = selected_channel_id == "fallback";
+        // Resolve channel display name
+        let channel_display_name = if let Some(grp) = self.groups.get(idx) {
+            grp.text_channels.iter()
+                .find(|ch| ch.channel_id == selected_channel_id)
+                .map(|ch| ch.name.clone())
+                .unwrap_or_else(|| selected_channel_id.clone())
+        } else {
+            selected_channel_id.clone()
+        };
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(chat_rect), |ui| {
             ui.add_space(6.0);
-            ui.label(egui::RichText::new("Chat").strong().size(13.0));
+            ui.label(egui::RichText::new(format!("Chat — # {}", channel_display_name)).strong().size(13.0));
             ui.add_space(4.0);
 
-            let history = GroupChatHistory::load(&grp_id, &identity_secret);
+            let history = GroupChatHistory::load(&grp_id, &selected_channel_id, &identity_secret);
             let input_h = 54.0; // bar_h(38) + frame margins(12) + spacing
             let chat_h = (ui.available_height() - input_h - 8.0).max(40.0);
 
@@ -463,37 +482,47 @@ impl HostelApp {
                 });
 
             // Chat input bar at bottom — matching messages.rs style
-            let bar_h = 38.0;
-            let bar_frame = egui::Frame::none()
-                .fill(self.settings.theme.sidebar_bg())
-                .inner_margin(egui::Margin::symmetric(6.0, 6.0))
-                .rounding(4.0);
-            bar_frame.show(ui, |ui| {
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    // Attach file button
-                    let attach_btn = egui::Button::new(
-                        egui::RichText::new("+").size(18.0).strong(),
-                    ).min_size(egui::vec2(bar_h, bar_h));
-                    ui.add(attach_btn).on_hover_text("Send file");
+            // Fallback channel is read-only (only receives orphaned messages from deleted channels)
+            if is_fallback {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("This channel is read-only (sync conflict archive)")
+                        .size(11.0)
+                        .color(self.settings.theme.text_muted()),
+                );
+            } else {
+                let bar_h = 38.0;
+                let bar_frame = egui::Frame::none()
+                    .fill(self.settings.theme.sidebar_bg())
+                    .inner_margin(egui::Margin::symmetric(6.0, 6.0))
+                    .rounding(4.0);
+                bar_frame.show(ui, |ui| {
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        // Attach file button
+                        let attach_btn = egui::Button::new(
+                            egui::RichText::new("+").size(18.0).strong(),
+                        ).min_size(egui::vec2(bar_h, bar_h));
+                        ui.add(attach_btn).on_hover_text("Send file");
 
-                    // TextEdit with always-visible outline and distinct bg
-                    let outline = self.settings.theme.text_muted();
-                    ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::new(1.0, outline);
-                    ui.visuals_mut().widgets.inactive.bg_fill = self.settings.theme.panel_bg();
+                        // TextEdit with always-visible outline and distinct bg
+                        let outline = self.settings.theme.text_muted();
+                        ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::new(1.0, outline);
+                        ui.visuals_mut().widgets.inactive.bg_fill = self.settings.theme.panel_bg();
 
-                    let resp = ui.add_sized(
-                        egui::vec2(ui.available_width() - 75.0, bar_h),
-                        egui::TextEdit::singleline(&mut self.group_detail_chat_input)
-                            .hint_text("Type a message...")
-                            .margin(egui::vec2(8.0, 10.0)),
-                    );
-                    let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    if ui.add(egui::Button::new("Send").min_size(egui::vec2(60.0, bar_h))).clicked() || enter {
-                        send_detail_chat = true;
-                        resp.request_focus();
-                    }
+                        let resp = ui.add_sized(
+                            egui::vec2(ui.available_width() - 75.0, bar_h),
+                            egui::TextEdit::singleline(&mut self.group_detail_chat_input)
+                                .hint_text("Type a message...")
+                                .margin(egui::vec2(8.0, 10.0)),
+                        );
+                        let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if ui.add(egui::Button::new("Send").min_size(egui::vec2(60.0, bar_h))).clicked() || enter {
+                            send_detail_chat = true;
+                            resp.request_focus();
+                        }
+                    });
                 });
-            });
+            }
         });
 
         // ── Right sidebar: Members ──
@@ -630,17 +659,14 @@ impl HostelApp {
             self.group_settings_selected_members = Vec::new();
             self.group_view = GroupView::Settings;
         }
-        if start_call {
-            self.start_group_call(is_admin);
-        }
-        if send_detail_chat {
+        if send_detail_chat && !is_fallback {
             let text = self.group_detail_chat_input.trim().to_string();
             if !text.is_empty() {
                 // Save to local history
                 let my_nickname = self.settings.nickname.clone();
                 let my_fingerprint = self.identity.fingerprint.clone();
                 {
-                    let mut history = GroupChatHistory::load(&grp_id, &self.identity.secret);
+                    let mut history = GroupChatHistory::load(&grp_id, &selected_channel_id, &self.identity.secret);
                     history.add_message(my_fingerprint, my_nickname.clone(), text.clone());
                 }
                 // Send to all other group members via messaging daemon
@@ -660,6 +686,7 @@ impl HostelApp {
                                 peer_addr: addr,
                                 peer_pubkey: member.pubkey,
                                 group_id: grp_id.clone(),
+                                channel_id: selected_channel_id.clone(),
                                 text: text.clone(),
                             }).ok();
                         }
@@ -668,6 +695,348 @@ impl HostelApp {
             }
             self.group_detail_chat_input.clear();
         }
+    }
+
+    /// Voice channel detail when NOT in a call — shows "Click to join" message.
+    fn draw_group_voice_idle(&mut self, ui: &mut egui::Ui) {
+        let idx = match self.group_detail_idx {
+            Some(i) if i < self.groups.len() => i,
+            _ => return,
+        };
+        let selected_channel_id = self.group_selected_channel.clone();
+        let channel_name = self.groups[idx].voice_channels.iter()
+            .find(|ch| ch.channel_id == selected_channel_id)
+            .map(|ch| ch.name.clone())
+            .unwrap_or_else(|| "Voice".to_string());
+
+        ui.add_space(60.0);
+        ui.vertical_centered(|ui| {
+            ui.label(
+                egui::RichText::new(format!("\u{00BB} {}", channel_name))
+                    .size(20.0)
+                    .strong(),
+            );
+            ui.add_space(16.0);
+            ui.label(
+                egui::RichText::new("Click to join this voice channel")
+                    .size(14.0)
+                    .color(self.settings.theme.text_muted()),
+            );
+            ui.add_space(20.0);
+            let join_btn = egui::Button::new(
+                egui::RichText::new("Join Voice Channel")
+                    .strong()
+                    .color(egui::Color32::WHITE),
+            ).fill(self.settings.theme.btn_positive());
+            if ui.add(join_btn).clicked() {
+                self.start_group_call(&selected_channel_id);
+            }
+
+            // Mode selector (only when not in a call)
+            ui.add_space(20.0);
+            if let Some(grp) = self.groups.get(idx) {
+                let mode = grp.call_mode;
+                ui.horizontal(|ui| {
+                    ui.label("Mode:");
+                    if ui.selectable_label(mode == group::CallMode::Relay, "Relay").clicked() {
+                        if let Some(grp) = self.groups.get_mut(idx) {
+                            grp.call_mode = group::CallMode::Relay;
+                            group::save_group(grp);
+                            self.broadcast_group_update(idx);
+                        }
+                    }
+                    if ui.selectable_label(mode == group::CallMode::P2P, "P2P").clicked() {
+                        if let Some(grp) = self.groups.get_mut(idx) {
+                            grp.call_mode = group::CallMode::P2P;
+                            group::save_group(grp);
+                            self.broadcast_group_update(idx);
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    /// Voice channel detail when IN a call — shows controls + members.
+    fn draw_group_voice_active(&mut self, ui: &mut egui::Ui) {
+        let idx = match self.group_detail_idx {
+            Some(i) if i < self.groups.len() => i,
+            _ => return,
+        };
+        let selected_channel_id = self.group_selected_channel.clone();
+        let channel_name = self.groups[idx].voice_channels.iter()
+            .find(|ch| ch.channel_id == selected_channel_id)
+            .map(|ch| ch.name.clone())
+            .unwrap_or_else(|| "Voice".to_string());
+        let role = self.group_call_role.unwrap_or(GroupRole::Member);
+        let member_count = self.group_call_members.len();
+        let my_pubkey = self.identity.pubkey;
+        let call_mode = self.groups[idx].call_mode;
+
+        // Pre-compute column widths
+        let avail_for_split = ui.available_rect_before_wrap();
+        let sep_w = 1.0;
+        let members_w = 180.0_f32.max(avail_for_split.width() * 0.22).min(240.0);
+        let main_w = (avail_for_split.width() - members_w - sep_w - 4.0).max(100.0);
+
+        // Top bar
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.set_max_width(main_w);
+            ui.heading(format!("\u{00BB} {}", channel_name));
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("ENCRYPTED")
+                    .size(10.0)
+                    .strong()
+                    .color(self.settings.theme.btn_positive()),
+            );
+            let role_label = match call_mode {
+                group::CallMode::P2P => "P2P",
+                group::CallMode::Relay => if role == GroupRole::Leader { "LEADER" } else { "MEMBER" },
+            };
+            ui.label(
+                egui::RichText::new(role_label)
+                    .size(10.0)
+                    .color(self.settings.theme.btn_primary()),
+            );
+        });
+
+        ui.separator();
+
+        let available = ui.available_rect_before_wrap();
+        let clip = ui.clip_rect();
+
+        // Background for right sidebar
+        let bg_rect = egui::Rect::from_min_max(
+            egui::pos2(available.min.x + main_w + sep_w + 4.0, clip.min.y),
+            egui::pos2(clip.max.x, clip.max.y),
+        );
+        ui.painter().rect_filled(bg_rect, 0.0, self.settings.theme.sidebar_bg());
+
+        // Vertical separator
+        let sep_x = available.min.x + main_w + 2.0;
+        ui.painter().vline(sep_x, clip.y_range(), egui::Stroke::new(sep_w, self.settings.theme.text_muted()));
+
+        let main_rect = egui::Rect::from_min_size(
+            available.min,
+            egui::vec2(main_w, available.height()),
+        );
+        let members_rect = egui::Rect::from_min_size(
+            egui::pos2(available.min.x + main_w + sep_w + 4.0, available.min.y),
+            egui::vec2(members_w - 4.0, available.height()),
+        );
+
+        // ── Left panel: Controls ──
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(main_rect), |ui| {
+            ui.add_space(20.0);
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("{} connected", member_count))
+                        .size(14.0)
+                        .color(self.settings.theme.text_muted()),
+                );
+                ui.add_space(20.0);
+
+                // Controls row (matching 1-on-1 call styling)
+                ui.horizontal(|ui| {
+                    // Mic toggle
+                    let mic_on = self.group_call_mic.load(std::sync::atomic::Ordering::Relaxed);
+                    let (btn_text, btn_color) = if mic_on {
+                        ("Mic: ON", self.settings.theme.btn_positive())
+                    } else {
+                        ("Mic: MUTED", self.settings.theme.btn_negative())
+                    };
+                    let mic_btn = egui::Button::new(
+                        egui::RichText::new(btn_text).size(16.0).color(egui::Color32::WHITE)
+                    ).min_size(egui::vec2(120.0, 35.0)).fill(btn_color);
+                    if ui.add(mic_btn).clicked() {
+                        self.group_call_mic.store(!mic_on, std::sync::atomic::Ordering::Relaxed);
+                    }
+
+                    // Screen share toggle
+                    let (scr_text, scr_color) = if self.group_screen_sharing {
+                        ("Screen: ON", self.settings.theme.btn_primary())
+                    } else {
+                        ("Screen: OFF", self.settings.theme.btn_neutral())
+                    };
+                    let scr_btn = egui::Button::new(
+                        egui::RichText::new(scr_text).size(16.0).color(egui::Color32::WHITE)
+                    ).min_size(egui::vec2(130.0, 35.0)).fill(scr_color);
+                    if ui.add(scr_btn).clicked() {
+                        if self.group_screen_sharing {
+                            self.group_screen_sharing = false;
+                            if let Some(tx) = &self.screen_cmd_tx {
+                                let _ = tx.send(ScreenCommand::Stop);
+                            }
+                        } else {
+                            if self.group_webcam_sharing {
+                                self.group_webcam_sharing = false;
+                                if let Some(tx) = &self.screen_cmd_tx {
+                                    let _ = tx.send(ScreenCommand::Stop);
+                                }
+                            }
+                            if self.loopback_devices.is_empty() {
+                                self.loopback_devices = crate::audio::list_loopback_devices();
+                            }
+                            self.display_names = crate::screen::list_displays();
+                            self.show_screen_popup = true;
+                        }
+                    }
+
+                    // Webcam toggle
+                    let (cam_text, cam_color) = if self.group_webcam_sharing {
+                        ("Cam: ON", self.settings.theme.btn_positive())
+                    } else {
+                        ("Cam: OFF", self.settings.theme.btn_neutral())
+                    };
+                    let cam_tex = self.enablecam_icon_texture.get_or_insert_with(|| {
+                        load_icon_texture_sized(ui.ctx(), "icon-enablecam", include_bytes!("../../assets/enablecam.png"), 48)
+                    }).clone();
+                    let cam_icon_h = 20.0;
+                    let cam_icon_aspect = cam_tex.size()[0] as f32 / cam_tex.size()[1] as f32;
+                    let cam_icon_sized = egui::load::SizedTexture::new(cam_tex.id(), egui::vec2(cam_icon_h * cam_icon_aspect, cam_icon_h));
+                    let cam_btn = egui::Button::image_and_text(
+                        cam_icon_sized,
+                        egui::RichText::new(cam_text).size(16.0).color(egui::Color32::WHITE),
+                    ).min_size(egui::vec2(120.0, 35.0)).fill(cam_color);
+                    if ui.add(cam_btn).clicked() {
+                        if self.group_webcam_sharing {
+                            self.group_webcam_sharing = false;
+                            if let Some(tx) = &self.screen_cmd_tx {
+                                let _ = tx.send(ScreenCommand::Stop);
+                            }
+                        } else {
+                            if self.group_screen_sharing {
+                                self.group_screen_sharing = false;
+                                if let Some(tx) = &self.screen_cmd_tx {
+                                    let _ = tx.send(ScreenCommand::Stop);
+                                }
+                            }
+                            self.camera_names = crate::screen::list_cameras();
+                            self.show_webcam_popup = true;
+                        }
+                    }
+
+                    // Spacer to push Hang Up to far right
+                    let remaining = ui.available_width() - 110.0;
+                    if remaining > 0.0 {
+                        ui.add_space(remaining);
+                    }
+
+                    // Hang up
+                    let hangup_btn = egui::Button::new(
+                        egui::RichText::new("Hang Up").size(16.0).color(egui::Color32::WHITE)
+                    ).min_size(egui::vec2(100.0, 35.0)).fill(self.settings.theme.btn_negative());
+                    if ui.add(hangup_btn).clicked() {
+                        self.cleanup_group_call();
+                    }
+                });
+            });
+        });
+
+        // ── Right panel: Members + mode selector ──
+        let color_even = self.settings.theme.panel_bg();
+        let color_odd = self.settings.theme.sidebar_bg();
+
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(members_rect), |ui| {
+            // Mode selector header (disabled during active call)
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Mode:").size(11.0).color(self.settings.theme.text_muted()),
+                );
+                let relay_label = egui::SelectableLabel::new(
+                    call_mode == group::CallMode::Relay, "Relay",
+                );
+                let p2p_label = egui::SelectableLabel::new(
+                    call_mode == group::CallMode::P2P, "P2P",
+                );
+                // Disabled during call
+                ui.add_enabled(false, relay_label);
+                ui.add_enabled(false, p2p_label);
+            });
+
+            ui.separator();
+
+            // Header bar
+            let header_w = ui.available_width();
+            let header_rect = ui.allocate_space(egui::vec2(header_w, 28.0)).1;
+            ui.painter().rect_filled(header_rect, 0.0, self.settings.theme.sidebar_bg());
+            ui.painter().text(
+                egui::pos2(header_rect.min.x + 8.0, header_rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                format!("Members ({})", member_count),
+                egui::FontId::proportional(13.0),
+                self.settings.theme.text_primary(),
+            );
+            let hline_stroke = egui::Stroke::new(1.0, self.settings.theme.text_muted());
+            ui.painter().hline(header_rect.x_range(), header_rect.max.y, hline_stroke);
+
+            // Member rows with avatars
+            egui::ScrollArea::vertical()
+                .id_salt("voice_call_members")
+                .show(ui, |ui| {
+                    let row_w = ui.available_width();
+                    for (i, member) in self.group_call_members.iter().enumerate() {
+                        let bg = if i % 2 == 0 { color_even } else { color_odd };
+                        let row_rect = ui.allocate_space(egui::vec2(row_w, 32.0)).1;
+                        ui.painter().rect_filled(row_rect, 0.0, bg);
+
+                        let mut x = row_rect.min.x + 8.0;
+                        let cy = row_rect.center().y;
+
+                        // Avatar (22px)
+                        let av_size = 22.0;
+                        let av_rect = egui::Rect::from_center_size(
+                            egui::pos2(x + av_size / 2.0, cy),
+                            egui::vec2(av_size, av_size),
+                        );
+                        let mut drew_av = false;
+                        if member.pubkey == my_pubkey {
+                            if let Some(tex) = &self.own_avatar_texture {
+                                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                                ui.painter().image(tex.id(), av_rect, uv, egui::Color32::WHITE);
+                                drew_av = true;
+                            }
+                        } else {
+                            let cid = crate::identity::derive_contact_id(&my_pubkey, &member.pubkey);
+                            if let Some(tex) = self.contact_avatar_textures.get(&cid) {
+                                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                                ui.painter().image(tex.id(), av_rect, uv, egui::Color32::WHITE);
+                                drew_av = true;
+                            }
+                        }
+                        if !drew_av {
+                            paint_initial_avatar(ui.painter(), av_rect, &member.nickname, &self.settings.theme);
+                        }
+                        x += av_size + 6.0;
+
+                        // Nickname
+                        let nick_galley = ui.painter().layout_no_wrap(
+                            member.nickname.clone(),
+                            egui::FontId::proportional(13.0),
+                            self.settings.theme.text_primary(),
+                        );
+                        ui.painter().galley(
+                            egui::pos2(x, cy - nick_galley.size().y / 2.0),
+                            nick_galley,
+                            self.settings.theme.text_primary(),
+                        );
+
+                        // (you)
+                        if member.pubkey == my_pubkey {
+                            x += 60.0;
+                            ui.painter().text(
+                                egui::pos2(x, cy),
+                                egui::Align2::LEFT_CENTER,
+                                "(you)",
+                                egui::FontId::proportional(11.0),
+                                self.settings.theme.text_muted(),
+                            );
+                        }
+                    }
+                });
+        });
     }
 
     fn draw_group_connecting(&mut self, ui: &mut egui::Ui) {
@@ -685,310 +1054,6 @@ impl HostelApp {
                     .color(self.settings.theme.btn_negative()),
             );
             if ui.add(cancel_btn).clicked() {
-                self.cleanup_group_call();
-            }
-        });
-    }
-
-    fn draw_group_call(&mut self, ui: &mut egui::Ui) {
-        let group_name = self.group_call_group.as_ref()
-            .map(|g| g.name.clone())
-            .unwrap_or_else(|| "Group".to_string());
-        let role = self.group_call_role.unwrap_or(GroupRole::Member);
-        let member_count = self.group_call_members.len();
-
-        // Top bar
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.heading(&group_name);
-            ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new(format!("{} members", member_count))
-                    .size(12.0)
-                    .color(self.settings.theme.text_muted()),
-            );
-            ui.label(
-                egui::RichText::new("ENCRYPTED")
-                    .size(10.0)
-                    .strong()
-                    .color(self.settings.theme.btn_positive()),
-            );
-            ui.label(
-                egui::RichText::new(if role == GroupRole::Leader { "LEADER" } else { "MEMBER" })
-                    .size(10.0)
-                    .color(self.settings.theme.btn_primary()),
-            );
-        });
-
-        ui.separator();
-
-        // Members panel
-        ui.add_space(4.0);
-        ui.label(egui::RichText::new("Members").strong().size(13.0));
-
-        let my_pubkey = self.identity.pubkey;
-        egui::ScrollArea::vertical()
-            .max_height(120.0)
-            .id_salt("grp_call_members")
-            .show(ui, |ui| {
-                for member in &self.group_call_members {
-                    let frame = egui::Frame::none()
-                        .fill(self.settings.theme.panel_bg())
-                        .rounding(egui::Rounding::same(4.0))
-                        .inner_margin(egui::Margin::same(6.0))
-                        .outer_margin(egui::Margin::symmetric(0.0, 1.0));
-
-                    frame.show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(&member.nickname).strong());
-                            ui.label(
-                                egui::RichText::new(&member.fingerprint)
-                                    .size(11.0)
-                                    .color(self.settings.theme.text_muted()),
-                            );
-                            if member.is_admin {
-                                ui.label(
-                                    egui::RichText::new("admin")
-                                        .size(10.0)
-                                        .color(self.settings.theme.btn_primary()),
-                                );
-                            }
-                            if member.pubkey == my_pubkey {
-                                ui.label(
-                                    egui::RichText::new("(you)")
-                                        .size(10.0)
-                                        .color(self.settings.theme.text_muted()),
-                                );
-                            }
-                        });
-                    });
-                }
-            });
-
-        ui.separator();
-
-        // Chat area
-        ui.add_space(4.0);
-        ui.label(egui::RichText::new("Chat").strong().size(13.0));
-
-        // Build nickname → contact_id map for avatar lookups
-        let nick_to_cid: std::collections::HashMap<&str, String> = self
-            .group_call_members
-            .iter()
-            .map(|m| {
-                (
-                    m.nickname.as_str(),
-                    identity::derive_contact_id(&my_pubkey, &m.pubkey),
-                )
-            })
-            .collect();
-
-        let avail = ui.available_height() - 70.0;
-        egui::ScrollArea::vertical()
-            .max_height(avail.max(80.0))
-            .stick_to_bottom(true)
-            .id_salt("grp_call_chat")
-            .show(ui, |ui| {
-                if self.group_call_messages.is_empty() {
-                    ui.label(
-                        egui::RichText::new("No messages yet")
-                            .color(self.settings.theme.text_muted()),
-                    );
-                }
-
-                let avatar_size = 28.0;
-                let spacing = ui.spacing().item_spacing.x;
-                let mut prev_call_sender: Option<&str> = None;
-
-                for msg in &self.group_call_messages {
-                    let is_own = msg.sender_nickname == self.settings.nickname;
-                    let same_sender = prev_call_sender == Some(msg.sender_nickname.as_str());
-                    prev_call_sender = Some(msg.sender_nickname.as_str());
-
-                    if same_sender {
-                        // Continuation — just the text, indented
-                        ui.horizontal_wrapped(|ui| {
-                            ui.add_space(avatar_size + spacing);
-                            ui.add(egui::Label::new(&msg.text).wrap());
-                        });
-                        continue;
-                    }
-
-                    ui.add_space(3.0);
-
-                    // Row 1: [avatar] Name
-                    ui.horizontal(|ui| {
-                        let (av_rect, _) = ui.allocate_exact_size(
-                            egui::vec2(avatar_size, avatar_size),
-                            egui::Sense::hover(),
-                        );
-
-                        let mut drew_avatar = false;
-                        if is_own {
-                            if self.own_avatar_texture.is_none() {
-                                if let Some(bytes) = avatar::load_own_avatar() {
-                                    self.own_avatar_texture = load_avatar_texture(
-                                        ui.ctx(),
-                                        "own_avatar",
-                                        &bytes,
-                                        96,
-                                    );
-                                }
-                            }
-                            if let Some(tex) = &self.own_avatar_texture {
-                                let uv = egui::Rect::from_min_max(
-                                    egui::pos2(0.0, 0.0),
-                                    egui::pos2(1.0, 1.0),
-                                );
-                                ui.painter().image(
-                                    tex.id(),
-                                    av_rect,
-                                    uv,
-                                    egui::Color32::WHITE,
-                                );
-                                drew_avatar = true;
-                            }
-                        } else if let Some(contact_id) =
-                            nick_to_cid.get(msg.sender_nickname.as_str())
-                        {
-                            if !self.contact_avatar_textures.contains_key(contact_id) {
-                                if let Some(bytes) =
-                                    avatar::load_contact_avatar(contact_id)
-                                {
-                                    if let Some(tex) = load_avatar_texture(
-                                        ui.ctx(),
-                                        &format!(
-                                            "grp_call_av_{}",
-                                            &contact_id[..8.min(contact_id.len())]
-                                        ),
-                                        &bytes,
-                                        32,
-                                    ) {
-                                        self.contact_avatar_textures
-                                            .insert(contact_id.clone(), tex);
-                                    }
-                                }
-                            }
-                            if let Some(tex) =
-                                self.contact_avatar_textures.get(contact_id)
-                            {
-                                let uv = egui::Rect::from_min_max(
-                                    egui::pos2(0.0, 0.0),
-                                    egui::pos2(1.0, 1.0),
-                                );
-                                ui.painter().image(
-                                    tex.id(),
-                                    av_rect,
-                                    uv,
-                                    egui::Color32::WHITE,
-                                );
-                                drew_avatar = true;
-                            }
-                        }
-
-                        if !drew_avatar {
-                            paint_initial_avatar(
-                                ui.painter(),
-                                av_rect,
-                                &msg.sender_nickname,
-                                &self.settings.theme,
-                            );
-                        }
-
-                        ui.label(
-                            egui::RichText::new(&msg.sender_nickname)
-                                .strong()
-                                .color(self.settings.theme.btn_primary()),
-                        );
-                    });
-
-                    // Row 2: indented message text (wraps long lines)
-                    ui.horizontal_wrapped(|ui| {
-                        ui.add_space(avatar_size + spacing);
-                        ui.add(egui::Label::new(&msg.text).wrap());
-                    });
-
-                    ui.add_space(2.0);
-                }
-            });
-
-        // Chat input + send — matching messages.rs style
-        let mut send_msg = false;
-        let bar_h = 38.0;
-        let bar_frame = egui::Frame::none()
-            .fill(self.settings.theme.sidebar_bg())
-            .inner_margin(egui::Margin::symmetric(6.0, 6.0))
-            .rounding(4.0);
-        bar_frame.show(ui, |ui| {
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                // Attach file button
-                let attach_btn = egui::Button::new(
-                    egui::RichText::new("+").size(18.0).strong(),
-                ).min_size(egui::vec2(bar_h, bar_h));
-                ui.add(attach_btn).on_hover_text("Send file");
-
-                // TextEdit with always-visible outline and distinct bg
-                let outline = self.settings.theme.text_muted();
-                ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::new(1.0, outline);
-                ui.visuals_mut().widgets.inactive.bg_fill = self.settings.theme.panel_bg();
-
-                let resp = ui.add_sized(
-                    egui::vec2(ui.available_width() - 75.0, bar_h),
-                    egui::TextEdit::singleline(&mut self.group_call_chat_input)
-                        .hint_text("Type a message...")
-                        .margin(egui::vec2(8.0, 10.0)),
-                );
-                let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if ui.add(egui::Button::new("Send").min_size(egui::vec2(60.0, bar_h))).clicked() || enter {
-                    send_msg = true;
-                    resp.request_focus();
-                }
-            });
-        });
-
-        if send_msg {
-            let text = self.group_call_chat_input.trim().to_string();
-            if !text.is_empty() {
-                if let Some(tx) = &self.group_call_chat_tx {
-                    tx.send(text.clone()).ok();
-                }
-                let my_nickname = self.settings.nickname.clone();
-                let my_fingerprint = self.identity.fingerprint.clone();
-                // Persist to group chat history
-                if let Some(ref mut hist) = self.group_chat_history {
-                    hist.add_message(
-                        my_fingerprint,
-                        my_nickname.clone(),
-                        text.clone(),
-                    );
-                }
-                self.group_call_messages.push(GroupChatMsg {
-                    sender_index: 0,
-                    sender_nickname: my_nickname,
-                    text,
-                });
-            }
-            self.group_call_chat_input.clear();
-        }
-
-        ui.add_space(4.0);
-
-        // Controls bar
-        ui.horizontal(|ui| {
-            let mic_on = self.group_call_mic.load(Ordering::Relaxed);
-            let mic_text = if mic_on { "Mute" } else { "Unmute" };
-            if ui.button(mic_text).clicked() {
-                self.group_call_mic.store(!mic_on, Ordering::Relaxed);
-            }
-
-            ui.add_space(12.0);
-
-            let hangup_btn = egui::Button::new(
-                egui::RichText::new("Hang Up")
-                    .strong()
-                    .color(self.settings.theme.btn_negative()),
-            );
-            if ui.add(hangup_btn).clicked() {
                 self.cleanup_group_call();
             }
         });
@@ -1027,7 +1092,7 @@ impl HostelApp {
             }
         }
 
-        let grp = Group {
+        let mut grp = Group {
             group_id,
             name: self.group_create_name.trim().to_string(),
             created_by: self.identity.pubkey,
@@ -1036,7 +1101,13 @@ impl HostelApp {
             group_key,
             next_sender_index: next_index,
             avatar_sha256: None,
+            text_channels: Vec::new(),
+            voice_channels: Vec::new(),
+            call_mode: group::CallMode::default(),
         };
+        group::ensure_general_channel(&mut grp);
+        group::ensure_fallback_channel(&mut grp);
+        group::ensure_general_voice_channel(&mut grp);
 
         group::save_group(&grp);
 
@@ -1527,13 +1598,11 @@ impl HostelApp {
         open_idx: &mut Option<usize>,
         go_create: &mut bool,
     ) {
-        ui.add_space(6.0);
-
         // "+" create group button
         {
             let strip_w = ui.available_width();
             let btn_sz = 32.0;
-            let row_h = 42.0;
+            let row_h = 38.0;
             let (row_rect, row_resp) = ui.allocate_exact_size(
                 egui::vec2(strip_w, row_h),
                 egui::Sense::click(),
@@ -1583,7 +1652,7 @@ impl HostelApp {
                 let strip_w = ui.available_width();
                 for (idx, grp) in self.groups.iter().enumerate() {
                     let is_active = active_idx == Some(idx)
-                        && (self.group_view == GroupView::Detail || self.group_view == GroupView::Settings);
+                        && (self.group_view == GroupView::Detail || self.group_view == GroupView::Settings || self.group_view == GroupView::InCall);
 
                     let av_sz = 32.0;
                     let row_h = 42.0;
@@ -1650,40 +1719,112 @@ impl HostelApp {
             });
     }
 
-    fn draw_channels_sidebar(&mut self, ui: &mut egui::Ui, group_name: &str) {
+    fn draw_channels_sidebar(&mut self, ui: &mut egui::Ui, _group_name: &str) {
         ui.add_space(8.0);
 
-        // Header: group name
+        // Determine if user is admin for this group
+        let (is_admin, _group_id, text_channels) = if let Some(idx) = self.group_detail_idx {
+            if let Some(grp) = self.groups.get(idx) {
+                let admin = grp.members.iter().any(|m| m.pubkey == self.identity.pubkey && m.is_admin);
+                (admin, grp.group_id.clone(), grp.text_channels.clone())
+            } else {
+                (false, String::new(), Vec::new())
+            }
+        } else {
+            (false, String::new(), Vec::new())
+        };
+
+        // TEXT GROUPS section header
         ui.horizontal(|ui| {
             ui.add_space(8.0);
             ui.label(
-                egui::RichText::new(group_name)
-                    .strong()
-                    .size(13.0)
-                    .color(self.settings.theme.text_primary()),
-            );
-        });
-        ui.add_space(8.0);
-
-        // TEXT CHANNELS section header
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new("TEXT CHANNELS")
+                egui::RichText::new("TEXT GROUPS")
                     .size(10.0)
                     .color(self.settings.theme.text_muted()),
             );
+            if is_admin {
+                let plus_btn = ui.small_button(
+                    egui::RichText::new("+").size(10.0).color(self.settings.theme.text_muted()),
+                );
+                if plus_btn.clicked() {
+                    self.group_channel_creating = !self.group_channel_creating;
+                    self.group_channel_create_name.clear();
+                }
+            }
         });
         ui.add_space(2.0);
 
-        // # general
-        {
+        // Inline channel creation UI
+        if self.group_channel_creating && is_admin {
+            ui.horizontal(|ui| {
+                ui.add_space(12.0);
+                let resp = ui.add_sized(
+                    egui::vec2(ui.available_width() - 70.0, 22.0),
+                    egui::TextEdit::singleline(&mut self.group_channel_create_name)
+                        .hint_text("channel name")
+                        .desired_width(80.0),
+                );
+                let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if (ui.small_button("OK").clicked() || enter) && !self.group_channel_create_name.trim().is_empty() {
+                    let ch_name = self.group_channel_create_name.trim().to_lowercase().replace(' ', "-");
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let new_ch = group::TextChannel {
+                        channel_id: group::generate_channel_id(),
+                        name: ch_name,
+                        created_at: now,
+                        created_by: self.identity.pubkey,
+                        deleted: false,
+                        deleted_at: None,
+                    };
+                    if let Some(idx) = self.group_detail_idx {
+                        if let Some(grp) = self.groups.get_mut(idx) {
+                            grp.text_channels.push(new_ch);
+                            group::save_group(grp);
+                            // Broadcast group update to all members
+                            if let Some(tx) = &self.msg_cmd_tx {
+                                let group_json = serde_json::to_vec(grp).unwrap_or_default();
+                                let my_pubkey = self.identity.pubkey;
+                                let member_contacts: Vec<_> = grp.members.iter()
+                                    .filter(|m| m.pubkey != my_pubkey && !m.address.is_empty() && !m.port.is_empty())
+                                    .filter_map(|m| {
+                                        let addr_str = format!("[{}]:{}", m.address, m.port);
+                                        addr_str.parse().ok().map(|addr| {
+                                            let cid = crate::identity::derive_contact_id(&my_pubkey, &m.pubkey);
+                                            (cid, addr, m.pubkey)
+                                        })
+                                    })
+                                    .collect();
+                                tx.send(crate::messaging::MsgCommand::SendGroupUpdate {
+                                    group_id: grp.group_id.clone(),
+                                    group_json,
+                                    member_contacts,
+                                }).ok();
+                            }
+                        }
+                    }
+                    self.group_channel_creating = false;
+                    self.group_channel_create_name.clear();
+                }
+            });
+            ui.add_space(2.0);
+        }
+
+        // List all non-deleted text channels (including fallback, always visible)
+        let mut channel_to_delete: Option<String> = None;
+        for ch in &text_channels {
+            if ch.deleted {
+                continue;
+            }
+
             let row_w = ui.available_width();
             let (row_rect, row_resp) = ui.allocate_exact_size(
                 egui::vec2(row_w, 28.0),
                 egui::Sense::click(),
             );
-            let is_sel = self.group_selected_channel == 0;
+            let is_sel = self.group_selected_channel == ch.channel_id;
             if is_sel {
                 ui.painter().rect_filled(row_rect, 4.0, self.settings.theme.widget_bg());
             } else if row_resp.hovered() {
@@ -1700,37 +1841,162 @@ impl HostelApp {
             ui.painter().text(
                 egui::pos2(row_rect.min.x + 12.0, row_rect.center().y),
                 egui::Align2::LEFT_CENTER,
-                "# general",
+                format!("# {}", ch.name),
                 egui::FontId::proportional(12.0),
                 text_color,
             );
             if row_resp.clicked() {
-                self.group_selected_channel = 0;
+                self.group_selected_channel = ch.channel_id.clone();
+            }
+            // Right-click context menu for delete (admin only, not general/fallback)
+            if is_admin && ch.channel_id != "general" && ch.channel_id != "fallback" {
+                row_resp.context_menu(|ui| {
+                    if ui.button("Delete channel").clicked() {
+                        channel_to_delete = Some(ch.channel_id.clone());
+                        ui.close_menu();
+                    }
+                });
+            }
+        }
+
+        // Handle deferred channel deletion
+        if let Some(del_id) = channel_to_delete {
+            if let Some(idx) = self.group_detail_idx {
+                if let Some(grp) = self.groups.get_mut(idx) {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    // Find channel name for migration prefix
+                    let ch_name = grp.text_channels.iter()
+                        .find(|ch| ch.channel_id == del_id)
+                        .map(|ch| ch.name.clone())
+                        .unwrap_or_default();
+                    // Mark as deleted
+                    if let Some(ch) = grp.text_channels.iter_mut().find(|ch| ch.channel_id == del_id) {
+                        ch.deleted = true;
+                        ch.deleted_at = Some(now);
+                    }
+                    // Migrate messages to fallback
+                    crate::chat::migrate_messages_to_fallback(
+                        &grp.group_id, &del_id, &ch_name, &self.identity.secret,
+                    );
+                    group::save_group(grp);
+                    // Switch to general
+                    self.group_selected_channel = "general".to_string();
+                    // Broadcast group update
+                    if let Some(tx) = &self.msg_cmd_tx {
+                        let group_json = serde_json::to_vec(grp).unwrap_or_default();
+                        let my_pubkey = self.identity.pubkey;
+                        let member_contacts: Vec<_> = grp.members.iter()
+                            .filter(|m| m.pubkey != my_pubkey && !m.address.is_empty() && !m.port.is_empty())
+                            .filter_map(|m| {
+                                let addr_str = format!("[{}]:{}", m.address, m.port);
+                                addr_str.parse().ok().map(|addr| {
+                                    let cid = crate::identity::derive_contact_id(&my_pubkey, &m.pubkey);
+                                    (cid, addr, m.pubkey)
+                                })
+                            })
+                            .collect();
+                        tx.send(crate::messaging::MsgCommand::SendGroupUpdate {
+                            group_id: grp.group_id.clone(),
+                            group_json,
+                            member_contacts,
+                        }).ok();
+                    }
+                }
             }
         }
 
         ui.add_space(10.0);
 
-        // VOICE CHANNELS section header
+        // VOICE GROUPS section header
         ui.horizontal(|ui| {
             ui.add_space(8.0);
             ui.label(
-                egui::RichText::new("VOICE CHANNELS")
+                egui::RichText::new("VOICE GROUPS")
                     .size(10.0)
                     .color(self.settings.theme.text_muted()),
             );
+            if is_admin {
+                let plus_btn = ui.small_button(
+                    egui::RichText::new("+").size(10.0).color(self.settings.theme.text_muted()),
+                );
+                if plus_btn.clicked() {
+                    self.voice_channel_creating = !self.voice_channel_creating;
+                    self.voice_channel_create_name.clear();
+                }
+            }
         });
         ui.add_space(2.0);
 
-        // >> General
-        {
+        // Inline voice channel creation UI
+        if self.voice_channel_creating && is_admin {
+            ui.horizontal(|ui| {
+                ui.add_space(12.0);
+                let resp = ui.add_sized(
+                    egui::vec2(ui.available_width() - 70.0, 22.0),
+                    egui::TextEdit::singleline(&mut self.voice_channel_create_name)
+                        .hint_text("channel name")
+                        .desired_width(80.0),
+                );
+                let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if (ui.small_button("OK").clicked() || enter) && !self.voice_channel_create_name.trim().is_empty() {
+                    let ch_name = self.voice_channel_create_name.trim().to_lowercase().replace(' ', "-");
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let new_ch = group::VoiceChannel {
+                        channel_id: group::generate_channel_id(),
+                        name: ch_name,
+                        created_at: now,
+                        created_by: self.identity.pubkey,
+                        deleted: false,
+                        deleted_at: None,
+                    };
+                    if let Some(idx) = self.group_detail_idx {
+                        if let Some(grp) = self.groups.get_mut(idx) {
+                            grp.voice_channels.push(new_ch);
+                            group::save_group(grp);
+                            self.broadcast_group_update(idx);
+                        }
+                    }
+                    self.voice_channel_creating = false;
+                    self.voice_channel_create_name.clear();
+                }
+            });
+            ui.add_space(2.0);
+        }
+
+        // Dynamic voice channels list
+        let voice_channels = if let Some(idx) = self.group_detail_idx {
+            if let Some(grp) = self.groups.get(idx) {
+                grp.voice_channels.clone()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
+        let mut voice_join_channel: Option<String> = None;
+        let mut voice_channel_to_delete: Option<String> = None;
+        let active_voice_channel = self.group_call_channel_id.clone();
+
+        for ch in &voice_channels {
+            if ch.deleted {
+                continue;
+            }
+
             let row_w = ui.available_width();
             let (row_rect, row_resp) = ui.allocate_exact_size(
                 egui::vec2(row_w, 28.0),
                 egui::Sense::click(),
             );
-            let is_sel = self.group_selected_channel == 1;
-            if is_sel {
+            let is_sel = self.group_selected_channel == ch.channel_id;
+            let is_active = active_voice_channel.as_deref() == Some(&ch.channel_id);
+            if is_sel || is_active {
                 ui.painter().rect_filled(row_rect, 4.0, self.settings.theme.widget_bg());
             } else if row_resp.hovered() {
                 ui.painter().rect_filled(
@@ -1738,7 +2004,7 @@ impl HostelApp {
                     self.settings.theme.widget_bg().gamma_multiply(0.5),
                 );
             }
-            let text_color = if is_sel {
+            let text_color = if is_sel || is_active {
                 self.settings.theme.text_primary()
             } else {
                 self.settings.theme.text_muted()
@@ -1746,12 +2012,103 @@ impl HostelApp {
             ui.painter().text(
                 egui::pos2(row_rect.min.x + 12.0, row_rect.center().y),
                 egui::Align2::LEFT_CENTER,
-                "\u{00BB} General",
+                format!("\u{00BB} {}", ch.name),
                 egui::FontId::proportional(12.0),
                 text_color,
             );
             if row_resp.clicked() {
-                self.group_selected_channel = 1;
+                self.group_selected_channel = ch.channel_id.clone();
+                // Clicking a voice channel = joining the call
+                if !is_active {
+                    voice_join_channel = Some(ch.channel_id.clone());
+                }
+            }
+
+            // Right-click context menu for delete (admin only, not voice_general)
+            if is_admin && ch.channel_id != "voice_general" {
+                row_resp.context_menu(|ui| {
+                    if ui.button("Delete voice channel").clicked() {
+                        voice_channel_to_delete = Some(ch.channel_id.clone());
+                        ui.close_menu();
+                    }
+                });
+            }
+
+            // Show connected members indented under active voice channel
+            if is_active {
+                let my_pubkey = self.identity.pubkey;
+                for member in &self.group_call_members {
+                    let member_row_w = ui.available_width();
+                    let (member_rect, _) = ui.allocate_exact_size(
+                        egui::vec2(member_row_w, 24.0),
+                        egui::Sense::hover(),
+                    );
+
+                    let mut x = member_rect.min.x + 20.0;
+                    let cy = member_rect.center().y;
+
+                    // Small avatar (20px)
+                    let av_size = 20.0;
+                    let av_rect = egui::Rect::from_center_size(
+                        egui::pos2(x + av_size / 2.0, cy),
+                        egui::vec2(av_size, av_size),
+                    );
+                    let mut drew_av = false;
+                    if member.pubkey == my_pubkey {
+                        if let Some(tex) = &self.own_avatar_texture {
+                            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                            ui.painter().image(tex.id(), av_rect, uv, egui::Color32::WHITE);
+                            drew_av = true;
+                        }
+                    } else {
+                        let cid = crate::identity::derive_contact_id(&my_pubkey, &member.pubkey);
+                        if let Some(tex) = self.contact_avatar_textures.get(&cid) {
+                            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                            ui.painter().image(tex.id(), av_rect, uv, egui::Color32::WHITE);
+                            drew_av = true;
+                        }
+                    }
+                    if !drew_av {
+                        paint_initial_avatar(ui.painter(), av_rect, &member.nickname, &self.settings.theme);
+                    }
+                    x += av_size + 4.0;
+
+                    // Nickname
+                    ui.painter().text(
+                        egui::pos2(x, cy),
+                        egui::Align2::LEFT_CENTER,
+                        &member.nickname,
+                        egui::FontId::proportional(11.0),
+                        self.settings.theme.text_muted(),
+                    );
+                }
+            }
+        }
+
+        // Handle deferred voice channel join
+        if let Some(ch_id) = voice_join_channel {
+            self.start_group_call(&ch_id);
+        }
+
+        // Handle deferred voice channel deletion
+        if let Some(del_id) = voice_channel_to_delete {
+            if let Some(idx) = self.group_detail_idx {
+                if let Some(grp) = self.groups.get_mut(idx) {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    if let Some(ch) = grp.voice_channels.iter_mut().find(|ch| ch.channel_id == del_id) {
+                        ch.deleted = true;
+                        ch.deleted_at = Some(now);
+                    }
+                    group::save_group(grp);
+                    // If someone is in this deleted channel, disconnect them
+                    if self.group_call_channel_id.as_deref() == Some(&del_id) {
+                        self.cleanup_group_call();
+                    }
+                    self.broadcast_group_update(idx);
+                }
             }
         }
     }

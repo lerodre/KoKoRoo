@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use crate::chat::{ChatHistory, GroupChatHistory};
 use crate::group::{self, Group, GroupMember};
-use crate::group_voice::{GroupCallInfo, GroupChatMsg, GroupRole};
+use crate::groupcall::{GroupCallInfo, GroupChatMsg, GroupRole};
 use crate::identity::{self, Contact, Identity, Settings};
 use crate::messaging::{MsgCommand, MsgDaemon, MsgEvent};
 use crate::screen::{ScreenCommand, ScreenViewer};
@@ -255,9 +255,16 @@ pub struct HostelApp {
     pub(crate) group_avatar_crop_group_id: Option<String>,
     pub(crate) group_settings_invite_mode: bool,
     pub(crate) group_settings_selected_members: Vec<bool>,
-    pub(crate) group_selected_channel: usize,
+    pub(crate) group_selected_channel: String,
+    pub(crate) group_channel_create_name: String,
+    pub(crate) group_channel_creating: bool,
+    pub(crate) voice_channel_creating: bool,
+    pub(crate) voice_channel_create_name: String,
 
     // Group call state
+    pub(crate) group_call_channel_id: Option<String>,
+    pub(crate) group_screen_sharing: bool,
+    pub(crate) group_webcam_sharing: bool,
     pub(crate) group_call_running: Arc<AtomicBool>,
     pub(crate) group_call_mic: Arc<AtomicBool>,
     pub(crate) group_call_hangup: Option<Arc<AtomicBool>>,
@@ -293,7 +300,18 @@ impl HostelApp {
         let identity = Identity::load_or_create();
         let settings = Settings::load();
         let contacts = identity::load_all_contacts();
-        let groups = group::load_all_groups();
+        let mut groups = group::load_all_groups();
+        // Ensure all groups have general + fallback channels + voice channels (migration for old groups)
+        for grp in &mut groups {
+            let had_channels = !grp.text_channels.is_empty();
+            let had_voice = !grp.voice_channels.is_empty();
+            group::ensure_general_channel(grp);
+            group::ensure_fallback_channel(grp);
+            group::ensure_general_voice_channel(grp);
+            if !had_channels || !had_voice {
+                group::save_group(grp);
+            }
+        }
         let best_ipv6 = get_best_ipv6(&settings.network_adapter);
 
         let selected_input = if !settings.mic.is_empty() {
@@ -460,7 +478,14 @@ impl HostelApp {
             group_avatar_crop_group_id: None,
             group_settings_invite_mode: false,
             group_settings_selected_members: Vec::new(),
-            group_selected_channel: 0,
+            group_selected_channel: "general".to_string(),
+            group_channel_create_name: String::new(),
+            group_channel_creating: false,
+            voice_channel_creating: false,
+            voice_channel_create_name: String::new(),
+            group_call_channel_id: None,
+            group_screen_sharing: false,
+            group_webcam_sharing: false,
             group_call_running: Arc::new(AtomicBool::new(false)),
             group_call_mic: Arc::new(AtomicBool::new(true)),
             group_call_hangup: None,
@@ -653,11 +678,17 @@ impl HostelApp {
         }
     }
 
-    pub(crate) fn start_group_call(&mut self, as_leader: bool) {
+    pub(crate) fn start_group_call(&mut self, channel_id: &str) {
         let idx = match self.group_detail_idx {
             Some(i) if i < self.groups.len() => i,
             _ => return,
         };
+
+        // If already in a different voice channel, cleanup first
+        let was_switching = self.group_call_channel_id.is_some();
+        if was_switching {
+            self.cleanup_group_call();
+        }
 
         // Yield socket from messaging daemon
         if let Some(tx) = &self.msg_cmd_tx {
@@ -677,23 +708,14 @@ impl HostelApp {
         self.group_call_mic = Arc::new(AtomicBool::new(true));
         self.group_connect_result = Arc::new(std::sync::Mutex::new(None));
         self.group_call_members.clear();
-
-        // Load chat history for this group
-        let group = &self.groups[idx];
-        let history = GroupChatHistory::load(&group.group_id, &self.identity.secret);
-        // Prepopulate messages from history
-        self.group_call_messages = history.messages.iter().map(|m| {
-            GroupChatMsg {
-                sender_index: 0,
-                sender_nickname: m.sender_nickname.clone(),
-                text: m.text.clone(),
-            }
-        }).collect();
-        self.group_chat_history = Some(history);
+        self.group_call_channel_id = Some(channel_id.to_string());
+        self.group_screen_sharing = false;
+        self.group_webcam_sharing = false;
 
         self.group_view = GroupView::Connecting;
 
         let group = self.groups[idx].clone();
+        let channel_id_owned = channel_id.to_string();
         let local_port = self.local_port.clone();
         let running = self.group_call_running.clone();
         let mic_active = self.group_call_mic.clone();
@@ -708,8 +730,9 @@ impl HostelApp {
             .unwrap_or(0);
 
         thread::spawn(move || {
-            // Wait for daemon to yield socket
-            thread::sleep(std::time::Duration::from_millis(500));
+            // Wait for daemon to yield socket (longer if switching channels)
+            let wait_ms = if was_switching { 1000 } else { 500 };
+            thread::sleep(std::time::Duration::from_millis(wait_ms));
 
             let host = cpal::default_host();
             let input_device = host.input_devices().ok().and_then(|mut d| d.nth(input_idx));
@@ -723,27 +746,22 @@ impl HostelApp {
                 }
             };
 
-            let call_result = if as_leader {
-                crate::group_voice::start_as_leader(
-                    group, &input_device, &output_device, &local_port,
-                    running, mic_active, my_sender_index,
-                )
-            } else {
-                // For member: find the admin/leader's address
-                let leader = group.members.iter()
-                    .find(|m| m.is_admin && m.pubkey != my_pubkey)
-                    .or_else(|| group.members.first());
-                match leader {
-                    Some(l) if !l.address.is_empty() && !l.port.is_empty() => {
-                        let leader_addr = format!("[{}]:{}", l.address, l.port);
-                        crate::group_voice::start_as_member(
-                            group, &leader_addr, &input_device, &output_device,
-                            &local_port, running, mic_active, my_sender_index,
-                        )
-                    }
-                    _ => Err("No leader address available".into()),
+            // Retry socket binding up to 3 times (old call threads may still hold the socket)
+            let mut call_result = Err("Not started".to_string());
+            for attempt in 0..3 {
+                if attempt > 0 {
+                    thread::sleep(std::time::Duration::from_millis(500));
                 }
-            };
+                if !running.load(Ordering::Relaxed) {
+                    call_result = Err("Cancelled".to_string());
+                    break;
+                }
+                call_result = crate::groupcall::start_group_call(
+                    group.clone(), &channel_id_owned, &input_device, &output_device,
+                    &local_port, running.clone(), mic_active.clone(), my_sender_index,
+                );
+                if call_result.is_ok() { break; }
+            }
 
             *result.lock().unwrap() = Some(call_result);
         });
@@ -768,9 +786,12 @@ impl HostelApp {
         self.group_call_members.clear();
         self.group_call_group = None;
         self.group_call_role = None;
+        self.group_call_channel_id = None;
+        self.group_screen_sharing = false;
+        self.group_webcam_sharing = false;
         *self.group_connect_result.lock().unwrap() = None;
-        self.group_view = GroupView::List;
-        self.group_detail_idx = None;
+        // Stay on group detail view (not back to list)
+        self.group_view = GroupView::Detail;
 
         // Reclaim socket
         if let Some(tx) = &self.msg_cmd_tx {
@@ -902,8 +923,9 @@ impl eframe::App for HostelApp {
                         self.group_call_chat_rx = Some(info.chat_rx);
                         self.group_call_roster_rx = Some(info.roster_rx);
                         self.group_call_members = self.group_call_group.as_ref()
-                            .map(|g| g.members.clone())
-                            .unwrap_or_default();
+                            .and_then(|g| g.members.iter()
+                                .find(|m| m.pubkey == self.identity.pubkey).cloned())
+                            .into_iter().collect();
                         self.group_view = GroupView::InCall;
                     }
                     Err(e) => {
@@ -1146,10 +1168,100 @@ impl eframe::App for HostelApp {
                             } else {
                                 // Update existing group
                                 if let Some(grp) = self.groups.iter_mut().find(|g| g.group_id == received_group.group_id) {
-                                    grp.name = received_group.name;
-                                    grp.members = received_group.members;
+                                    grp.name = received_group.name.clone();
+                                    grp.members = received_group.members.clone();
                                     grp.avatar_sha256 = received_group.avatar_sha256;
+
+                                    // Merge text channels ("fallbackfix" protocol)
+                                    let local_channels = std::mem::take(&mut grp.text_channels);
+                                    let mut merged: std::collections::HashMap<String, group::TextChannel> = std::collections::HashMap::new();
+
+                                    // Start with all local channels
+                                    for ch in &local_channels {
+                                        merged.insert(ch.channel_id.clone(), ch.clone());
+                                    }
+
+                                    // Merge remote channels
+                                    let identity_secret = self.identity.secret;
+                                    for rch in &received_group.text_channels {
+                                        if let Some(lch) = merged.get(&rch.channel_id) {
+                                            if rch.deleted && !lch.deleted {
+                                                // Remote deleted it — migrate messages to fallback
+                                                let name = lch.name.clone();
+                                                crate::chat::migrate_messages_to_fallback(
+                                                    &grp.group_id, &rch.channel_id, &name, &identity_secret,
+                                                );
+                                                merged.insert(rch.channel_id.clone(), rch.clone());
+                                            } else if !rch.deleted && lch.deleted {
+                                                // Our delete stands — keep local
+                                            } else if rch.deleted && lch.deleted {
+                                                // Both deleted — keep latest by deleted_at
+                                                let r_at = rch.deleted_at.unwrap_or(0);
+                                                let l_at = lch.deleted_at.unwrap_or(0);
+                                                if r_at > l_at {
+                                                    merged.insert(rch.channel_id.clone(), rch.clone());
+                                                }
+                                            } else {
+                                                // Both alive — accept remote metadata
+                                                merged.insert(rch.channel_id.clone(), rch.clone());
+                                            }
+                                        } else {
+                                            // New from remote
+                                            merged.insert(rch.channel_id.clone(), rch.clone());
+                                        }
+                                    }
+
+                                    // Ensure general + fallback always exist
+                                    let now = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_secs();
+                                    let thirty_days = 30 * 24 * 3600;
+
+                                    // Purge old tombstones (>30 days)
+                                    merged.retain(|_, ch| {
+                                        if ch.deleted {
+                                            ch.deleted_at.map_or(true, |t| now.saturating_sub(t) < thirty_days)
+                                        } else {
+                                            true
+                                        }
+                                    });
+
+                                    grp.text_channels = merged.into_values().collect();
+                                    group::ensure_general_channel(grp);
+                                    group::ensure_fallback_channel(grp);
+
+                                    // Check if merged result differs from received — if admin, re-broadcast
+                                    let merged_differs = grp.text_channels.len() != received_group.text_channels.len()
+                                        || grp.text_channels.iter().any(|ch| {
+                                            !received_group.text_channels.iter().any(|rch| rch.channel_id == ch.channel_id && rch.deleted == ch.deleted)
+                                        });
+
                                     group::save_group(grp);
+
+                                    // If local user is admin and merged result differs, re-broadcast
+                                    let my_pubkey = self.identity.pubkey;
+                                    let is_admin = grp.members.iter().any(|m| m.pubkey == my_pubkey && m.is_admin);
+                                    if is_admin && merged_differs {
+                                        if let Some(tx) = &self.msg_cmd_tx {
+                                            let group_json = serde_json::to_vec(grp).unwrap_or_default();
+                                            let member_contacts: Vec<_> = grp.members.iter()
+                                                .filter(|m| m.pubkey != my_pubkey && !m.address.is_empty() && !m.port.is_empty())
+                                                .filter_map(|m| {
+                                                    let addr_str = format!("[{}]:{}", m.address, m.port);
+                                                    addr_str.parse().ok().map(|addr| {
+                                                        let cid = crate::identity::derive_contact_id(&my_pubkey, &m.pubkey);
+                                                        (cid, addr, m.pubkey)
+                                                    })
+                                                })
+                                                .collect();
+                                            tx.send(crate::messaging::MsgCommand::SendGroupUpdate {
+                                                group_id: grp.group_id.clone(),
+                                                group_json,
+                                                member_contacts,
+                                            }).ok();
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1158,10 +1270,20 @@ impl eframe::App for HostelApp {
                         // Invalidate cached group avatar texture
                         self.group_avatar_textures.remove(&group_id);
                     }
-                    MsgEvent::IncomingGroupChat { group_id, sender_fingerprint, sender_nickname, text } => {
+                    MsgEvent::IncomingGroupChat { group_id, channel_id, sender_fingerprint, sender_nickname, text } => {
+                        // If channel is deleted in our local group, redirect to fallback
+                        let effective_channel = if let Some(grp) = self.groups.iter().find(|g| g.group_id == group_id) {
+                            if grp.text_channels.iter().any(|ch| ch.channel_id == channel_id && !ch.deleted) {
+                                channel_id.clone()
+                            } else {
+                                "fallback".to_string()
+                            }
+                        } else {
+                            channel_id.clone()
+                        };
                         // Save to group chat history
                         use crate::chat::GroupChatHistory;
-                        let mut history = GroupChatHistory::load(&group_id, &self.identity.secret);
+                        let mut history = GroupChatHistory::load(&group_id, &effective_channel, &self.identity.secret);
                         history.add_message(sender_fingerprint, sender_nickname.clone(), text.clone());
 
                         // If currently viewing this group, update the live messages
@@ -1173,7 +1295,7 @@ impl eframe::App for HostelApp {
                         // If in a group call for this group, push to live messages
                         if let Some(ref g) = self.group_call_group {
                             if g.group_id == group_id && matches!(self.group_view, groups::GroupView::InCall) {
-                                self.group_call_messages.push(crate::group_voice::GroupChatMsg {
+                                self.group_call_messages.push(crate::groupcall::GroupChatMsg {
                                     sender_index: 0,
                                     sender_nickname,
                                     text,

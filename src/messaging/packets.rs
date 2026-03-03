@@ -849,13 +849,14 @@ impl MsgDaemon {
 
                 PKT_GRP_MSG_CHAT => {
                     if let Some(peer) = self.peers.get_mut(&from) {
-                        if let Some((group_id, text)) = protocol::handle_group_chat(data, peer) {
+                        if let Some((group_id, channel_id, text)) = protocol::handle_group_chat(data, peer) {
                             peer.touch();
                             // Derive fingerprint from cryptographically verified pubkey (never trust peer-supplied data)
                             let sender_fingerprint = crypto::fingerprint(&peer.peer_pubkey);
                             let sender_nickname = peer.peer_nickname.clone();
                             self.event_tx.send(MsgEvent::IncomingGroupChat {
                                 group_id,
+                                channel_id,
                                 sender_fingerprint,
                                 sender_nickname,
                                 text,

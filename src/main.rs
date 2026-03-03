@@ -23,7 +23,7 @@ mod screen;
 mod platform;
 mod avatar;
 mod group;
-mod group_voice;
+mod groupcall;
 mod voice;
 mod ui;
 

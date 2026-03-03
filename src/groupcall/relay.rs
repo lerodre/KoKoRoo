@@ -1,9 +1,7 @@
 use audiopus::coder::{Decoder, Encoder};
 use audiopus::packet::Packet;
 use audiopus::{Application, Channels, MutSignals, SampleRate};
-use cpal::traits::{DeviceTrait, StreamTrait};
-use ringbuf::traits::{Consumer, Producer, Split};
-use ringbuf::HeapRb;
+use ringbuf::traits::Consumer;
 use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -18,43 +16,10 @@ use crate::crypto::{self, PKT_GRP_CHAT, PKT_GRP_HANGUP, PKT_GRP_HELLO, PKT_GRP_P
     PKT_GRP_ALIVE, PKT_GRP_SPEED_DATA, PKT_GRP_SPEED_RESULT, PKT_GRP_LEADER};
 use crate::group::{Group, GroupMember};
 
-/// Opus frame size: 960 samples @ 48kHz = 20ms.
-const FRAME_SIZE: usize = 960;
-
-/// RNNoise frame size: 480 samples @ 48kHz = 10ms.
-const DENOISE_FRAME: usize = 480;
-
-/// Max encoded Opus packet size.
-const MAX_OPUS_PACKET: usize = 512;
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum GroupRole {
-    Leader,
-    Member,
-}
-
-/// A group chat message with sender info.
-#[derive(Clone)]
-pub struct GroupChatMsg {
-    #[allow(dead_code)]
-    pub sender_index: u16,
-    pub sender_nickname: String,
-    pub text: String,
-}
-
-/// Bridge between the group call engine and the GUI.
-pub struct GroupCallInfo {
-    pub group: Group,
-    pub role: GroupRole,
-    #[allow(dead_code)]
-    pub running: Arc<AtomicBool>,
-    #[allow(dead_code)]
-    pub mic_active: Arc<AtomicBool>,
-    pub chat_tx: mpsc::Sender<String>,
-    pub chat_rx: mpsc::Receiver<GroupChatMsg>,
-    pub roster_rx: mpsc::Receiver<Vec<GroupMember>>,
-    pub local_hangup: Arc<AtomicBool>,
-}
+use super::engine::{
+    self, AudioFrames, GroupCallInfo, GroupChatMsg, GroupRole,
+    FRAME_SIZE, DENOISE_FRAME, MAX_OPUS_PACKET,
+};
 
 /// Leader tracks each connected member at runtime.
 struct ConnectedMember {
@@ -69,6 +34,7 @@ struct ConnectedMember {
 /// Start a group call as the leader (relay).
 pub fn start_as_leader(
     group: Group,
+    channel_id: &str,
     input_device: &cpal::Device,
     output_device: &cpal::Device,
     local_port: &str,
@@ -85,7 +51,7 @@ pub fn start_as_leader(
     let _cipher = crypto::grp_cipher_from_key(&group_key);
     let send_counter = Arc::new(AtomicU32::new(0));
 
-    // Chat channels (GUI ↔ engine)
+    // Chat channels (GUI <-> engine)
     let (chat_out_tx, chat_out_rx) = mpsc::channel::<String>();
     let (chat_in_tx, chat_in_rx) = mpsc::channel::<GroupChatMsg>();
     let (roster_tx, roster_rx) = mpsc::channel::<Vec<GroupMember>>();
@@ -96,76 +62,17 @@ pub fn start_as_leader(
     let connected: Arc<Mutex<HashMap<u16, ConnectedMember>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
-    // Audio ring buffers
-    let mic_ring = HeapRb::<f32>::new(48000);
-    let (mut mic_producer, mut mic_consumer) = mic_ring.split();
-    let spk_ring = HeapRb::<f32>::new(9600);
-    let (mut spk_producer, mut spk_consumer) = spk_ring.split();
+    // Per-member audio storage
+    let audio_frames: AudioFrames = Arc::new(Mutex::new(HashMap::new()));
 
-    // Per-member audio storage: sender_index → latest decoded PCM frame
-    let audio_frames: Arc<Mutex<HashMap<u16, Vec<f32>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    // Audio streams
+    let pipeline = engine::setup_audio_streams(input_device, output_device)?;
+    let mut mic_consumer = pipeline.mic_consumer;
+    let _input = pipeline._input_stream;
+    let _output = pipeline._output_stream;
 
-    // ── Audio streams (mic + speaker) ──
-    let input_channels = input_device.default_input_config()
-        .map(|c| c.channels()).unwrap_or(1);
-    let output_channels = output_device.default_output_config()
-        .map(|c| c.channels()).unwrap_or(1);
-
-    #[cfg(target_os = "macos")]
-    let buf_size = cpal::BufferSize::Default;
-    #[cfg(not(target_os = "macos"))]
-    let buf_size = cpal::BufferSize::Fixed(FRAME_SIZE as u32);
-
-    let input_config = cpal::StreamConfig {
-        channels: input_channels,
-        sample_rate: cpal::SampleRate(48000),
-        buffer_size: buf_size.clone(),
-    };
-    let output_config = cpal::StreamConfig {
-        channels: output_channels,
-        sample_rate: cpal::SampleRate(48000),
-        buffer_size: buf_size,
-    };
-
-    let input_stream = input_device.build_input_stream(
-        &input_config,
-        move |data: &[f32], _: &cpal::InputCallbackInfo| {
-            if input_channels == 1 {
-                for &sample in data {
-                    let _ = mic_producer.try_push(sample);
-                }
-            } else {
-                for chunk in data.chunks(input_channels as usize) {
-                    let _ = mic_producer.try_push(chunk[0]);
-                }
-            }
-        },
-        |e| log_fmt!("[group] mic error: {e}"),
-        None,
-    ).map_err(|e| format!("Mic stream: {e}"))?;
-    input_stream.play().map_err(|e| format!("Mic play: {e}"))?;
-
-    let output_stream = output_device.build_output_stream(
-        &output_config,
-        move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            if output_channels == 1 {
-                for sample in data.iter_mut() {
-                    *sample = spk_consumer.try_pop().unwrap_or(0.0);
-                }
-            } else {
-                for chunk in data.chunks_mut(output_channels as usize) {
-                    let s = spk_consumer.try_pop().unwrap_or(0.0);
-                    for ch in chunk.iter_mut() {
-                        *ch = s;
-                    }
-                }
-            }
-        },
-        |e| log_fmt!("[group] speaker error: {e}"),
-        None,
-    ).map_err(|e| format!("Speaker stream: {e}"))?;
-    output_stream.play().map_err(|e| format!("Speaker play: {e}"))?;
+    // Mixer thread
+    engine::spawn_mixer_thread(running.clone(), audio_frames.clone(), pipeline.spk_producer);
 
     // ── Relay + Receiver thread ──
     let relay_socket = socket.try_clone().unwrap();
@@ -191,7 +98,6 @@ pub fn start_as_leader(
                         if let Some((_, group_id_bytes)) = crypto::parse_grp_hello(&recv_buf[..n]) {
                             let gid = crypto::group_id_from_bytes(&group_id_bytes);
                             if gid == relay_group.group_id {
-                                // Find member by address in roster
                                 if let Some(member) = relay_group.members.iter()
                                     .find(|m| from.ip().to_string().contains(&m.address) || m.address.is_empty())
                                 {
@@ -220,7 +126,6 @@ pub fn start_as_leader(
                     // Update activity timestamp
                     {
                         let mut conn = relay_connected.lock().unwrap();
-                        // Register unknown sender by address match
                         if !conn.contains_key(&sender_index) {
                             if let Some(member) = relay_group.members.iter()
                                 .find(|m| m.sender_index == sender_index)
@@ -237,7 +142,7 @@ pub fn start_as_leader(
                         }
                         if let Some(m) = conn.get_mut(&sender_index) {
                             m.last_activity = Instant::now();
-                            m.peer_addr = from; // update in case of address change
+                            m.peer_addr = from;
                         }
                     }
 
@@ -272,7 +177,6 @@ pub fn start_as_leader(
                         }
 
                         PKT_GRP_CHAT => {
-                            // Decrypt for leader display
                             if let Some((_, si, text_bytes)) = crypto::grp_decrypt(&relay_cipher, &recv_buf[..n]) {
                                 let text = String::from_utf8_lossy(&text_bytes).to_string();
                                 let nickname = relay_group.members.iter()
@@ -330,7 +234,7 @@ pub fn start_as_leader(
         }
     });
 
-    // ── Leader's own sender thread (mic → encode → encrypt → relay to members) ──
+    // ── Leader's own sender thread ──
     let send_socket = socket.try_clone().unwrap();
     let sender_running = running.clone();
     let sender_mic_active = mic_active.clone();
@@ -419,36 +323,6 @@ pub fn start_as_leader(
         }
     });
 
-    // ── Leader's local mixer thread (mix all member audio → speaker) ──
-    let mixer_running = running.clone();
-    let mixer_audio = audio_frames.clone();
-
-    let _mixer = thread::spawn(move || {
-        while mixer_running.load(Ordering::Relaxed) {
-            thread::sleep(std::time::Duration::from_millis(20));
-            let frames = mixer_audio.lock().unwrap();
-            if frames.is_empty() { continue; }
-
-            let mut mix = vec![0f32; FRAME_SIZE];
-            for frame in frames.values() {
-                for (i, &s) in frame.iter().enumerate() {
-                    if i < FRAME_SIZE {
-                        mix[i] += s;
-                    }
-                }
-            }
-            // Clamp
-            for s in mix.iter_mut() {
-                *s = s.clamp(-1.0, 1.0);
-            }
-            drop(frames);
-
-            for &s in &mix {
-                let _ = spk_producer.try_push(s);
-            }
-        }
-    });
-
     // ── Housekeeping thread (ping + roster broadcast) ──
     let hk_socket = socket.try_clone().unwrap();
     let hk_running = running.clone();
@@ -479,23 +353,23 @@ pub fn start_as_leader(
                 member.ping_sent_at = Some(Instant::now());
             }
 
-            // Build roster with RTT info
-            let mut roster: Vec<GroupMember> = hk_group.members.clone();
+            // Build roster: only leader (ourselves) + actually connected members
+            let connected_indices: Vec<u16> = conn.keys().copied().collect();
+            let mut roster: Vec<GroupMember> = hk_group.members.iter()
+                .filter(|m| m.sender_index == my_sender_index || connected_indices.contains(&m.sender_index))
+                .cloned()
+                .collect();
             for m in roster.iter_mut() {
                 if let Some(cm) = conn.get(&m.sender_index) {
                     if let Some(_rtt) = cm.rtt_ms {
-                        // Encode RTT in the port field suffix (hacky but avoids struct changes)
-                        // Actually, just update address from connected member
                         m.address = cm.peer_addr.ip().to_string();
                         m.port = cm.peer_addr.port().to_string();
                     }
                 }
             }
 
-            // Send roster to GUI
             let _ = hk_roster_tx.send(roster.clone());
 
-            // Send roster to all members
             if let Ok(roster_json) = serde_json::to_vec(&roster) {
                 let counter = hk_counter.fetch_add(1, Ordering::Relaxed);
                 let pkt = crypto::grp_encrypt(
@@ -519,13 +393,10 @@ pub fn start_as_leader(
         }
     });
 
-    // Keep streams alive
-    let _input = input_stream;
-    let _output = output_stream;
-
     Ok(GroupCallInfo {
         group,
         role: GroupRole::Leader,
+        channel_id: channel_id.to_string(),
         running,
         mic_active,
         chat_tx: chat_out_tx,
@@ -538,6 +409,7 @@ pub fn start_as_leader(
 /// Start a group call as a member (client) with failover support.
 pub fn start_as_member(
     group: Group,
+    channel_id: &str,
     leader_addr: &str,
     input_device: &cpal::Device,
     output_device: &cpal::Device,
@@ -576,76 +448,17 @@ pub fn start_as_member(
 
     let local_hangup = Arc::new(AtomicBool::new(false));
 
-    // Audio ring buffers
-    let mic_ring = HeapRb::<f32>::new(48000);
-    let (mut mic_producer, mut mic_consumer) = mic_ring.split();
-    let spk_ring = HeapRb::<f32>::new(9600);
-    let (mut spk_producer, mut spk_consumer) = spk_ring.split();
-
     // Per-sender decoded audio frames
-    let audio_frames: Arc<Mutex<HashMap<u16, Vec<f32>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let audio_frames: AudioFrames = Arc::new(Mutex::new(HashMap::new()));
 
     // Audio streams
-    let input_channels = input_device.default_input_config()
-        .map(|c| c.channels()).unwrap_or(1);
-    let output_channels = output_device.default_output_config()
-        .map(|c| c.channels()).unwrap_or(1);
+    let pipeline = engine::setup_audio_streams(input_device, output_device)?;
+    let mut mic_consumer = pipeline.mic_consumer;
+    let _input = pipeline._input_stream;
+    let _output = pipeline._output_stream;
 
-    #[cfg(target_os = "macos")]
-    let buf_size = cpal::BufferSize::Default;
-    #[cfg(not(target_os = "macos"))]
-    let buf_size = cpal::BufferSize::Fixed(FRAME_SIZE as u32);
-
-    let input_config = cpal::StreamConfig {
-        channels: input_channels,
-        sample_rate: cpal::SampleRate(48000),
-        buffer_size: buf_size.clone(),
-    };
-    let output_config = cpal::StreamConfig {
-        channels: output_channels,
-        sample_rate: cpal::SampleRate(48000),
-        buffer_size: buf_size,
-    };
-
-    let input_stream = input_device.build_input_stream(
-        &input_config,
-        move |data: &[f32], _: &cpal::InputCallbackInfo| {
-            if input_channels == 1 {
-                for &sample in data {
-                    let _ = mic_producer.try_push(sample);
-                }
-            } else {
-                for chunk in data.chunks(input_channels as usize) {
-                    let _ = mic_producer.try_push(chunk[0]);
-                }
-            }
-        },
-        |e| log_fmt!("[group] mic error: {e}"),
-        None,
-    ).map_err(|e| format!("Mic stream: {e}"))?;
-    input_stream.play().map_err(|e| format!("Mic play: {e}"))?;
-
-    let output_stream = output_device.build_output_stream(
-        &output_config,
-        move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            if output_channels == 1 {
-                for sample in data.iter_mut() {
-                    *sample = spk_consumer.try_pop().unwrap_or(0.0);
-                }
-            } else {
-                for chunk in data.chunks_mut(output_channels as usize) {
-                    let s = spk_consumer.try_pop().unwrap_or(0.0);
-                    for ch in chunk.iter_mut() {
-                        *ch = s;
-                    }
-                }
-            }
-        },
-        |e| log_fmt!("[group] speaker error: {e}"),
-        None,
-    ).map_err(|e| format!("Speaker stream: {e}"))?;
-    output_stream.play().map_err(|e| format!("Speaker play: {e}"))?;
+    // Mixer thread
+    engine::spawn_mixer_thread(running.clone(), audio_frames.clone(), pipeline.spk_producer);
 
     // ── Receiver thread (with failover detection) ──
     let recv_socket = socket.try_clone().unwrap();
@@ -674,7 +487,6 @@ pub fn start_as_member(
                         continue;
                     };
 
-                    // Any valid packet resets the leader timer
                     last_leader_packet = Instant::now();
                     failover_in_progress = false;
 
@@ -737,11 +549,9 @@ pub fn start_as_member(
                         }
 
                         PKT_GRP_LEADER => {
-                            // New leader announcement from failover
                             if let Some((_, _, data)) = crypto::grp_decrypt(&recv_cipher, &recv_buf[..n]) {
                                 if data.len() >= 32 {
                                     log_fmt!("[group] received new leader announcement from idx={}", sender_index);
-                                    // Update leader address to the sender
                                     *recv_leader_addr.lock().unwrap() = _from.to_string();
                                     last_leader_packet = Instant::now();
                                 }
@@ -764,7 +574,7 @@ pub fn start_as_member(
                             last_leader_packet.elapsed().as_secs());
 
                         match run_failover(
-                            &recv_socket, &recv_cipher, &recv_group,
+                            &recv_socket, &recv_group,
                             my_sender_index, &my_pubkey, &group_key,
                         ) {
                             Some(FailoverResult::NewLeaderAddr(addr)) => {
@@ -775,14 +585,12 @@ pub fn start_as_member(
                             }
                             Some(FailoverResult::BecomeLeader) => {
                                 log_fmt!("[group] failover: we become leader — stopping member engine");
-                                // Signal the GUI to restart as leader
                                 recv_running.store(false, Ordering::Relaxed);
                                 break;
                             }
                             None => {
                                 log_fmt!("[group] failover failed (internet down?)");
                                 failover_in_progress = false;
-                                // Keep trying — reset timer to avoid spinning
                                 last_leader_packet = Instant::now();
                             }
                         }
@@ -794,7 +602,7 @@ pub fn start_as_member(
         }
     });
 
-    // ── Sender thread (reads leader address from shared state) ──
+    // ── Sender thread ──
     let send_socket2 = socket.try_clone().unwrap();
     let sender_running = running.clone();
     let sender_mic_active = mic_active.clone();
@@ -878,41 +686,10 @@ pub fn start_as_member(
         }
     });
 
-    // ── Local mixer thread ──
-    let mixer_running = running.clone();
-    let mixer_audio = audio_frames;
-
-    let _mixer = thread::spawn(move || {
-        while mixer_running.load(Ordering::Relaxed) {
-            thread::sleep(std::time::Duration::from_millis(20));
-            let frames = mixer_audio.lock().unwrap();
-            if frames.is_empty() { continue; }
-
-            let mut mix = vec![0f32; FRAME_SIZE];
-            for frame in frames.values() {
-                for (i, &s) in frame.iter().enumerate() {
-                    if i < FRAME_SIZE {
-                        mix[i] += s;
-                    }
-                }
-            }
-            for s in mix.iter_mut() {
-                *s = s.clamp(-1.0, 1.0);
-            }
-            drop(frames);
-
-            for &s in &mix {
-                let _ = spk_producer.try_push(s);
-            }
-        }
-    });
-
-    let _input = input_stream;
-    let _output = output_stream;
-
     Ok(GroupCallInfo {
         group,
         role: GroupRole::Member,
+        channel_id: channel_id.to_string(),
         running,
         mic_active,
         chat_tx: chat_out_tx,
@@ -925,16 +702,13 @@ pub fn start_as_member(
 // ── Failover protocol ──
 
 enum FailoverResult {
-    /// Another member became leader; connect to this address.
     NewLeaderAddr(String),
-    /// We should become the new leader.
     BecomeLeader,
 }
 
-/// Run the full failover protocol (~5s): DNS probe → discovery → speed test → election.
+/// Run the full failover protocol (~5s): DNS probe -> discovery -> speed test -> election.
 fn run_failover(
     socket: &UdpSocket,
-    _cipher: &chacha20poly1305::ChaCha20Poly1305,
     group: &Group,
     my_sender_index: u16,
     my_pubkey: &[u8; 32],
@@ -942,7 +716,7 @@ fn run_failover(
 ) -> Option<FailoverResult> {
     use std::time::Duration;
 
-    // 1. DNS probe — check own internet
+    // 1. DNS probe
     if !dns_probe() {
         log_fmt!("[failover] DNS probe failed — own internet is down");
         return None;
@@ -970,7 +744,6 @@ fn run_failover(
 
     // 3. Collect ALIVE responses for 2 seconds
     let mut alive: Vec<(u16, SocketAddr, [u8; 32])> = Vec::new();
-    // Add ourselves
     alive.push((my_sender_index, socket.local_addr().unwrap_or_else(|_| "[::]:0".parse().unwrap()), *my_pubkey));
 
     let discover_end = Instant::now() + Duration::from_secs(2);
@@ -988,7 +761,6 @@ fn run_failover(
                                     .unwrap_or([0u8; 32]);
                                 alive.push((si, from, pk));
                                 log_fmt!("[failover] alive: idx={} from={}", si, from);
-                                // Echo ALIVE back so they see us too
                                 let pkt = crypto::grp_encrypt(
                                     &failover_cipher, my_sender_index, 0,
                                     PKT_GRP_ALIVE, &now_ns.to_le_bytes(),
@@ -1005,11 +777,10 @@ fn run_failover(
     log_fmt!("[failover] {} survivors found (including self)", alive.len());
 
     if alive.len() <= 1 {
-        // Only us — become leader by default
         return Some(FailoverResult::BecomeLeader);
     }
 
-    // 4. Speed test: send burst of 50×1200B to all alive peers
+    // 4. Speed test
     let burst_data = [0xABu8; 1200];
     for &(si, addr, _) in &alive {
         if si == my_sender_index { continue; }
@@ -1022,9 +793,9 @@ fn run_failover(
         }
     }
 
-    // 5. Collect speed test data + results for 2 seconds
+    // 5. Collect speed data + results for 2 seconds
     let mut recv_counts: HashMap<u16, (Instant, Instant, usize)> = HashMap::new();
-    let mut peer_speeds: HashMap<u16, u32> = HashMap::new(); // speeds others report about us
+    let mut peer_speeds: HashMap<u16, u32> = HashMap::new();
 
     let speed_end = Instant::now() + Duration::from_secs(2);
     while Instant::now() < speed_end {
@@ -1054,7 +825,7 @@ fn run_failover(
         }
     }
 
-    // Send our measured results back to each peer
+    // Send our measured results back
     for (&si, &(first, last, count)) in &recv_counts {
         let elapsed_ms = last.duration_since(first).as_millis().max(1) as u64;
         let kbps = (count as u64 * 1200 * 1000 / elapsed_ms / 1024) as u32;
@@ -1069,7 +840,6 @@ fn run_failover(
 
     // Wait briefly for final results
     thread::sleep(Duration::from_millis(500));
-    // Drain any remaining speed results
     while let Ok((n, _)) = socket.recv_from(&mut buf) {
         if n >= 3 {
             if let Some((pkt_type, si)) = crypto::grp_read_header(&buf[..n]) {
@@ -1085,7 +855,7 @@ fn run_failover(
         }
     }
 
-    // 6. Election: highest average upload speed, tie-break by lowest pubkey
+    // 6. Election
     let my_avg_speed = if peer_speeds.is_empty() {
         0u32
     } else {
@@ -1097,19 +867,15 @@ fn run_failover(
 
     for &(si, addr, pk) in &alive {
         if si == my_sender_index { continue; }
-        // We use 0 for other peers' speed (we only know what they measured about us)
-        // In practice, the peer with the best upload will be reported by multiple peers
         candidates.push((0, pk, si, Some(addr)));
     }
 
-    // Sort: highest speed first, then lowest pubkey
     candidates.sort_by(|a, b| {
         b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1))
     });
 
     if let Some((_, winner_pk, winner_idx, winner_addr)) = candidates.first() {
         if *winner_pk == *my_pubkey {
-            // We are the new leader — announce to all
             log_fmt!("[failover] WE are elected as new leader (speed={}KB/s)", my_avg_speed);
             for &(si, addr, _) in &alive {
                 if si == my_sender_index { continue; }
@@ -1141,14 +907,13 @@ fn dns_probe() -> bool {
     };
     probe.set_read_timeout(Some(std::time::Duration::from_secs(2))).ok();
 
-    // Minimal DNS query for google.com A record
     let dns_query: [u8; 28] = [
-        0x00, 0x01, 0x01, 0x00, // ID + flags
-        0x00, 0x01, 0x00, 0x00, // questions=1, answers=0
-        0x00, 0x00, 0x00, 0x00, // authority=0, additional=0
-        0x06, b'g', b'o', b'o', b'g', b'l', b'e', // "google"
-        0x03, b'c', b'o', b'm', 0x00, // "com" + root
-        0x00, 0x01, 0x00, 0x01, // type=A, class=IN
+        0x00, 0x01, 0x01, 0x00,
+        0x00, 0x01, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x06, b'g', b'o', b'o', b'g', b'l', b'e',
+        0x03, b'c', b'o', b'm', 0x00,
+        0x00, 0x01, 0x00, 0x01,
     ];
 
     if probe.send_to(&dns_query, "8.8.8.8:53").is_err() {
