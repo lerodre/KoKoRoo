@@ -58,6 +58,9 @@ pub const PKT_GRP_SPEED_RESULT: u8 = 0x3B; // failover: speed test result
 pub const PKT_GRP_MSG_CHAT: u8    = 0x3C; // group chat via messaging daemon (offline)
 pub const PKT_GRP_INVITE_ACK: u8  = 0x3D; // peer accepted group invite
 pub const PKT_GRP_INVITE_NACK: u8 = 0x3E; // peer rejected group invite
+pub const PKT_GRP_UPDATE: u8       = 0x3F; // group metadata update (full JSON)
+pub const PKT_GRP_AVATAR_OFFER: u8 = 0x40; // group avatar: group_id\n + sha256 + size
+pub const PKT_GRP_AVATAR_DATA: u8  = 0x41; // group avatar chunk: group_id\n + chunk_idx + data
 
 /// Size of an X25519 public key.
 pub const PUBKEY_SIZE: usize = 32;

@@ -63,6 +63,10 @@ pub enum MsgCommand {
     AcceptGroupInvite { contact_id: String, group_id: String },
     /// Reject an incoming group invite (send NACK to the inviter).
     RejectGroupInvite { contact_id: String, group_id: String },
+    /// Broadcast a group metadata update to all members of the group.
+    SendGroupUpdate { group_id: String, group_json: Vec<u8>, member_contacts: Vec<(String, std::net::SocketAddr, [u8; 32])> },
+    /// Broadcast a group avatar to all members of the group.
+    SendGroupAvatar { group_id: String, avatar_data: Vec<u8>, sha256: [u8; 32], member_contacts: Vec<(String, std::net::SocketAddr, [u8; 32])> },
     /// Voice call starting — daemon must release the UDP socket.
     YieldSocket,
     /// Voice call ended — daemon can reclaim the UDP socket.
@@ -106,4 +110,8 @@ pub enum MsgEvent {
     IncomingGroupChat { group_id: String, sender_fingerprint: String, sender_nickname: String, text: String },
     /// A peer rejected our group invite — remove them from the group.
     GroupInviteRejected { contact_id: String, group_id: String },
+    /// A group metadata update was received from an admin.
+    GroupUpdated { group_json: Vec<u8> },
+    /// A group avatar was fully received and saved to disk.
+    GroupAvatarReceived { group_id: String },
 }

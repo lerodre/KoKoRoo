@@ -249,6 +249,12 @@ pub struct HostelApp {
     pub(crate) group_selected_members: Vec<bool>,
     pub(crate) group_detail_idx: Option<usize>,
     pub(crate) group_detail_chat_input: String,
+    pub(crate) group_settings_idx: Option<usize>,
+    pub(crate) group_rename_input: String,
+    pub(crate) group_avatar_textures: HashMap<String, egui::TextureHandle>,
+    pub(crate) group_avatar_crop_group_id: Option<String>,
+    pub(crate) group_settings_invite_mode: bool,
+    pub(crate) group_settings_selected_members: Vec<bool>,
 
     // Group call state
     pub(crate) group_call_running: Arc<AtomicBool>,
@@ -447,6 +453,12 @@ impl HostelApp {
             group_selected_members: Vec::new(),
             group_detail_idx: None,
             group_detail_chat_input: String::new(),
+            group_settings_idx: None,
+            group_rename_input: String::new(),
+            group_avatar_textures: HashMap::new(),
+            group_avatar_crop_group_id: None,
+            group_settings_invite_mode: false,
+            group_settings_selected_members: Vec::new(),
             group_call_running: Arc::new(AtomicBool::new(false)),
             group_call_mic: Arc::new(AtomicBool::new(true)),
             group_call_hangup: None,
@@ -1104,6 +1116,45 @@ impl eframe::App for HostelApp {
                                 group::remove_member(grp, &contact.pubkey);
                             }
                         }
+                    }
+                    MsgEvent::GroupUpdated { group_json } => {
+                        if let Ok(received_group) = serde_json::from_slice::<Group>(&group_json) {
+                            let my_pubkey = self.identity.pubkey;
+                            // Check if we were removed from the group
+                            let still_member = received_group.members.iter().any(|m| m.pubkey == my_pubkey);
+                            if !still_member {
+                                // We were kicked — remove local group
+                                if let Some(pos) = self.groups.iter().position(|g| g.group_id == received_group.group_id) {
+                                    let gid = self.groups[pos].group_id.clone();
+                                    group::delete_group(&gid);
+                                    self.groups.remove(pos);
+                                    if self.group_detail_idx == Some(pos) {
+                                        self.group_detail_idx = None;
+                                        self.group_view = GroupView::List;
+                                    } else if let Some(active) = self.group_detail_idx {
+                                        if active > pos {
+                                            self.group_detail_idx = Some(active - 1);
+                                        }
+                                    }
+                                    if self.group_settings_idx == Some(pos) {
+                                        self.group_settings_idx = None;
+                                        self.group_view = GroupView::List;
+                                    }
+                                }
+                            } else {
+                                // Update existing group
+                                if let Some(grp) = self.groups.iter_mut().find(|g| g.group_id == received_group.group_id) {
+                                    grp.name = received_group.name;
+                                    grp.members = received_group.members;
+                                    grp.avatar_sha256 = received_group.avatar_sha256;
+                                    group::save_group(grp);
+                                }
+                            }
+                        }
+                    }
+                    MsgEvent::GroupAvatarReceived { group_id } => {
+                        // Invalidate cached group avatar texture
+                        self.group_avatar_textures.remove(&group_id);
                     }
                     MsgEvent::IncomingGroupChat { group_id, sender_fingerprint, sender_nickname, text } => {
                         // Save to group chat history

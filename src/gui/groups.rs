@@ -13,6 +13,7 @@ pub(crate) enum GroupView {
     List,
     Create,
     Detail,
+    Settings,
     Connecting,
     InCall,
 }
@@ -20,7 +21,7 @@ pub(crate) enum GroupView {
 impl HostelApp {
     pub(crate) fn draw_groups_tab(&mut self, ui: &mut egui::Ui) {
         match self.group_view {
-            GroupView::List | GroupView::Detail => {
+            GroupView::List | GroupView::Detail | GroupView::Settings => {
                 // 2-column layout: sidebar (group list) + panel (detail or placeholder)
                 let available = ui.available_rect_before_wrap();
                 let clip = ui.clip_rect();
@@ -52,14 +53,17 @@ impl HostelApp {
                 // Left panel: group sidebar
                 let mut open_idx: Option<usize> = None;
                 let mut delete_idx: Option<usize> = None;
+                let mut settings_idx: Option<usize> = None;
                 let mut go_create = false;
                 ui.allocate_new_ui(egui::UiBuilder::new().max_rect(list_rect), |ui| {
-                    self.draw_group_sidebar(ui, &mut open_idx, &mut delete_idx, &mut go_create);
+                    self.draw_group_sidebar(ui, &mut open_idx, &mut delete_idx, &mut settings_idx, &mut go_create);
                 });
 
-                // Right panel: detail or placeholder
+                // Right panel: detail, settings, or placeholder
                 ui.allocate_new_ui(egui::UiBuilder::new().max_rect(detail_rect), |ui| {
-                    if self.group_detail_idx.is_some() && self.group_view == GroupView::Detail {
+                    if self.group_settings_idx.is_some() && self.group_view == GroupView::Settings {
+                        self.draw_group_settings(ui);
+                    } else if self.group_detail_idx.is_some() && self.group_view == GroupView::Detail {
                         self.draw_group_detail(ui);
                     } else {
                         ui.add_space(40.0);
@@ -89,6 +93,16 @@ impl HostelApp {
                         }
                     }
                 }
+                if let Some(idx) = settings_idx {
+                    self.group_settings_idx = Some(idx);
+                    self.group_detail_idx = Some(idx);
+                    if idx < self.groups.len() {
+                        self.group_rename_input = self.groups[idx].name.clone();
+                    }
+                    self.group_settings_invite_mode = false;
+                    self.group_settings_selected_members = Vec::new();
+                    self.group_view = GroupView::Settings;
+                }
                 if let Some(idx) = open_idx {
                     self.group_detail_idx = Some(idx);
                     self.group_view = GroupView::Detail;
@@ -110,6 +124,7 @@ impl HostelApp {
         ui: &mut egui::Ui,
         open_idx: &mut Option<usize>,
         delete_idx: &mut Option<usize>,
+        settings_idx: &mut Option<usize>,
         go_create: &mut bool,
     ) {
         ui.add_space(6.0);
@@ -166,22 +181,56 @@ impl HostelApp {
                         );
                     }
 
-                    // Draw group name centered vertically in the row
+                    // Draw group name centered vertically in the row (leave room for ⋮ button)
+                    let dots_w = 20.0;
+                    let text_max_w = row_rect.width() - 8.0 - dots_w - 4.0;
                     let text_pos = egui::pos2(row_rect.min.x + 8.0, row_rect.center().y - 7.0);
-                    ui.painter().text(
-                        text_pos,
-                        egui::Align2::LEFT_TOP,
-                        &grp.name,
+                    let name_galley = ui.painter().layout(
+                        grp.name.clone(),
                         egui::FontId::proportional(12.0),
+                        self.settings.theme.text_primary(),
+                        text_max_w,
+                    );
+                    ui.painter().galley(
+                        text_pos,
+                        name_galley,
                         self.settings.theme.text_primary(),
                     );
 
+                    // ⋮ button (3 vertical dots)
+                    let dots_rect = egui::Rect::from_min_size(
+                        egui::pos2(row_rect.max.x - dots_w - 2.0, row_rect.min.y),
+                        egui::vec2(dots_w, row_rect.height()),
+                    );
+                    let dots_resp = ui.allocate_rect(dots_rect, egui::Sense::click());
+                    let dots_center = dots_rect.center();
+                    let dot_color = if dots_resp.hovered() {
+                        self.settings.theme.text_primary()
+                    } else {
+                        self.settings.theme.text_muted()
+                    };
+                    for dy in [-4.0_f32, 0.0, 4.0] {
+                        ui.painter().circle_filled(
+                            egui::pos2(dots_center.x, dots_center.y + dy),
+                            2.0,
+                            dot_color,
+                        );
+                    }
+                    if dots_resp.clicked() {
+                        *settings_idx = Some(idx);
+                    }
+
+                    // Click on rest of row → open Detail (chat)
                     if row_resp.clicked() {
                         *open_idx = Some(idx);
                     }
 
                     // Right-click context menu
                     row_resp.context_menu(|ui| {
+                        if ui.button("Settings").clicked() {
+                            *settings_idx = Some(idx);
+                            ui.close_menu();
+                        }
                         if ui.button("Delete").clicked() {
                             *delete_idx = Some(idx);
                             ui.close_menu();
@@ -1014,6 +1063,7 @@ impl HostelApp {
             members,
             group_key,
             next_sender_index: next_index,
+            avatar_sha256: None,
         };
 
         group::save_group(&grp);
@@ -1048,6 +1098,460 @@ impl HostelApp {
         self.group_view = GroupView::List;
         self.group_create_name.clear();
     }
+
+    fn draw_group_settings(&mut self, ui: &mut egui::Ui) {
+        let idx = match self.group_settings_idx {
+            Some(i) if i < self.groups.len() => i,
+            _ => {
+                self.group_view = GroupView::List;
+                return;
+            }
+        };
+
+        let grp_id = self.groups[idx].group_id.clone();
+        let my_pubkey = self.identity.pubkey;
+        let is_admin = self.groups[idx].members.iter().any(|m| m.pubkey == my_pubkey && m.is_admin);
+        let member_count = self.groups[idx].members.len();
+
+        let mut actions: Vec<GroupSettingsAction> = Vec::new();
+
+        egui::ScrollArea::vertical()
+            .id_salt("group_settings_scroll")
+            .show(ui, |ui| {
+                ui.add_space(6.0);
+
+                // Back to chat button
+                if ui.button("<- Back to Chat").clicked() {
+                    self.group_view = GroupView::Detail;
+                    self.group_settings_idx = None;
+                }
+
+                ui.add_space(12.0);
+
+                // ── Group avatar (96px circle) ──
+                let avatar_size = 96.0;
+                ui.vertical_centered(|ui| {
+                    let (rect, response) = ui.allocate_exact_size(
+                        egui::vec2(avatar_size, avatar_size),
+                        if is_admin { egui::Sense::click() } else { egui::Sense::hover() },
+                    );
+                    let center = rect.center();
+                    let radius = avatar_size / 2.0;
+
+                    // Load group avatar texture lazily
+                    if !self.group_avatar_textures.contains_key(&grp_id) {
+                        if let Some(bytes) = avatar::load_group_avatar(&grp_id) {
+                            if let Some(tex) = load_avatar_texture(
+                                ui.ctx(),
+                                &format!("grp_avatar_{}", &grp_id[..8.min(grp_id.len())]),
+                                &bytes,
+                                96,
+                            ) {
+                                self.group_avatar_textures.insert(grp_id.clone(), tex);
+                            }
+                        }
+                    }
+
+                    if let Some(tex) = self.group_avatar_textures.get(&grp_id) {
+                        let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                        ui.painter().image(tex.id(), rect, uv, egui::Color32::WHITE);
+                    } else {
+                        // Placeholder circle with group initial
+                        paint_initial_avatar(ui.painter(), rect, &self.groups[idx].name, &self.settings.theme);
+                    }
+
+                    // Hover effect (admin only)
+                    if is_admin && response.hovered() {
+                        ui.painter().circle_filled(center, radius, egui::Color32::from_black_alpha(40));
+                        ui.painter().text(
+                            center,
+                            egui::Align2::CENTER_CENTER,
+                            "Change",
+                            egui::FontId::proportional(14.0),
+                            egui::Color32::WHITE,
+                        );
+                    }
+
+                    if is_admin && response.clicked() {
+                        actions.push(GroupSettingsAction::PickAvatar);
+                    }
+
+                    if is_admin {
+                        response.on_hover_cursor(egui::CursorIcon::PointingHand);
+                        ui.label(
+                            egui::RichText::new("Click to change group photo")
+                                .size(11.0)
+                                .color(self.settings.theme.text_muted()),
+                        );
+                    }
+                });
+
+                ui.add_space(12.0);
+
+                // ── Group name (editable if admin) ──
+                ui.horizontal(|ui| {
+                    ui.label("Group name:");
+                    if is_admin {
+                        let te = egui::TextEdit::singleline(&mut self.group_rename_input)
+                            .desired_width(180.0)
+                            .hint_text("Group name…");
+                        ui.add(te);
+                        let name_changed = self.group_rename_input.trim() != self.groups[idx].name
+                            && !self.group_rename_input.trim().is_empty();
+                        if name_changed {
+                            if ui.button("Save").clicked() {
+                                actions.push(GroupSettingsAction::Rename);
+                            }
+                        }
+                    } else {
+                        ui.strong(&self.groups[idx].name);
+                    }
+                });
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                // ── Members section ──
+                ui.label(egui::RichText::new(format!("Members ({})", member_count)).strong().size(13.0));
+                ui.add_space(4.0);
+
+                let members: Vec<GroupMember> = self.groups[idx].members.clone();
+                let color_even = self.settings.theme.panel_bg();
+                let color_odd = self.settings.theme.sidebar_bg();
+
+                for (i, member) in members.iter().enumerate() {
+                    let bg = if i % 2 == 0 { color_even } else { color_odd };
+                    let is_me = member.pubkey == my_pubkey;
+
+                    let frame = egui::Frame::none()
+                        .fill(bg)
+                        .inner_margin(egui::Margin::symmetric(8.0, 4.0));
+                    frame.show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            // Member avatar (small)
+                            let av_size = 24.0;
+                            let (av_rect, _) = ui.allocate_exact_size(
+                                egui::vec2(av_size, av_size),
+                                egui::Sense::hover(),
+                            );
+                            let mut drew = false;
+                            if is_me {
+                                if let Some(tex) = &self.own_avatar_texture {
+                                    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                                    ui.painter().image(tex.id(), av_rect, uv, egui::Color32::WHITE);
+                                    drew = true;
+                                }
+                            } else {
+                                let cid = identity::derive_contact_id(&my_pubkey, &member.pubkey);
+                                if !self.contact_avatar_textures.contains_key(&cid) {
+                                    if let Some(bytes) = avatar::load_contact_avatar(&cid) {
+                                        if let Some(tex) = load_avatar_texture(
+                                            ui.ctx(),
+                                            &format!("gs_av_{}", &cid[..8.min(cid.len())]),
+                                            &bytes,
+                                            32,
+                                        ) {
+                                            self.contact_avatar_textures.insert(cid.clone(), tex);
+                                        }
+                                    }
+                                }
+                                if let Some(tex) = self.contact_avatar_textures.get(&cid) {
+                                    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                                    ui.painter().image(tex.id(), av_rect, uv, egui::Color32::WHITE);
+                                    drew = true;
+                                }
+                            }
+                            if !drew {
+                                paint_initial_avatar(ui.painter(), av_rect, &member.nickname, &self.settings.theme);
+                            }
+
+                            // Nickname
+                            ui.label(egui::RichText::new(&member.nickname).strong());
+
+                            // Role badge
+                            let role_text = if member.is_admin { "admin" } else { "member" };
+                            let role_color = if member.is_admin {
+                                self.settings.theme.btn_primary()
+                            } else {
+                                self.settings.theme.text_muted()
+                            };
+                            ui.label(egui::RichText::new(role_text).size(11.0).color(role_color));
+
+                            if is_me {
+                                ui.label(egui::RichText::new("(you)").size(11.0).color(self.settings.theme.text_muted()));
+                            }
+
+                            // Admin actions (only for other members, only if we are admin)
+                            if is_admin && !is_me {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    // Kick button
+                                    let kick_btn = egui::Button::new(
+                                        egui::RichText::new("X").size(12.0).color(self.settings.theme.btn_negative()),
+                                    ).min_size(egui::vec2(24.0, 20.0));
+                                    if ui.add(kick_btn).on_hover_text("Remove from group").clicked() {
+                                        actions.push(GroupSettingsAction::Kick(i));
+                                    }
+
+                                    // Promote/Demote button
+                                    if member.is_admin {
+                                        if ui.small_button("Demote").clicked() {
+                                            actions.push(GroupSettingsAction::Demote(i));
+                                        }
+                                    } else {
+                                        if ui.small_button("Promote").clicked() {
+                                            actions.push(GroupSettingsAction::Promote(i));
+                                        }
+                                    }
+                                });
+                            }
+                        });
+                    });
+                }
+
+                ui.add_space(8.0);
+
+                // ── Invite Members ──
+                if is_admin {
+                    if ui.button("+ Invite Members").clicked() {
+                        self.group_settings_invite_mode = !self.group_settings_invite_mode;
+                        if self.group_settings_invite_mode {
+                            self.group_settings_selected_members = vec![false; self.contacts.len()];
+                        }
+                    }
+
+                    if self.group_settings_invite_mode {
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("Select contacts to invite:").size(12.0));
+
+                        // Ensure vec matches
+                        if self.group_settings_selected_members.len() != self.contacts.len() {
+                            self.group_settings_selected_members = vec![false; self.contacts.len()];
+                        }
+
+                        let existing_pubkeys: Vec<[u8; 32]> = self.groups[idx].members.iter().map(|m| m.pubkey).collect();
+
+                        let mut invite_count = 0;
+                        egui::ScrollArea::vertical().max_height(150.0).id_salt("invite_contacts").show(ui, |ui| {
+                            for (ci, contact) in self.contacts.iter().enumerate() {
+                                // Skip contacts already in the group
+                                if existing_pubkeys.contains(&contact.pubkey) {
+                                    continue;
+                                }
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(&mut self.group_settings_selected_members[ci], "");
+                                    ui.label(&contact.nickname);
+                                    ui.label(
+                                        egui::RichText::new(&contact.fingerprint)
+                                            .size(11.0)
+                                            .color(self.settings.theme.text_muted()),
+                                    );
+                                });
+                                if self.group_settings_selected_members[ci] {
+                                    invite_count += 1;
+                                }
+                            }
+                        });
+
+                        if invite_count > 0 {
+                            if ui.button(format!("Send {} Invite(s)", invite_count)).clicked() {
+                                actions.push(GroupSettingsAction::InviteSelected);
+                            }
+                        }
+                    }
+                }
+
+                ui.add_space(16.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                // ── Delete Group ──
+                let delete_btn = egui::Button::new(
+                    egui::RichText::new("Delete Group")
+                        .color(self.settings.theme.btn_negative()),
+                );
+                if ui.add(delete_btn).clicked() {
+                    actions.push(GroupSettingsAction::Delete);
+                }
+            });
+
+        // Process deferred actions
+        for action in actions {
+            match action {
+                GroupSettingsAction::Rename => {
+                    let new_name = self.group_rename_input.trim().to_string();
+                    self.groups[idx].name = new_name;
+                    group::save_group(&self.groups[idx]);
+                    self.broadcast_group_update(idx);
+                }
+                GroupSettingsAction::Kick(member_idx) => {
+                    if member_idx < self.groups[idx].members.len() {
+                        let kicked_pubkey = self.groups[idx].members[member_idx].pubkey;
+                        group::remove_member(&mut self.groups[idx], &kicked_pubkey);
+                        self.broadcast_group_update(idx);
+                    }
+                }
+                GroupSettingsAction::Promote(member_idx) => {
+                    if member_idx < self.groups[idx].members.len() {
+                        self.groups[idx].members[member_idx].is_admin = true;
+                        group::save_group(&self.groups[idx]);
+                        self.broadcast_group_update(idx);
+                    }
+                }
+                GroupSettingsAction::Demote(member_idx) => {
+                    if member_idx < self.groups[idx].members.len() {
+                        self.groups[idx].members[member_idx].is_admin = false;
+                        group::save_group(&self.groups[idx]);
+                        self.broadcast_group_update(idx);
+                    }
+                }
+                GroupSettingsAction::PickAvatar => {
+                    self.group_avatar_crop_group_id = Some(grp_id.clone());
+                    self.open_avatar_picker();
+                }
+                GroupSettingsAction::InviteSelected => {
+                    self.invite_members_to_group(idx);
+                    self.group_settings_invite_mode = false;
+                }
+                GroupSettingsAction::Delete => {
+                    let gid = self.groups[idx].group_id.clone();
+                    group::delete_group(&gid);
+                    self.groups.remove(idx);
+                    self.group_settings_idx = None;
+                    self.group_detail_idx = None;
+                    self.group_view = GroupView::List;
+                }
+            }
+        }
+    }
+
+    /// Broadcast a group metadata update to all members of a group.
+    pub(crate) fn broadcast_group_update(&self, group_idx: usize) {
+        if group_idx >= self.groups.len() {
+            return;
+        }
+        let grp = &self.groups[group_idx];
+        let group_json = match serde_json::to_vec(grp) {
+            Ok(j) => j,
+            Err(_) => return,
+        };
+        let member_contacts = self.group_member_contacts(group_idx);
+        if let Some(tx) = &self.msg_cmd_tx {
+            tx.send(crate::messaging::MsgCommand::SendGroupUpdate {
+                group_id: grp.group_id.clone(),
+                group_json,
+                member_contacts,
+            }).ok();
+        }
+    }
+
+    /// Broadcast a group avatar to all members of a group.
+    pub(crate) fn broadcast_group_avatar(&self, group_idx: usize, avatar_data: Vec<u8>, sha256: [u8; 32]) {
+        if group_idx >= self.groups.len() {
+            return;
+        }
+        let grp = &self.groups[group_idx];
+        let member_contacts = self.group_member_contacts(group_idx);
+        if let Some(tx) = &self.msg_cmd_tx {
+            tx.send(crate::messaging::MsgCommand::SendGroupAvatar {
+                group_id: grp.group_id.clone(),
+                avatar_data,
+                sha256,
+                member_contacts,
+            }).ok();
+        }
+    }
+
+    /// Build the (contact_id, addr, pubkey) list for all members of a group, excluding ourselves.
+    fn group_member_contacts(&self, group_idx: usize) -> Vec<(String, std::net::SocketAddr, [u8; 32])> {
+        let grp = &self.groups[group_idx];
+        let my_pubkey = self.identity.pubkey;
+        let mut result = Vec::new();
+        for member in &grp.members {
+            if member.pubkey == my_pubkey {
+                continue;
+            }
+            if member.address.is_empty() || member.port.is_empty() {
+                continue;
+            }
+            let addr_str = format!("[{}]:{}", member.address, member.port);
+            if let Ok(addr) = addr_str.parse() {
+                let contact_id = identity::derive_contact_id(&my_pubkey, &member.pubkey);
+                result.push((contact_id, addr, member.pubkey));
+            }
+        }
+        result
+    }
+
+    /// Invite selected contacts to an existing group.
+    fn invite_members_to_group(&mut self, group_idx: usize) {
+        if group_idx >= self.groups.len() {
+            return;
+        }
+        let my_pubkey = self.identity.pubkey;
+        let existing_pubkeys: Vec<[u8; 32]> = self.groups[group_idx].members.iter().map(|m| m.pubkey).collect();
+
+        // Collect contacts to invite
+        let mut new_members = Vec::new();
+        for (ci, contact) in self.contacts.iter().enumerate() {
+            if self.group_settings_selected_members.get(ci).copied().unwrap_or(false)
+                && !existing_pubkeys.contains(&contact.pubkey)
+            {
+                let next_idx = self.groups[group_idx].next_sender_index;
+                new_members.push((ci, GroupMember {
+                    pubkey: contact.pubkey,
+                    nickname: contact.nickname.clone(),
+                    fingerprint: contact.fingerprint.clone(),
+                    sender_index: next_idx,
+                    address: contact.last_address.clone(),
+                    port: contact.last_port.clone(),
+                    is_admin: false,
+                }));
+                self.groups[group_idx].next_sender_index += 1;
+            }
+        }
+
+        // Add new members to the group
+        for (_, member) in &new_members {
+            self.groups[group_idx].members.push(member.clone());
+        }
+        group::save_group(&self.groups[group_idx]);
+
+        // Send invites to new members
+        if let Ok(group_json) = serde_json::to_vec(&self.groups[group_idx]) {
+            if let Some(tx) = &self.msg_cmd_tx {
+                for (_, member) in &new_members {
+                    if member.address.is_empty() || member.port.is_empty() {
+                        continue;
+                    }
+                    let addr_str = format!("[{}]:{}", member.address, member.port);
+                    if let Ok(addr) = addr_str.parse() {
+                        let contact_id = identity::derive_contact_id(&my_pubkey, &member.pubkey);
+                        tx.send(crate::messaging::MsgCommand::SendGroupInvite {
+                            contact_id,
+                            peer_addr: addr,
+                            peer_pubkey: member.pubkey,
+                            group_json: group_json.clone(),
+                        }).ok();
+                    }
+                }
+            }
+        }
+
+        // Broadcast update to existing members
+        self.broadcast_group_update(group_idx);
+    }
+}
+
+/// Deferred actions from group settings UI.
+enum GroupSettingsAction {
+    Rename,
+    Kick(usize),
+    Promote(usize),
+    Demote(usize),
+    PickAvatar,
+    InviteSelected,
+    Delete,
 }
 
 /// Paint a fallback avatar: colored circle with the first letter of the nickname.

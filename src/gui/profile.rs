@@ -144,7 +144,7 @@ impl HostelApp {
         }
     }
 
-    fn open_avatar_picker(&mut self) {
+    pub(crate) fn open_avatar_picker(&mut self) {
         let picked = std::thread::spawn(|| {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -379,16 +379,37 @@ impl HostelApp {
                 let cy = self.crop_offset.1 as u32;
                 let cs = self.crop_size as u32;
                 if let Ok(png_data) = avatar::process_avatar(bytes, cx, cy, cs) {
-                    if avatar::save_own_avatar(&png_data).is_ok() {
-                        // Force texture reload
-                        self.own_avatar_texture = None;
-                        // Broadcast to connected peers
-                        let sha256 = avatar::avatar_sha256(&png_data);
-                        if let Some(tx) = &self.msg_cmd_tx {
-                            tx.send(MsgCommand::BroadcastAvatar {
-                                avatar_data: png_data,
-                                sha256,
-                            }).ok();
+                    if let Some(ref group_id) = self.group_avatar_crop_group_id.clone() {
+                        // Save as group avatar
+                        if avatar::save_group_avatar(group_id, &png_data).is_ok() {
+                            // Update group: avatar_sha256
+                            let sha256 = avatar::avatar_sha256(&png_data);
+                            if let Some(grp) = self.groups.iter_mut().find(|g| &g.group_id == group_id) {
+                                grp.avatar_sha256 = Some(sha256);
+                                crate::group::save_group(grp);
+                            }
+                            // Invalidate texture cache
+                            self.group_avatar_textures.remove(group_id);
+                            // Find group index for broadcasting
+                            if let Some(gidx) = self.groups.iter().position(|g| &g.group_id == group_id) {
+                                self.broadcast_group_update(gidx);
+                                self.broadcast_group_avatar(gidx, png_data, sha256);
+                            }
+                        }
+                        self.group_avatar_crop_group_id = None;
+                    } else {
+                        // Personal avatar
+                        if avatar::save_own_avatar(&png_data).is_ok() {
+                            // Force texture reload
+                            self.own_avatar_texture = None;
+                            // Broadcast to connected peers
+                            let sha256 = avatar::avatar_sha256(&png_data);
+                            if let Some(tx) = &self.msg_cmd_tx {
+                                tx.send(MsgCommand::BroadcastAvatar {
+                                    avatar_data: png_data,
+                                    sha256,
+                                }).ok();
+                            }
                         }
                     }
                 }
@@ -401,6 +422,7 @@ impl HostelApp {
             self.crop_source_bytes = None;
             self.crop_source_texture = None;
             self.crop_source_dims = (0, 0);
+            self.group_avatar_crop_group_id = None;
         }
     }
 }

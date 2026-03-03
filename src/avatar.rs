@@ -115,6 +115,33 @@ pub fn avatar_sha256(data: &[u8]) -> [u8; 32] {
     hash
 }
 
+// ── Group avatar storage ──
+
+/// Path to a group's avatar.
+pub fn group_avatar_path(group_id: &str) -> PathBuf {
+    data_dir().join("groups").join("avatars").join(format!("{group_id}.png"))
+}
+
+/// Save a group's avatar PNG to ~/.hostelD/groups/avatars/{group_id}.png.
+pub fn save_group_avatar(group_id: &str, data: &[u8]) -> Result<(), String> {
+    let dir = data_dir().join("groups").join("avatars");
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+    fs::write(group_avatar_path(group_id), data).map_err(|e| format!("write: {e}"))
+}
+
+/// Read a group's avatar bytes from disk, if it exists.
+pub fn load_group_avatar(group_id: &str) -> Option<Vec<u8>> {
+    fs::read(group_avatar_path(group_id)).ok()
+}
+
+/// Delete a group's avatar from disk.
+pub fn delete_group_avatar(group_id: &str) {
+    let path = group_avatar_path(group_id);
+    if path.exists() {
+        fs::remove_file(path).ok();
+    }
+}
+
 /// Apply a circular alpha mask with anti-aliased edges to an RgbaImage.
 /// Pixels outside the inscribed circle get alpha=0, edge pixels get smooth falloff.
 pub fn apply_circle_mask(img: &mut RgbaImage) {

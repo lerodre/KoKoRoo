@@ -32,6 +32,15 @@ pub struct AvatarRecvState {
     pub contact_id: String,
 }
 
+/// State for an outgoing group avatar send to one peer for one group.
+pub struct GroupAvatarSendState {
+    pub avatar_data: Vec<u8>,
+    pub sha256: [u8; 32],
+    pub sent: bool,
+    pub sent_at: Instant,
+    pub retries: u8,
+}
+
 pub(super) const AVATAR_CHUNK_SIZE: usize = 1200;
 pub(super) const AVATAR_RECV_TIMEOUT: Duration = Duration::from_secs(30);
 pub(super) const AVATAR_SEND_RETRY_INTERVAL: Duration = Duration::from_secs(5);
@@ -144,6 +153,10 @@ pub struct MsgDaemon {
     pub(super) next_transfer_id: u32,
     /// Last time progress events were emitted.
     pub(super) last_progress_emit: Instant,
+    /// Pending incoming group avatar receives: (peer_addr, group_id) -> state.
+    pub(super) group_avatar_recvs: HashMap<(SocketAddr, String), AvatarRecvState>,
+    /// Pending outgoing group avatar sends: (contact_id, group_id) -> state.
+    pub(super) group_avatar_sends: HashMap<(String, String), GroupAvatarSendState>,
 }
 
 impl MsgDaemon {
@@ -189,6 +202,8 @@ impl MsgDaemon {
             last_progress_emit: Instant::now(),
             avatar_sends: HashMap::new(),
             avatar_recvs: HashMap::new(),
+            group_avatar_recvs: HashMap::new(),
+            group_avatar_sends: HashMap::new(),
         }
     }
 

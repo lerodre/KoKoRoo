@@ -276,6 +276,42 @@ impl MsgDaemon {
         // Timeout stale avatar receives
         self.avatar_recvs.retain(|_, recv| recv.started_at.elapsed() < AVATAR_RECV_TIMEOUT);
 
+        // ── Group avatar send ticking ──
+        if let Some(ref socket) = self.socket {
+            let mut grp_avatar_done: Vec<(String, String)> = Vec::new();
+            for ((contact_id, group_id), state) in &mut self.group_avatar_sends {
+                if state.sent {
+                    if state.sent_at.elapsed() >= AVATAR_SEND_RETRY_INTERVAL {
+                        if state.retries >= AVATAR_MAX_RETRIES {
+                            grp_avatar_done.push((contact_id.clone(), group_id.clone()));
+                            continue;
+                        }
+                        state.sent = false;
+                        state.retries += 1;
+                    }
+                    continue;
+                }
+                if let Some(addr) = self.contact_addrs.get(contact_id) {
+                    if let Some(peer) = self.peers.get(addr) {
+                        if peer.is_connected() {
+                            protocol::send_group_avatar_offer(
+                                peer, socket, group_id, &state.sha256, state.avatar_data.len() as u32,
+                            );
+                            protocol::send_group_avatar_chunks(peer, socket, group_id, &state.avatar_data);
+                            state.sent = true;
+                            state.sent_at = Instant::now();
+                        }
+                    }
+                }
+            }
+            for key in grp_avatar_done {
+                self.group_avatar_sends.remove(&key);
+            }
+        }
+
+        // Timeout stale group avatar receives
+        self.group_avatar_recvs.retain(|_, recv| recv.started_at.elapsed() < AVATAR_RECV_TIMEOUT);
+
         // Keepalives
         if now.duration_since(self.last_keepalive) > KEEPALIVE_INTERVAL {
             self.last_keepalive = now;

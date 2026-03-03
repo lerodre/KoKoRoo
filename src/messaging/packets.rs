@@ -13,6 +13,7 @@ use crate::crypto::{
     PKT_MSG_AVATAR_OFFER, PKT_MSG_AVATAR_DATA,
     PKT_GRP_INVITE, PKT_GRP_MSG_CHAT,
     PKT_GRP_INVITE_ACK, PKT_GRP_INVITE_NACK,
+    PKT_GRP_UPDATE, PKT_GRP_AVATAR_OFFER, PKT_GRP_AVATAR_DATA,
 };
 use crate::identity::{self};
 use crate::filetransfer;
@@ -889,6 +890,92 @@ impl MsgDaemon {
                                 contact_id: cid,
                                 group_id,
                             }).ok();
+                        }
+                    }
+                }
+
+                PKT_GRP_UPDATE => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some(group_json) = protocol::handle_group_update(data, peer) {
+                            peer.touch();
+                            // Security: verify sender is admin in our LOCAL copy
+                            let sender_pubkey = peer.peer_pubkey;
+                            if let Ok(received_group) = serde_json::from_slice::<crate::group::Group>(&group_json) {
+                                if let Some(local_group) = crate::group::load_group(&received_group.group_id) {
+                                    let is_admin = local_group.members.iter().any(|m| m.pubkey == sender_pubkey && m.is_admin);
+                                    if is_admin {
+                                        log_fmt!("[daemon] group update from admin for group={}", received_group.group_id);
+                                        self.event_tx.send(MsgEvent::GroupUpdated { group_json }).ok();
+                                    } else {
+                                        log_fmt!("[daemon] WARNING: group update from non-admin, discarding");
+                                    }
+                                } else {
+                                    log_fmt!("[daemon] group update for unknown group={}, discarding", received_group.group_id);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                PKT_GRP_AVATAR_OFFER => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((group_id, sha256, total_size)) = protocol::handle_group_avatar_offer(data, peer) {
+                            peer.touch();
+                            // Security: verify sender is admin in our LOCAL copy
+                            let sender_pubkey = peer.peer_pubkey;
+                            if let Some(local_group) = crate::group::load_group(&group_id) {
+                                let is_admin = local_group.members.iter().any(|m| m.pubkey == sender_pubkey && m.is_admin);
+                                if is_admin {
+                                    let chunk_size = super::daemon::AVATAR_CHUNK_SIZE as u32;
+                                    let total_chunks = ((total_size + chunk_size - 1) / chunk_size) as u16;
+                                    log_fmt!("[daemon] group avatar offer for group={} size={} chunks={}", group_id, total_size, total_chunks);
+                                    self.group_avatar_recvs.insert(
+                                        (from, group_id.clone()),
+                                        super::daemon::AvatarRecvState {
+                                            sha256,
+                                            total_size,
+                                            total_chunks,
+                                            chunks: std::collections::HashMap::new(),
+                                            started_at: Instant::now(),
+                                            contact_id: group_id,
+                                        },
+                                    );
+                                } else {
+                                    log_fmt!("[daemon] WARNING: group avatar offer from non-admin, discarding");
+                                }
+                            }
+                        }
+                    }
+                }
+
+                PKT_GRP_AVATAR_DATA => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((group_id, chunk_index, chunk_data)) = protocol::handle_group_avatar_data(data, peer) {
+                            peer.touch();
+                            let key = (from, group_id.clone());
+                            if let Some(recv) = self.group_avatar_recvs.get_mut(&key) {
+                                recv.chunks.insert(chunk_index, chunk_data);
+                                // Check if all chunks received
+                                if recv.chunks.len() as u16 >= recv.total_chunks {
+                                    // Reassemble
+                                    let mut full_data = Vec::with_capacity(recv.total_size as usize);
+                                    for i in 0..recv.total_chunks {
+                                        if let Some(chunk) = recv.chunks.get(&i) {
+                                            full_data.extend_from_slice(chunk);
+                                        }
+                                    }
+                                    // Verify SHA-256
+                                    let hash = crate::avatar::avatar_sha256(&full_data);
+                                    if hash == recv.sha256 && crate::avatar::validate_received_avatar(&full_data) {
+                                        crate::avatar::save_group_avatar(&group_id, &full_data).ok();
+                                        log_fmt!("[daemon] group avatar saved for group={}", group_id);
+                                        self.event_tx.send(MsgEvent::GroupAvatarReceived { group_id }).ok();
+                                    } else {
+                                        log_fmt!("[daemon] group avatar hash mismatch or invalid");
+                                    }
+                                    self.group_avatar_recvs.remove(&key);
+                                }
+                            }
                         }
                     }
                 }

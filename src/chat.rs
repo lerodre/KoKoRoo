@@ -184,7 +184,7 @@ impl ChatHistory {
         let secs_in_day = timestamp % 86400;
         let hours = secs_in_day / 3600;
         let minutes = (secs_in_day % 3600) / 60;
-        format!("{hours:02}:{minutes:02}")
+        format!("{hours:02}:{minutes:02} UTC")
     }
 }
 

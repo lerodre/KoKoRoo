@@ -538,6 +538,55 @@ impl MsgDaemon {
                     });
                 }
 
+                MsgCommand::SendGroupUpdate { group_id, group_json, member_contacts } => {
+                    log_fmt!("[daemon] SendGroupUpdate group={}", group_id);
+                    if let Some(ref socket) = self.socket {
+                        for (contact_id, peer_addr, peer_pubkey) in &member_contacts {
+                            let mut sent = false;
+                            if let Some(addr) = self.contact_addrs.get(contact_id) {
+                                if let Some(peer) = self.peers.get(addr) {
+                                    if peer.is_connected() {
+                                        protocol::send_group_update(peer, socket, &group_json).ok();
+                                        sent = true;
+                                    }
+                                }
+                            }
+                            if !sent {
+                                // Peer offline — enqueue as pending invite (update replaces previous)
+                                let store = self.pending_invites.entry(contact_id.clone())
+                                    .or_insert_with(|| super::pending_invites::PendingInviteStore::load(contact_id, &self.identity.secret));
+                                store.enqueue(group_id.clone(), group_json.clone());
+                                // Initiate handshake if not already connecting
+                                if !self.contact_addrs.contains_key(contact_id) {
+                                    if let Some(session) = protocol::initiate_handshake(
+                                        socket, contact_id, *peer_addr, *peer_pubkey,
+                                    ) {
+                                        self.contact_addrs.insert(contact_id.clone(), *peer_addr);
+                                        self.hello_retries.insert(*peer_addr, 0);
+                                        self.peers.insert(*peer_addr, session);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                MsgCommand::SendGroupAvatar { group_id, avatar_data, sha256, member_contacts } => {
+                    log_fmt!("[daemon] SendGroupAvatar group={} size={}", group_id, avatar_data.len());
+                    for (contact_id, _peer_addr, _peer_pubkey) in &member_contacts {
+                        self.group_avatar_sends.insert(
+                            (contact_id.clone(), group_id.clone()),
+                            super::daemon::GroupAvatarSendState {
+                                avatar_data: avatar_data.clone(),
+                                sha256,
+                                sent: false,
+                                sent_at: Instant::now(),
+                                retries: 0,
+                            },
+                        );
+                    }
+                }
+
                 MsgCommand::SendMessage { contact_id, peer_addr, peer_pubkey, text } => {
                     // Ensure outbox exists
                     let outbox = self.outboxes.entry(contact_id.clone())

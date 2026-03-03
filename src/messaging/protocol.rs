@@ -9,6 +9,7 @@ use crate::crypto::{
     PKT_MSG_AVATAR_OFFER, PKT_MSG_AVATAR_DATA,
     PKT_GRP_INVITE, PKT_GRP_MSG_CHAT,
     PKT_GRP_INVITE_ACK, PKT_GRP_INVITE_NACK,
+    PKT_GRP_UPDATE, PKT_GRP_AVATAR_OFFER, PKT_GRP_AVATAR_DATA,
 };
 use crate::identity::Identity;
 
@@ -610,4 +611,111 @@ pub fn handle_group_invite_nack(data: &[u8], peer: &mut PeerSession) -> Option<S
         return None;
     }
     Some(String::from_utf8_lossy(&plain).to_string())
+}
+
+// ── Group update protocol ──
+
+/// Send a group metadata update (full Group JSON) via existing pairwise session.
+pub fn send_group_update(
+    peer: &PeerSession,
+    socket: &UdpSocket,
+    group_json: &[u8],
+) -> Result<(), String> {
+    let pkt = peer.encrypt_packet(PKT_GRP_UPDATE, group_json).ok_or("no session")?;
+    socket.send_to(&pkt, peer.peer_addr).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Handle an incoming group update. Returns the raw Group JSON bytes.
+pub fn handle_group_update(data: &[u8], peer: &mut PeerSession) -> Option<Vec<u8>> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
+    if pkt_type != PKT_GRP_UPDATE || plain.is_empty() {
+        return None;
+    }
+    Some(plain)
+}
+
+// ── Group avatar protocol ──
+
+/// Send a group AVATAR_OFFER. Payload: group_id + '\n' + [32B sha256][4B total_size LE].
+pub fn send_group_avatar_offer(
+    peer: &PeerSession,
+    socket: &UdpSocket,
+    group_id: &str,
+    sha256: &[u8; 32],
+    total_size: u32,
+) {
+    let mut payload = Vec::with_capacity(group_id.len() + 1 + 36);
+    payload.extend_from_slice(group_id.as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(sha256);
+    payload.extend_from_slice(&total_size.to_le_bytes());
+    if let Some(pkt) = peer.encrypt_packet(PKT_GRP_AVATAR_OFFER, &payload) {
+        socket.send_to(&pkt, peer.peer_addr).ok();
+    }
+}
+
+/// Handle an incoming group AVATAR_OFFER. Returns (group_id, sha256, total_size).
+pub fn handle_group_avatar_offer(data: &[u8], peer: &mut PeerSession) -> Option<(String, [u8; 32], u32)> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
+    if pkt_type != PKT_GRP_AVATAR_OFFER {
+        return None;
+    }
+    // Find newline separator between group_id and sha256+size
+    let nl_pos = plain.iter().position(|&b| b == b'\n')?;
+    let group_id = String::from_utf8_lossy(&plain[..nl_pos]).to_string();
+    let rest = &plain[nl_pos + 1..];
+    if rest.len() < 36 {
+        return None;
+    }
+    let mut sha256 = [0u8; 32];
+    sha256.copy_from_slice(&rest[..32]);
+    let mut size_bytes = [0u8; 4];
+    size_bytes.copy_from_slice(&rest[32..36]);
+    let total_size = u32::from_le_bytes(size_bytes);
+    Some((group_id, sha256, total_size))
+}
+
+/// Send all group avatar data chunks to a peer.
+/// Payload per chunk: group_id + '\n' + [2B chunk_index LE][up to 1200B data].
+pub fn send_group_avatar_chunks(
+    peer: &PeerSession,
+    socket: &UdpSocket,
+    group_id: &str,
+    avatar_data: &[u8],
+) {
+    let chunk_size = super::daemon::AVATAR_CHUNK_SIZE;
+    let total_chunks = (avatar_data.len() + chunk_size - 1) / chunk_size;
+    for i in 0..total_chunks {
+        let start = i * chunk_size;
+        let end = (start + chunk_size).min(avatar_data.len());
+        let chunk = &avatar_data[start..end];
+        let mut payload = Vec::with_capacity(group_id.len() + 1 + 2 + chunk.len());
+        payload.extend_from_slice(group_id.as_bytes());
+        payload.push(b'\n');
+        payload.extend_from_slice(&(i as u16).to_le_bytes());
+        payload.extend_from_slice(chunk);
+        if let Some(pkt) = peer.encrypt_packet(PKT_GRP_AVATAR_DATA, &payload) {
+            socket.send_to(&pkt, peer.peer_addr).ok();
+        }
+    }
+}
+
+/// Handle an incoming group AVATAR_DATA chunk. Returns (group_id, chunk_index, data).
+pub fn handle_group_avatar_data(data: &[u8], peer: &mut PeerSession) -> Option<(String, u16, Vec<u8>)> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
+    if pkt_type != PKT_GRP_AVATAR_DATA {
+        return None;
+    }
+    let nl_pos = plain.iter().position(|&b| b == b'\n')?;
+    let group_id = String::from_utf8_lossy(&plain[..nl_pos]).to_string();
+    let rest = &plain[nl_pos + 1..];
+    if rest.len() < 3 {
+        return None;
+    }
+    let mut idx_bytes = [0u8; 2];
+    idx_bytes.copy_from_slice(&rest[..2]);
+    let chunk_index = u16::from_le_bytes(idx_bytes);
+    let chunk_data = rest[2..].to_vec();
+    Some((group_id, chunk_index, chunk_data))
 }

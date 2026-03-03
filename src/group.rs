@@ -43,6 +43,8 @@ pub struct Group {
     pub members: Vec<GroupMember>,
     pub group_key: [u8; 32],
     pub next_sender_index: u16,
+    #[serde(default)]
+    pub avatar_sha256: Option<[u8; 32]>,
 }
 
 /// Generate a random 16-byte group ID (hex-encoded = 32 chars).
@@ -106,6 +108,8 @@ pub fn delete_group(group_id: &str) {
     // Also remove chat history
     let chat_path = group_chats_dir().join(format!("{}.enc", group_id));
     fs::remove_file(chat_path).ok();
+    // Also remove group avatar
+    crate::avatar::delete_group_avatar(group_id);
 }
 
 /// Remove a member from a group by pubkey. Saves the group if a member was removed.
