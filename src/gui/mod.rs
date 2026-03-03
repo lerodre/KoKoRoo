@@ -9,6 +9,7 @@ mod groups;
 mod network;
 mod notifications;
 mod popups;
+mod logs;
 
 use cpal::traits::{DeviceTrait, HostTrait};
 use eframe::egui;
@@ -51,6 +52,7 @@ pub(crate) enum SidebarTab {
     Call,
     Settings,
     Appearance,
+    Logs,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -1401,6 +1403,7 @@ impl eframe::App for HostelApp {
                 }
                 SidebarTab::Settings => self.draw_settings_tab(ui),
                 SidebarTab::Appearance => self.draw_appearance_tab(ui),
+                SidebarTab::Logs => self.draw_logs_tab(ui),
             }
         });
 

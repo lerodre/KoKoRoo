@@ -43,6 +43,7 @@ impl HostelApp {
                 (SidebarTab::Call, "Call".to_string(), 0),
                 (SidebarTab::Settings, "Settings".to_string(), 0),
                 (SidebarTab::Appearance, "Colors".to_string(), 0),
+                (SidebarTab::Logs, "Logs".to_string(), 0),
             ];
 
             // Collect badge positions to draw on top after all buttons
@@ -53,9 +54,9 @@ impl HostelApp {
                 let badge_count = *badge_count;
                 let is_selected = self.active_tab == tab;
                 let enabled = if in_call {
-                    tab == SidebarTab::Call || tab == SidebarTab::Appearance
+                    tab == SidebarTab::Call || tab == SidebarTab::Appearance || tab == SidebarTab::Logs
                 } else if in_group_call {
-                    tab == SidebarTab::Groups || tab == SidebarTab::Appearance
+                    tab == SidebarTab::Groups || tab == SidebarTab::Appearance || tab == SidebarTab::Logs
                 } else {
                     true
                 };

@@ -1113,6 +1113,8 @@ impl HostelApp {
 
         // Send invite to each member via messaging daemon
         if let Ok(group_json) = serde_json::to_vec(&grp) {
+            log_fmt!("[gui] sending group invite '{}' ({} bytes json, {} members)",
+                grp.name, group_json.len(), grp.members.len());
             if let Some(tx) = &self.msg_cmd_tx {
                 for member in &grp.members {
                     // Skip ourselves
@@ -1124,17 +1126,29 @@ impl HostelApp {
                         if !contact.last_address.is_empty() && !contact.last_port.is_empty() {
                             let addr_str = format!("[{}]:{}", contact.last_address, contact.last_port);
                             if let Ok(addr) = addr_str.parse() {
+                                log_fmt!("[gui]   invite -> {} ({}) at {}", member.nickname, contact.contact_id, addr_str);
                                 tx.send(crate::messaging::MsgCommand::SendGroupInvite {
                                     contact_id: contact.contact_id.clone(),
                                     peer_addr: addr,
                                     peer_pubkey: contact.pubkey,
                                     group_json: group_json.clone(),
                                 }).ok();
+                            } else {
+                                log_fmt!("[gui]   invite SKIP {} - bad address: {}", member.nickname, addr_str);
                             }
+                        } else {
+                            log_fmt!("[gui]   invite SKIP {} - no address (addr='{}' port='{}')",
+                                member.nickname, contact.last_address, contact.last_port);
                         }
+                    } else {
+                        log_fmt!("[gui]   invite SKIP {} - contact not found in local contacts", member.nickname);
                     }
                 }
+            } else {
+                log_fmt!("[gui]   invite SKIP - no msg_cmd_tx (daemon not running?)");
             }
+        } else {
+            log_fmt!("[gui]   invite SKIP - failed to serialize group JSON");
         }
 
         self.groups.push(grp);
@@ -1643,6 +1657,7 @@ impl HostelApp {
         }
 
         let active_idx = self.group_detail_idx;
+        let mut leave_group_idx: Option<usize> = None;
 
         let max_height = ui.available_height().max(80.0);
         egui::ScrollArea::vertical()
@@ -1652,7 +1667,7 @@ impl HostelApp {
                 let strip_w = ui.available_width();
                 for (idx, grp) in self.groups.iter().enumerate() {
                     let is_active = active_idx == Some(idx)
-                        && (self.group_view == GroupView::Detail || self.group_view == GroupView::Settings || self.group_view == GroupView::InCall);
+                        && (self.group_view == GroupView::Detail || self.group_view == GroupView::Settings || self.group_view == GroupView::InCall || self.group_view == GroupView::Connecting);
 
                     let av_sz = 32.0;
                     let row_h = 42.0;
@@ -1712,11 +1727,41 @@ impl HostelApp {
                     // Tooltip with group name
                     row_resp.clone().on_hover_text(&grp.name);
 
+                    // Right-click: Leave Group
+                    row_resp.context_menu(|ui| {
+                        if ui.button("Leave Group").clicked() {
+                            leave_group_idx = Some(idx);
+                            ui.close_menu();
+                        }
+                    });
+
                     if row_resp.clicked() {
                         *open_idx = Some(idx);
                     }
                 }
             });
+
+        // Handle deferred leave group
+        if let Some(idx) = leave_group_idx {
+            if idx < self.groups.len() {
+                // If we're in a call on this group, cleanup first
+                if self.group_detail_idx == Some(idx) && self.group_call_channel_id.is_some() {
+                    self.cleanup_group_call();
+                }
+                let gid = self.groups[idx].group_id.clone();
+                log_fmt!("[gui] leaving group: {}", self.groups[idx].name);
+                group::delete_group(&gid);
+                self.groups.remove(idx);
+                self.group_avatar_textures.remove(&gid);
+                if self.group_detail_idx == Some(idx) {
+                    self.group_detail_idx = None;
+                    self.group_settings_idx = None;
+                    self.group_view = GroupView::List;
+                } else if let Some(ref mut di) = self.group_detail_idx {
+                    if *di > idx { *di -= 1; }
+                }
+            }
+        }
     }
 
     fn draw_channels_sidebar(&mut self, ui: &mut egui::Ui, _group_name: &str) {
