@@ -67,6 +67,7 @@ pub const PKT_GRP_SCREEN: u8       = 0x42; // group screen share VP8 chunk data
 pub const PKT_GRP_SCREEN_OFFER: u8 = 0x43; // group screen share beacon
 #[allow(dead_code)]
 pub const PKT_GRP_SCREEN_STOP: u8  = 0x44; // group screen share stopped
+pub const PKT_GRP_MEMBER_SYNC: u8  = 0x45; // per-member sync after invite accept
 
 /// Size of an X25519 public key.
 pub const PUBKEY_SIZE: usize = 32;

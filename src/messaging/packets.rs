@@ -14,6 +14,7 @@ use crate::crypto::{
     PKT_GRP_INVITE, PKT_GRP_MSG_CHAT,
     PKT_GRP_INVITE_ACK, PKT_GRP_INVITE_NACK,
     PKT_GRP_UPDATE, PKT_GRP_AVATAR_OFFER, PKT_GRP_AVATAR_DATA,
+    PKT_GRP_MEMBER_SYNC,
 };
 use crate::identity::{self};
 use crate::filetransfer;
@@ -30,7 +31,7 @@ impl MsgDaemon {
             None => return,
         };
 
-        let mut buf = [0u8; 1500];
+        let mut buf = [0u8; 4096];
         while let Ok((len, from)) = socket.recv_from(&mut buf) {
             if len == 0 {
                 continue;
@@ -184,6 +185,13 @@ impl MsgDaemon {
                                 for invite in &mut store.invites {
                                     protocol::send_group_invite(peer, socket, &invite.group_json).ok();
                                     invite.attempts += 1;
+                                    // Load group from disk for member syncs on ACK
+                                    if let Some(grp) = crate::group::load_group(&invite.group_id) {
+                                        self.pending_member_syncs.insert(
+                                            (contact_id.clone(), invite.group_id.clone()),
+                                            grp.members,
+                                        );
+                                    }
                                 }
                                 store.save();
                             }
@@ -835,13 +843,15 @@ impl MsgDaemon {
 
                 PKT_GRP_INVITE => {
                     if let Some(peer) = self.peers.get_mut(&from) {
-                        if let Some(group_json) = protocol::handle_group_invite(data, peer) {
+                        if let Some(invite_json) = protocol::handle_group_invite(data, peer) {
                             peer.touch();
                             let from_nickname = peer.peer_nickname.clone();
-                            log_fmt!("[daemon] received group invite from {} ({} bytes)", from_nickname, group_json.len());
+                            let from_contact_id = peer.contact_id.clone();
+                            log_fmt!("[daemon] received group invite from {} ({} bytes)", from_nickname, invite_json.len());
                             self.event_tx.send(MsgEvent::IncomingGroupInvite {
                                 from_nickname,
-                                group_json,
+                                from_contact_id,
+                                invite_json,
                             }).ok();
                         }
                     }
@@ -873,6 +883,21 @@ impl MsgDaemon {
                             log_fmt!("[daemon] group invite ACK from {} for group={}", cid, group_id);
                             if let Some(store) = self.pending_invites.get_mut(&cid) {
                                 store.remove(&group_id);
+                            }
+                            // Send member syncs to the acceptor
+                            let key = (cid.clone(), group_id.clone());
+                            if let Some(members) = self.pending_member_syncs.remove(&key) {
+                                if let Some(ref socket) = self.socket {
+                                    if let Some(peer) = self.peers.get(&from) {
+                                        log_fmt!("[daemon]   sending {} member syncs for group={}", members.len(), group_id);
+                                        for member in &members {
+                                            let wire = crate::group::GroupMemberWire::from_member(member);
+                                            if let Ok(wire_json) = serde_json::to_vec(&wire) {
+                                                protocol::send_group_member_sync(peer, socket, &group_id, &wire_json).ok();
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -975,6 +1000,24 @@ impl MsgDaemon {
                                         log_fmt!("[daemon] group avatar hash mismatch or invalid");
                                     }
                                     self.group_avatar_recvs.remove(&key);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                PKT_GRP_MEMBER_SYNC => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((group_id, member_json)) = protocol::handle_group_member_sync(data, peer) {
+                            peer.touch();
+                            if let Ok(wire) = serde_json::from_slice::<crate::group::GroupMemberWire>(&member_json) {
+                                if let Some(member) = wire.to_member() {
+                                    log_fmt!("[daemon] member sync for group={}: {} (idx={})",
+                                        group_id, member.nickname, member.sender_index);
+                                    self.event_tx.send(MsgEvent::GroupMemberSynced {
+                                        group_id,
+                                        member,
+                                    }).ok();
                                 }
                             }
                         }

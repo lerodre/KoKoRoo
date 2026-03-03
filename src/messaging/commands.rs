@@ -49,31 +49,38 @@ impl MsgDaemon {
                     log_fmt!("[daemon]   after: notified_calls={} rejected_ips={}", self.notified_calls.len(), self.rejected_ips.len());
                 }
 
-                MsgCommand::SendGroupInvite { contact_id, peer_addr, peer_pubkey, group_json } => {
+                MsgCommand::SendGroupInvite { contact_id, peer_addr, peer_pubkey, invite_json, members } => {
                     log_fmt!("[daemon] SendGroupInvite to contact={} addr={}", contact_id, peer_addr);
+                    // Extract group_id from invite JSON for pending store
+                    let group_id = serde_json::from_slice::<serde_json::Value>(&invite_json)
+                        .ok()
+                        .and_then(|v| v.get("group_id").and_then(|g| g.as_str().map(|s| s.to_string())))
+                        .unwrap_or_default();
+                    // Store members for sync when ACK arrives
+                    if !group_id.is_empty() {
+                        self.pending_member_syncs.insert(
+                            (contact_id.clone(), group_id.clone()),
+                            members,
+                        );
+                    }
                     let mut sent = false;
                     // Find connected peer session — send immediately if possible
                     if let Some(addr) = self.contact_addrs.get(&contact_id) {
                         if let Some(peer) = self.peers.get(addr) {
                             if peer.is_connected() {
                                 if let Some(ref socket) = self.socket {
-                                    protocol::send_group_invite(peer, socket, &group_json).ok();
-                                    log_fmt!("[daemon]   invite sent ({} bytes)", group_json.len());
+                                    protocol::send_group_invite(peer, socket, &invite_json).ok();
+                                    log_fmt!("[daemon]   lite invite sent ({} bytes)", invite_json.len());
                                     sent = true;
                                 }
                             }
                         }
                     }
                     if !sent {
-                        // Peer offline — enqueue invite for reactive flush on connect
-                        let group_id = serde_json::from_slice::<serde_json::Value>(&group_json)
-                            .ok()
-                            .and_then(|v| v.get("group_id").and_then(|g| g.as_str().map(|s| s.to_string())))
-                            .unwrap_or_default();
                         log_fmt!("[daemon]   peer offline, enqueuing invite for group={}", group_id);
                         let store = self.pending_invites.entry(contact_id.clone())
                             .or_insert_with(|| super::pending_invites::PendingInviteStore::load(&contact_id, &self.identity.secret));
-                        store.enqueue(group_id, group_json);
+                        store.enqueue(group_id, invite_json);
                         // Initiate handshake so invite is sent reactively on connect
                         if !self.contact_addrs.contains_key(&contact_id) {
                             if let Some(ref socket) = self.socket {
@@ -552,11 +559,7 @@ impl MsgDaemon {
                                 }
                             }
                             if !sent {
-                                // Peer offline — enqueue as pending invite (update replaces previous)
-                                let store = self.pending_invites.entry(contact_id.clone())
-                                    .or_insert_with(|| super::pending_invites::PendingInviteStore::load(contact_id, &self.identity.secret));
-                                store.enqueue(group_id.clone(), group_json.clone());
-                                // Initiate handshake if not already connecting
+                                // Peer offline — initiate handshake so update is sent on connect
                                 if !self.contact_addrs.contains_key(contact_id) {
                                     if let Some(session) = protocol::initiate_handshake(
                                         socket, contact_id, *peer_addr, *peer_pubkey,

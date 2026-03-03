@@ -291,9 +291,10 @@ pub(crate) struct IncomingCallInfo {
 
 pub(crate) struct IncomingGroupInviteInfo {
     pub(crate) from_nickname: String,
+    pub(crate) from_contact_id: String,
     pub(crate) group_name: String,
     pub(crate) member_count: usize,
-    pub(crate) group_json: Vec<u8>,
+    pub(crate) invite_lite: crate::group::GroupInviteLite,
 }
 
 impl HostelApp {
@@ -1116,21 +1117,22 @@ impl eframe::App for HostelApp {
                             self.incoming_call_attention = true;
                         }
                     }
-                    MsgEvent::IncomingGroupInvite { from_nickname, group_json } => {
+                    MsgEvent::IncomingGroupInvite { from_nickname, from_contact_id, invite_json } => {
                         // Show popup for user to accept/reject
-                        if let Ok(grp) = serde_json::from_slice::<Group>(&group_json) {
-                            if !self.groups.iter().any(|g| g.group_id == grp.group_id) {
+                        if let Ok(lite) = serde_json::from_slice::<crate::group::GroupInviteLite>(&invite_json) {
+                            if !self.groups.iter().any(|g| g.group_id == lite.group_id) {
                                 log_fmt!("[gui] group invite from {}: '{}' ({} members)",
-                                    from_nickname, grp.name, grp.members.len());
+                                    from_nickname, lite.name, lite.member_count);
                                 send_desktop_notification(
                                     "hostelD — Group Invitation",
-                                    &format!("{} invited you to '{}'", from_nickname, grp.name),
+                                    &format!("{} invited you to '{}'", from_nickname, lite.name),
                                 );
                                 self.incoming_group_invite = Some(IncomingGroupInviteInfo {
                                     from_nickname,
-                                    group_name: grp.name.clone(),
-                                    member_count: grp.members.len(),
-                                    group_json,
+                                    from_contact_id,
+                                    group_name: lite.name.clone(),
+                                    member_count: lite.member_count as usize,
+                                    invite_lite: lite,
                                 });
                             }
                         }
@@ -1265,6 +1267,18 @@ impl eframe::App for HostelApp {
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
+                    MsgEvent::GroupMemberSynced { group_id, member } => {
+                        // Add synced member to the group (from invite accept flow)
+                        if let Some(grp) = self.groups.iter_mut().find(|g| g.group_id == group_id) {
+                            // Don't add duplicates
+                            if !grp.members.iter().any(|m| m.pubkey == member.pubkey) {
+                                log_fmt!("[gui] member synced for group={}: {} (idx={})",
+                                    group_id, member.nickname, member.sender_index);
+                                grp.members.push(member);
+                                group::save_group(grp);
                             }
                         }
                     }

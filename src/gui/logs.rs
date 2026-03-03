@@ -12,6 +12,10 @@ impl HostelApp {
                         buf.clear();
                     }
                 }
+                if ui.button("Copy All").clicked() {
+                    let all = crate::logger::get_log_lines().join("\n");
+                    ui.ctx().copy_text(all);
+                }
             });
         });
         ui.separator();

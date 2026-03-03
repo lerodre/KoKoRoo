@@ -157,6 +157,8 @@ pub struct MsgDaemon {
     pub(super) group_avatar_recvs: HashMap<(SocketAddr, String), AvatarRecvState>,
     /// Pending outgoing group avatar sends: (contact_id, group_id) -> state.
     pub(super) group_avatar_sends: HashMap<(String, String), GroupAvatarSendState>,
+    /// Members to sync when a group invite ACK is received: (contact_id, group_id) -> members.
+    pub(super) pending_member_syncs: HashMap<(String, String), Vec<crate::group::GroupMember>>,
 }
 
 impl MsgDaemon {
@@ -204,6 +206,7 @@ impl MsgDaemon {
             avatar_recvs: HashMap::new(),
             group_avatar_recvs: HashMap::new(),
             group_avatar_sends: HashMap::new(),
+            pending_member_syncs: HashMap::new(),
         }
     }
 

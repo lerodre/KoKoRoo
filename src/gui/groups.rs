@@ -1111,44 +1111,47 @@ impl HostelApp {
 
         group::save_group(&grp);
 
-        // Send invite to each member via messaging daemon
-        if let Ok(group_json) = serde_json::to_vec(&grp) {
-            log_fmt!("[gui] sending group invite '{}' ({} bytes json, {} members)",
-                grp.name, group_json.len(), grp.members.len());
+        // Send lite invite to each member via messaging daemon
+        {
+            let mut lite = crate::group::GroupInviteLite::from_group(&grp);
+            log_fmt!("[gui] sending group lite invite '{}' ({} members)", grp.name, grp.members.len());
             if let Some(tx) = &self.msg_cmd_tx {
                 for member in &grp.members {
                     // Skip ourselves
                     if member.pubkey == self.identity.pubkey {
                         continue;
                     }
-                    // Find contact to get address info
-                    if let Some(contact) = self.contacts.iter().find(|c| c.pubkey == member.pubkey) {
-                        if !contact.last_address.is_empty() && !contact.last_port.is_empty() {
-                            let addr_str = format!("[{}]:{}", contact.last_address, contact.last_port);
-                            if let Ok(addr) = addr_str.parse() {
-                                log_fmt!("[gui]   invite -> {} ({}) at {}", member.nickname, contact.contact_id, addr_str);
-                                tx.send(crate::messaging::MsgCommand::SendGroupInvite {
-                                    contact_id: contact.contact_id.clone(),
-                                    peer_addr: addr,
-                                    peer_pubkey: contact.pubkey,
-                                    group_json: group_json.clone(),
-                                }).ok();
+                    // Set the invitee's sender_index
+                    lite.your_sender_index = member.sender_index;
+                    if let Ok(invite_json) = serde_json::to_vec(&lite) {
+                        // Find contact to get address info
+                        if let Some(contact) = self.contacts.iter().find(|c| c.pubkey == member.pubkey) {
+                            if !contact.last_address.is_empty() && !contact.last_port.is_empty() {
+                                let addr_str = format!("[{}]:{}", contact.last_address, contact.last_port);
+                                if let Ok(addr) = addr_str.parse() {
+                                    log_fmt!("[gui]   invite -> {} ({}) at {} ({} bytes)", member.nickname, contact.contact_id, addr_str, invite_json.len());
+                                    tx.send(crate::messaging::MsgCommand::SendGroupInvite {
+                                        contact_id: contact.contact_id.clone(),
+                                        peer_addr: addr,
+                                        peer_pubkey: contact.pubkey,
+                                        invite_json: invite_json.clone(),
+                                        members: grp.members.clone(),
+                                    }).ok();
+                                } else {
+                                    log_fmt!("[gui]   invite SKIP {} - bad address: {}", member.nickname, addr_str);
+                                }
                             } else {
-                                log_fmt!("[gui]   invite SKIP {} - bad address: {}", member.nickname, addr_str);
+                                log_fmt!("[gui]   invite SKIP {} - no address (addr='{}' port='{}')",
+                                    member.nickname, contact.last_address, contact.last_port);
                             }
                         } else {
-                            log_fmt!("[gui]   invite SKIP {} - no address (addr='{}' port='{}')",
-                                member.nickname, contact.last_address, contact.last_port);
+                            log_fmt!("[gui]   invite SKIP {} - contact not found in local contacts", member.nickname);
                         }
-                    } else {
-                        log_fmt!("[gui]   invite SKIP {} - contact not found in local contacts", member.nickname);
                     }
                 }
             } else {
                 log_fmt!("[gui]   invite SKIP - no msg_cmd_tx (daemon not running?)");
             }
-        } else {
-            log_fmt!("[gui]   invite SKIP - failed to serialize group JSON");
         }
 
         self.groups.push(grp);
@@ -1581,22 +1584,28 @@ impl HostelApp {
         }
         group::save_group(&self.groups[group_idx]);
 
-        // Send invites to new members
-        if let Ok(group_json) = serde_json::to_vec(&self.groups[group_idx]) {
+        // Send lite invites to new members
+        {
+            let grp = &self.groups[group_idx];
+            let mut lite = crate::group::GroupInviteLite::from_group(grp);
             if let Some(tx) = &self.msg_cmd_tx {
                 for (_, member) in &new_members {
                     if member.address.is_empty() || member.port.is_empty() {
                         continue;
                     }
-                    let addr_str = format!("[{}]:{}", member.address, member.port);
-                    if let Ok(addr) = addr_str.parse() {
-                        let contact_id = identity::derive_contact_id(&my_pubkey, &member.pubkey);
-                        tx.send(crate::messaging::MsgCommand::SendGroupInvite {
-                            contact_id,
-                            peer_addr: addr,
-                            peer_pubkey: member.pubkey,
-                            group_json: group_json.clone(),
-                        }).ok();
+                    lite.your_sender_index = member.sender_index;
+                    if let Ok(invite_json) = serde_json::to_vec(&lite) {
+                        let addr_str = format!("[{}]:{}", member.address, member.port);
+                        if let Ok(addr) = addr_str.parse() {
+                            let contact_id = identity::derive_contact_id(&my_pubkey, &member.pubkey);
+                            tx.send(crate::messaging::MsgCommand::SendGroupInvite {
+                                contact_id,
+                                peer_addr: addr,
+                                peer_pubkey: member.pubkey,
+                                invite_json,
+                                members: grp.members.clone(),
+                            }).ok();
+                        }
                     }
                 }
             }

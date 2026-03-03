@@ -4,7 +4,7 @@ use eframe::egui;
 
 use super::HostelApp;
 use super::network::{peer_display_job, censor_ip};
-use crate::group::{self, Group};
+use crate::group;
 use crate::messaging::MsgCommand;
 
 impl HostelApp {
@@ -258,21 +258,27 @@ impl HostelApp {
 
         if accept {
             if let Some(info) = self.incoming_group_invite.take() {
-                if let Ok(mut grp) = serde_json::from_slice::<Group>(&info.group_json) {
-                    if !self.groups.iter().any(|g| g.group_id == grp.group_id) {
+                let lite = &info.invite_lite;
+                if !self.groups.iter().any(|g| g.group_id == lite.group_id) {
+                    // Build skeleton group from lite invite
+                    let my_fp = crate::crypto::fingerprint(&self.identity.pubkey);
+                    let my_addr = self.best_ipv6.clone();
+                    let my_port = self.local_port.clone();
+                    if let Some(mut grp) = lite.to_skeleton_group(
+                        &self.identity.pubkey, &self.settings.nickname, &my_fp, &my_addr, &my_port,
+                    ) {
                         group::ensure_general_channel(&mut grp);
                         group::ensure_fallback_channel(&mut grp);
                         group::ensure_general_voice_channel(&mut grp);
                         group::save_group(&grp);
-                        // Send ACK to inviter via daemon
+                        // Send ACK to inviter via daemon (uses from_contact_id)
                         if let Some(tx) = &self.msg_cmd_tx {
-                            if let Some(contact) = self.contacts.iter().find(|c| c.pubkey == grp.created_by) {
-                                tx.send(MsgCommand::AcceptGroupInvite {
-                                    contact_id: contact.contact_id.clone(),
-                                    group_id: grp.group_id.clone(),
-                                }).ok();
-                            }
+                            tx.send(MsgCommand::AcceptGroupInvite {
+                                contact_id: info.from_contact_id.clone(),
+                                group_id: grp.group_id.clone(),
+                            }).ok();
                         }
+                        log_fmt!("[gui] accepted group invite '{}', skeleton saved (waiting for member syncs)", grp.name);
                         self.groups.push(grp);
                     }
                 }
@@ -280,16 +286,12 @@ impl HostelApp {
         }
         if reject {
             if let Some(info) = self.incoming_group_invite.take() {
-                if let Ok(grp) = serde_json::from_slice::<Group>(&info.group_json) {
-                    // Send NACK to inviter via daemon
-                    if let Some(tx) = &self.msg_cmd_tx {
-                        if let Some(contact) = self.contacts.iter().find(|c| c.pubkey == grp.created_by) {
-                            tx.send(MsgCommand::RejectGroupInvite {
-                                contact_id: contact.contact_id.clone(),
-                                group_id: grp.group_id.clone(),
-                            }).ok();
-                        }
-                    }
+                // Send NACK to inviter via daemon
+                if let Some(tx) = &self.msg_cmd_tx {
+                    tx.send(MsgCommand::RejectGroupInvite {
+                        contact_id: info.from_contact_id.clone(),
+                        group_id: info.invite_lite.group_id.clone(),
+                    }).ok();
                 }
             }
         }

@@ -10,6 +10,7 @@ use crate::crypto::{
     PKT_GRP_INVITE, PKT_GRP_MSG_CHAT,
     PKT_GRP_INVITE_ACK, PKT_GRP_INVITE_NACK,
     PKT_GRP_UPDATE, PKT_GRP_AVATAR_OFFER, PKT_GRP_AVATAR_DATA,
+    PKT_GRP_MEMBER_SYNC,
 };
 use crate::identity::Identity;
 
@@ -528,24 +529,52 @@ pub fn handle_avatar_data(data: &[u8], peer: &mut PeerSession) -> Option<(u16, V
     Some((chunk_index, chunk_data))
 }
 
-/// Send a group invite (full Group JSON) via existing pairwise session.
+/// Send a group invite (lite invite JSON) via existing pairwise session.
 pub fn send_group_invite(
     peer: &PeerSession,
     socket: &UdpSocket,
-    group_json: &[u8],
+    invite_json: &[u8],
 ) -> Result<(), String> {
-    let pkt = peer.encrypt_packet(PKT_GRP_INVITE, group_json).ok_or("no session")?;
+    let pkt = peer.encrypt_packet(PKT_GRP_INVITE, invite_json).ok_or("no session")?;
     socket.send_to(&pkt, peer.peer_addr).map_err(|e| e.to_string())?;
     Ok(())
 }
 
-/// Handle an incoming group invite. Returns the raw Group JSON bytes.
+/// Handle an incoming group invite. Returns the raw lite invite JSON bytes.
 pub fn handle_group_invite(data: &[u8], peer: &mut PeerSession) -> Option<Vec<u8>> {
     let (pkt_type, plain) = peer.decrypt_packet(data)?;
     if pkt_type != PKT_GRP_INVITE || plain.is_empty() {
         return None;
     }
     Some(plain)
+}
+
+/// Send a single group member sync packet. Payload: group_id + '\n' + member wire JSON.
+pub fn send_group_member_sync(
+    peer: &PeerSession,
+    socket: &UdpSocket,
+    group_id: &str,
+    member_wire_json: &[u8],
+) -> Result<(), String> {
+    let mut payload = Vec::with_capacity(group_id.len() + 1 + member_wire_json.len());
+    payload.extend_from_slice(group_id.as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(member_wire_json);
+    let pkt = peer.encrypt_packet(PKT_GRP_MEMBER_SYNC, &payload).ok_or("no session")?;
+    socket.send_to(&pkt, peer.peer_addr).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Handle an incoming member sync. Returns (group_id, member_wire_json_bytes).
+pub fn handle_group_member_sync(data: &[u8], peer: &mut PeerSession) -> Option<(String, Vec<u8>)> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
+    if pkt_type != PKT_GRP_MEMBER_SYNC || plain.is_empty() {
+        return None;
+    }
+    let nl_pos = plain.iter().position(|&b| b == b'\n')?;
+    let group_id = String::from_utf8_lossy(&plain[..nl_pos]).to_string();
+    let member_json = plain[nl_pos + 1..].to_vec();
+    Some((group_id, member_json))
 }
 
 /// Send a group chat message to a peer via the messaging daemon.

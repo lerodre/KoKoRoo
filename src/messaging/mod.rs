@@ -55,8 +55,8 @@ pub enum MsgCommand {
     BroadcastAvatar { avatar_data: Vec<u8>, sha256: [u8; 32] },
     /// Send our avatar to a specific contact (e.g. on new contact add).
     SendAvatarTo { contact_id: String, avatar_data: Vec<u8>, sha256: [u8; 32] },
-    /// Send a group invite to a contact (encrypted via pairwise session).
-    SendGroupInvite { contact_id: String, peer_addr: SocketAddr, peer_pubkey: [u8; 32], group_json: Vec<u8> },
+    /// Send a group invite to a contact (lite invite JSON + members for sync on ACK).
+    SendGroupInvite { contact_id: String, peer_addr: SocketAddr, peer_pubkey: [u8; 32], invite_json: Vec<u8>, members: Vec<crate::group::GroupMember> },
     /// Send a group chat message to a specific member via pairwise session.
     SendGroupChat { contact_id: String, peer_addr: SocketAddr, peer_pubkey: [u8; 32], group_id: String, channel_id: String, text: String },
     /// Accept an incoming group invite (send ACK to the inviter).
@@ -103,8 +103,8 @@ pub enum MsgEvent {
     FileTransferFailed { contact_id: String, transfer_id: u32, reason: String },
     /// A contact's avatar was received and saved.
     AvatarReceived { contact_id: String },
-    /// Incoming group invite from a contact.
-    IncomingGroupInvite { from_nickname: String, group_json: Vec<u8> },
+    /// Incoming group invite from a contact (lite invite JSON).
+    IncomingGroupInvite { from_nickname: String, from_contact_id: String, invite_json: Vec<u8> },
     /// Incoming group chat message via messaging daemon.
     /// `sender_fingerprint` is derived from the peer's verified pubkey (never from peer-supplied data).
     IncomingGroupChat { group_id: String, channel_id: String, sender_fingerprint: String, sender_nickname: String, text: String },
@@ -112,6 +112,8 @@ pub enum MsgEvent {
     GroupInviteRejected { contact_id: String, group_id: String },
     /// A group metadata update was received from an admin.
     GroupUpdated { group_json: Vec<u8> },
+    /// A group member was synced after invite accept.
+    GroupMemberSynced { group_id: String, member: crate::group::GroupMember },
     /// A group avatar was fully received and saved to disk.
     GroupAvatarReceived { group_id: String },
 }

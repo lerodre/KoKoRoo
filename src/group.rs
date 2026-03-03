@@ -63,6 +63,132 @@ pub enum CallMode {
     P2P,
 }
 
+/// Lightweight invite sent over the wire (small enough for a single UDP packet).
+/// Uses hex-encoded strings for byte fields to avoid serde_json's verbose [u8; 32] arrays.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GroupInviteLite {
+    pub group_id: String,
+    pub name: String,
+    pub group_key_hex: String,
+    pub created_by_hex: String,
+    pub created_at: String,
+    pub call_mode: CallMode,
+    pub member_count: u16,
+    pub your_sender_index: u16,
+    pub next_sender_index: u16,
+}
+
+/// Wire-friendly group member (hex-encoded pubkey instead of [u8; 32]).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GroupMemberWire {
+    pub pubkey_hex: String,
+    pub nickname: String,
+    pub fingerprint: String,
+    pub sender_index: u16,
+    pub address: String,
+    pub port: String,
+    pub is_admin: bool,
+}
+
+/// Hex-encode a 32-byte array to a 64-char string.
+fn bytes_to_hex(bytes: &[u8; 32]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Decode a 64-char hex string back to [u8; 32].
+fn hex_to_bytes32(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 { return None; }
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        out[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+impl GroupInviteLite {
+    /// Create a lite invite from a full Group.
+    pub fn from_group(group: &Group) -> Self {
+        GroupInviteLite {
+            group_id: group.group_id.clone(),
+            name: group.name.clone(),
+            group_key_hex: bytes_to_hex(&group.group_key),
+            created_by_hex: bytes_to_hex(&group.created_by),
+            created_at: group.created_at.clone(),
+            call_mode: group.call_mode,
+            member_count: group.members.len() as u16,
+            your_sender_index: 0, // set by caller before sending
+            next_sender_index: group.next_sender_index,
+        }
+    }
+
+    /// Decode the hex group_key back to [u8; 32].
+    pub fn group_key(&self) -> Option<[u8; 32]> {
+        hex_to_bytes32(&self.group_key_hex)
+    }
+
+    /// Decode the hex created_by back to [u8; 32].
+    pub fn created_by(&self) -> Option<[u8; 32]> {
+        hex_to_bytes32(&self.created_by_hex)
+    }
+
+    /// Build a skeleton Group from the lite invite (no members yet — those come via member syncs).
+    pub fn to_skeleton_group(&self, my_pubkey: &[u8; 32], my_nickname: &str, my_fingerprint: &str, my_address: &str, my_port: &str) -> Option<Group> {
+        let group_key = self.group_key()?;
+        let created_by = self.created_by()?;
+        let me = GroupMember {
+            pubkey: *my_pubkey,
+            nickname: my_nickname.to_string(),
+            fingerprint: my_fingerprint.to_string(),
+            sender_index: self.your_sender_index,
+            address: my_address.to_string(),
+            port: my_port.to_string(),
+            is_admin: false,
+        };
+        Some(Group {
+            group_id: self.group_id.clone(),
+            name: self.name.clone(),
+            created_by,
+            created_at: self.created_at.clone(),
+            members: vec![me],
+            group_key,
+            next_sender_index: self.next_sender_index,
+            avatar_sha256: None,
+            text_channels: Vec::new(),
+            voice_channels: Vec::new(),
+            call_mode: self.call_mode,
+        })
+    }
+}
+
+impl GroupMemberWire {
+    /// Convert a GroupMember to wire format.
+    pub fn from_member(m: &GroupMember) -> Self {
+        GroupMemberWire {
+            pubkey_hex: bytes_to_hex(&m.pubkey),
+            nickname: m.nickname.clone(),
+            fingerprint: m.fingerprint.clone(),
+            sender_index: m.sender_index,
+            address: m.address.clone(),
+            port: m.port.clone(),
+            is_admin: m.is_admin,
+        }
+    }
+
+    /// Convert wire format back to GroupMember.
+    pub fn to_member(&self) -> Option<GroupMember> {
+        let pubkey = hex_to_bytes32(&self.pubkey_hex)?;
+        Some(GroupMember {
+            pubkey,
+            nickname: self.nickname.clone(),
+            fingerprint: self.fingerprint.clone(),
+            sender_index: self.sender_index,
+            address: self.address.clone(),
+            port: self.port.clone(),
+            is_admin: self.is_admin,
+        })
+    }
+}
+
 /// Persisted group definition.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Group {
