@@ -209,8 +209,12 @@ impl HostelApp {
                         paint_initial_avatar(ui.painter(), av_rect, &grp.name, &self.settings.theme);
                     }
 
-                    // Draw group name to the right of the avatar (leave room for ⋮ button)
-                    let dots_w = 20.0;
+                    // Check if we are admin of this group
+                    let my_pubkey = self.identity.pubkey;
+                    let im_admin = grp.members.iter().any(|m| m.pubkey == my_pubkey && m.is_admin);
+
+                    // Draw group name to the right of the avatar (leave room for ⋮ button if admin)
+                    let dots_w = if im_admin { 20.0 } else { 0.0 };
                     let text_x = av_rect.max.x + 6.0;
                     let text_max_w = row_rect.max.x - text_x - dots_w - 4.0;
                     let text_pos = egui::pos2(text_x, row_rect.center().y - 7.0);
@@ -226,27 +230,29 @@ impl HostelApp {
                         self.settings.theme.text_primary(),
                     );
 
-                    // ⋮ button (3 vertical dots)
-                    let dots_rect = egui::Rect::from_min_size(
-                        egui::pos2(row_rect.max.x - dots_w - 2.0, row_rect.min.y),
-                        egui::vec2(dots_w, row_rect.height()),
-                    );
-                    let dots_resp = ui.allocate_rect(dots_rect, egui::Sense::click());
-                    let dots_center = dots_rect.center();
-                    let dot_color = if dots_resp.hovered() {
-                        self.settings.theme.text_primary()
-                    } else {
-                        self.settings.theme.text_muted()
-                    };
-                    for dy in [-4.0_f32, 0.0, 4.0] {
-                        ui.painter().circle_filled(
-                            egui::pos2(dots_center.x, dots_center.y + dy),
-                            2.0,
-                            dot_color,
+                    // ⋮ button (3 vertical dots) — admin only
+                    if im_admin {
+                        let dots_rect = egui::Rect::from_min_size(
+                            egui::pos2(row_rect.max.x - 20.0 - 2.0, row_rect.min.y),
+                            egui::vec2(20.0, row_rect.height()),
                         );
-                    }
-                    if dots_resp.clicked() {
-                        *settings_idx = Some(idx);
+                        let dots_resp = ui.allocate_rect(dots_rect, egui::Sense::click());
+                        let dots_center = dots_rect.center();
+                        let dot_color = if dots_resp.hovered() {
+                            self.settings.theme.text_primary()
+                        } else {
+                            self.settings.theme.text_muted()
+                        };
+                        for dy in [-4.0_f32, 0.0, 4.0] {
+                            ui.painter().circle_filled(
+                                egui::pos2(dots_center.x, dots_center.y + dy),
+                                2.0,
+                                dot_color,
+                            );
+                        }
+                        if dots_resp.clicked() {
+                            *settings_idx = Some(idx);
+                        }
                     }
 
                     // Click on rest of row → open Detail (chat)
@@ -256,9 +262,11 @@ impl HostelApp {
 
                     // Right-click context menu
                     row_resp.context_menu(|ui| {
-                        if ui.button("Settings").clicked() {
-                            *settings_idx = Some(idx);
-                            ui.close_menu();
+                        if im_admin {
+                            if ui.button("Settings").clicked() {
+                                *settings_idx = Some(idx);
+                                ui.close_menu();
+                            }
                         }
                         if ui.button("Delete").clicked() {
                             *delete_idx = Some(idx);
@@ -1165,6 +1173,13 @@ impl HostelApp {
         let grp_id = self.groups[idx].group_id.clone();
         let my_pubkey = self.identity.pubkey;
         let is_admin = self.groups[idx].members.iter().any(|m| m.pubkey == my_pubkey && m.is_admin);
+
+        // Non-admins cannot access settings — redirect to chat
+        if !is_admin {
+            self.group_view = GroupView::Detail;
+            self.group_settings_idx = None;
+            return;
+        }
         let member_count = self.groups[idx].members.len();
 
         let mut actions: Vec<GroupSettingsAction> = Vec::new();
