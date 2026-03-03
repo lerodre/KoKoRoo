@@ -10,10 +10,10 @@ use crate::crypto::{
     PKT_MSG_FILE_OFFER, PKT_MSG_FILE_ACCEPT, PKT_MSG_FILE_REJECT,
     PKT_MSG_FILE_CHUNK, PKT_MSG_FILE_ACK, PKT_MSG_FILE_COMPLETE, PKT_MSG_FILE_CANCEL,
     PKT_MSG_FILE_NACK,
-    PKT_MSG_AVATAR_OFFER, PKT_MSG_AVATAR_DATA,
+    PKT_MSG_AVATAR_OFFER, PKT_MSG_AVATAR_DATA, PKT_MSG_AVATAR_ACK,
     PKT_GRP_INVITE, PKT_GRP_MSG_CHAT,
     PKT_GRP_INVITE_ACK, PKT_GRP_INVITE_NACK,
-    PKT_GRP_UPDATE, PKT_GRP_AVATAR_OFFER, PKT_GRP_AVATAR_DATA,
+    PKT_GRP_UPDATE, PKT_GRP_AVATAR_OFFER, PKT_GRP_AVATAR_DATA, PKT_GRP_AVATAR_ACK,
     PKT_GRP_MEMBER_SYNC,
 };
 use crate::identity::{self};
@@ -696,6 +696,16 @@ impl MsgDaemon {
                             if total_size as usize > crate::avatar::MAX_AVATAR_BYTES {
                                 continue;
                             }
+                            // Skip if we already have this exact avatar (same SHA-256)
+                            if let Some(existing) = crate::avatar::load_contact_avatar(&contact_id) {
+                                if crate::avatar::avatar_sha256(&existing) == sha256 {
+                                    // Already have it — ACK so sender stops retrying
+                                    if let Some(ref socket) = self.socket {
+                                        protocol::send_avatar_ack(peer, socket, &sha256);
+                                    }
+                                    continue;
+                                }
+                            }
                             let chunk_size = super::daemon::AVATAR_CHUNK_SIZE;
                             let total_chunks = ((total_size as usize + chunk_size - 1) / chunk_size) as u16;
                             log_fmt!("[daemon] AVATAR_OFFER from {} size={} chunks={}", from, total_size, total_chunks);
@@ -742,11 +752,31 @@ impl MsgDaemon {
                                             self.event_tx.send(MsgEvent::AvatarReceived {
                                                 contact_id: cid,
                                             }).ok();
+                                            // ACK so sender stops retrying
+                                            if let Some(ref socket) = self.socket {
+                                                protocol::send_avatar_ack(peer, socket, &hash);
+                                            }
                                         } else {
                                             log_fmt!("[daemon] avatar validation FAILED from {}", from);
                                         }
                                     }
                                     self.avatar_recvs.remove(&from);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                PKT_MSG_AVATAR_ACK => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some(sha256) = protocol::handle_avatar_ack(data, peer) {
+                            peer.touch();
+                            let cid = peer.contact_id.clone();
+                            // Remove from retry queue if SHA-256 matches
+                            if let Some(state) = self.avatar_sends.get(&cid) {
+                                if state.sha256 == sha256 {
+                                    self.avatar_sends.remove(&cid);
+                                    log_fmt!("[daemon] avatar ACK from {}, send cancelled", cid);
                                 }
                             }
                         }
@@ -952,6 +982,15 @@ impl MsgDaemon {
                             if let Some(local_group) = crate::group::load_group(&group_id) {
                                 let is_admin = local_group.members.iter().any(|m| m.pubkey == sender_pubkey && m.is_admin);
                                 if is_admin {
+                                    // Skip if we already have this exact group avatar (same SHA-256)
+                                    if let Some(existing) = crate::avatar::load_group_avatar(&group_id) {
+                                        if crate::avatar::avatar_sha256(&existing) == sha256 {
+                                            if let Some(ref socket) = self.socket {
+                                                protocol::send_group_avatar_ack(peer, socket, &group_id, &sha256);
+                                            }
+                                            continue;
+                                        }
+                                    }
                                     let chunk_size = super::daemon::AVATAR_CHUNK_SIZE as u32;
                                     let total_chunks = ((total_size + chunk_size - 1) / chunk_size) as u16;
                                     log_fmt!("[daemon] group avatar offer for group={} size={} chunks={}", group_id, total_size, total_chunks);
@@ -995,11 +1034,31 @@ impl MsgDaemon {
                                     if hash == recv.sha256 && crate::avatar::validate_received_avatar(&full_data) {
                                         crate::avatar::save_group_avatar(&group_id, &full_data).ok();
                                         log_fmt!("[daemon] group avatar saved for group={}", group_id);
-                                        self.event_tx.send(MsgEvent::GroupAvatarReceived { group_id }).ok();
+                                        self.event_tx.send(MsgEvent::GroupAvatarReceived { group_id: group_id.clone() }).ok();
+                                        // ACK so sender stops retrying
+                                        if let Some(ref socket) = self.socket {
+                                            protocol::send_group_avatar_ack(peer, socket, &group_id, &hash);
+                                        }
                                     } else {
                                         log_fmt!("[daemon] group avatar hash mismatch or invalid");
                                     }
                                     self.group_avatar_recvs.remove(&key);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                PKT_GRP_AVATAR_ACK => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((group_id, sha256)) = protocol::handle_group_avatar_ack(data, peer) {
+                            peer.touch();
+                            let cid = peer.contact_id.clone();
+                            let key = (cid.clone(), group_id.clone());
+                            if let Some(state) = self.group_avatar_sends.get(&key) {
+                                if state.sha256 == sha256 {
+                                    self.group_avatar_sends.remove(&key);
+                                    log_fmt!("[daemon] group avatar ACK from {} for group={}", cid, group_id);
                                 }
                             }
                         }

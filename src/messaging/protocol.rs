@@ -6,10 +6,10 @@ use crate::crypto::{
     PKT_MSG_REQUEST, PKT_MSG_REQUEST_ACK,
     PKT_MSG_IP_ANNOUNCE, PKT_MSG_PEER_QUERY, PKT_MSG_PEER_RESPONSE,
     PKT_MSG_PRESENCE,
-    PKT_MSG_AVATAR_OFFER, PKT_MSG_AVATAR_DATA,
+    PKT_MSG_AVATAR_OFFER, PKT_MSG_AVATAR_DATA, PKT_MSG_AVATAR_ACK,
     PKT_GRP_INVITE, PKT_GRP_MSG_CHAT,
     PKT_GRP_INVITE_ACK, PKT_GRP_INVITE_NACK,
-    PKT_GRP_UPDATE, PKT_GRP_AVATAR_OFFER, PKT_GRP_AVATAR_DATA,
+    PKT_GRP_UPDATE, PKT_GRP_AVATAR_OFFER, PKT_GRP_AVATAR_DATA, PKT_GRP_AVATAR_ACK,
     PKT_GRP_MEMBER_SYNC,
 };
 use crate::identity::Identity;
@@ -529,6 +529,28 @@ pub fn handle_avatar_data(data: &[u8], peer: &mut PeerSession) -> Option<(u16, V
     Some((chunk_index, chunk_data))
 }
 
+/// Send an AVATAR_ACK to confirm receipt. Payload: [32B sha256].
+pub fn send_avatar_ack(
+    peer: &PeerSession,
+    socket: &UdpSocket,
+    sha256: &[u8; 32],
+) {
+    if let Some(pkt) = peer.encrypt_packet(PKT_MSG_AVATAR_ACK, sha256) {
+        socket.send_to(&pkt, peer.peer_addr).ok();
+    }
+}
+
+/// Handle an incoming AVATAR_ACK. Returns the sha256 from the ACK.
+pub fn handle_avatar_ack(data: &[u8], peer: &mut PeerSession) -> Option<[u8; 32]> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
+    if pkt_type != PKT_MSG_AVATAR_ACK || plain.len() < 32 {
+        return None;
+    }
+    let mut sha256 = [0u8; 32];
+    sha256.copy_from_slice(&plain[..32]);
+    Some(sha256)
+}
+
 /// Send a group invite (lite invite JSON) via existing pairwise session.
 pub fn send_group_invite(
     peer: &PeerSession,
@@ -754,4 +776,37 @@ pub fn handle_group_avatar_data(data: &[u8], peer: &mut PeerSession) -> Option<(
     let chunk_index = u16::from_le_bytes(idx_bytes);
     let chunk_data = rest[2..].to_vec();
     Some((group_id, chunk_index, chunk_data))
+}
+
+/// Send a GROUP_AVATAR_ACK. Payload: group_id + '\n' + [32B sha256].
+pub fn send_group_avatar_ack(
+    peer: &PeerSession,
+    socket: &UdpSocket,
+    group_id: &str,
+    sha256: &[u8; 32],
+) {
+    let mut payload = Vec::with_capacity(group_id.len() + 1 + 32);
+    payload.extend_from_slice(group_id.as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(sha256);
+    if let Some(pkt) = peer.encrypt_packet(PKT_GRP_AVATAR_ACK, &payload) {
+        socket.send_to(&pkt, peer.peer_addr).ok();
+    }
+}
+
+/// Handle an incoming GROUP_AVATAR_ACK. Returns (group_id, sha256).
+pub fn handle_group_avatar_ack(data: &[u8], peer: &mut PeerSession) -> Option<(String, [u8; 32])> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
+    if pkt_type != PKT_GRP_AVATAR_ACK {
+        return None;
+    }
+    let nl_pos = plain.iter().position(|&b| b == b'\n')?;
+    let group_id = String::from_utf8_lossy(&plain[..nl_pos]).to_string();
+    let rest = &plain[nl_pos + 1..];
+    if rest.len() < 32 {
+        return None;
+    }
+    let mut sha256 = [0u8; 32];
+    sha256.copy_from_slice(&rest[..32]);
+    Some((group_id, sha256))
 }
