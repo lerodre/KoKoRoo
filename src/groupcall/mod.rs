@@ -81,14 +81,18 @@ fn probe_for_leader(
         rand::thread_rng().fill_bytes(&mut dummy_pubkey);
         let hello = crypto::build_grp_hello(&dummy_pubkey, &gid_bytes);
 
+        let mut probe_count = 0;
         for member in &group.members {
             if member.pubkey == my_pubkey { continue; }
             if member.address.is_empty() || member.port.is_empty() { continue; }
             let addr_str = format!("[{}]:{}", member.address, member.port);
             if let Ok(addr) = addr_str.parse::<std::net::SocketAddr>() {
                 let _ = socket.send_to(&hello, addr);
+                log_fmt!("[groupcall] probe: sent GRP_HELLO to {} ({})", member.nickname, addr_str);
+                probe_count += 1;
             }
         }
+        log_fmt!("[groupcall] probe: sent GRP_HELLO to {} members, waiting 2s for leader...", probe_count);
     }
 
     // Wait 2s for a PKT_GRP_LEADER response
@@ -102,14 +106,16 @@ fn probe_for_leader(
             Ok((n, from)) if n >= 3 => {
                 // Any voice/roster/ping packet from another member means a leader exists
                 if let Some((pkt_type, _si)) = crypto::grp_read_header(&buf[..n]) {
+                    log_fmt!("[groupcall] probe: received pkt_type=0x{:02x} from {}", pkt_type, from);
                     match pkt_type {
                         crypto::PKT_GRP_VOICE | crypto::PKT_GRP_ROSTER | crypto::PKT_GRP_PING => {
-                            // There's an active leader at this address
+                            log_fmt!("[groupcall] probe: found active leader at {}", from);
                             drop(socket);
                             return Ok(Some(from.to_string()));
                         }
                         crypto::PKT_GRP_LEADER => {
                             if crypto::grp_decrypt(&cipher, &buf[..n]).is_some() {
+                                log_fmt!("[groupcall] probe: PKT_GRP_LEADER from {}", from);
                                 drop(socket);
                                 return Ok(Some(from.to_string()));
                             }
@@ -123,6 +129,7 @@ fn probe_for_leader(
     }
 
     // No leader found — we drop the probe socket so relay can bind the same port
+    log_fmt!("[groupcall] probe: no leader response after 2s");
     drop(socket);
     Ok(None)
 }

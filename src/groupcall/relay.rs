@@ -82,6 +82,11 @@ pub fn start_as_leader(
     let relay_chat_in = chat_in_tx.clone();
     let relay_group = group.clone();
     let relay_cipher = crypto::grp_cipher_from_key(&group_key);
+    let relay_counter = send_counter.clone();
+    let relay_my_pubkey = group.members.iter()
+        .find(|m| m.sender_index == my_sender_index)
+        .map(|m| m.pubkey)
+        .unwrap_or([0u8; 32]);
 
     let _relay = thread::spawn(move || {
         let mut recv_buf = [0u8; 4096];
@@ -98,6 +103,7 @@ pub fn start_as_leader(
                         if let Some((_, group_id_bytes)) = crypto::parse_grp_hello(&recv_buf[..n]) {
                             let gid = crypto::group_id_from_bytes(&group_id_bytes);
                             if gid == relay_group.group_id {
+                                log_fmt!("[group] GRP_HELLO from {} for group {}", from, gid);
                                 if let Some(member) = relay_group.members.iter()
                                     .find(|m| from.ip().to_string().contains(&m.address) || m.address.is_empty())
                                 {
@@ -112,7 +118,17 @@ pub fn start_as_leader(
                                             ping_sent_at: None,
                                         });
                                     }
+                                } else {
+                                    log_fmt!("[group] GRP_HELLO from unknown address {} — no matching member", from);
                                 }
+                                // Respond with PKT_GRP_LEADER so probing peers know we exist
+                                let counter = relay_counter.fetch_add(1, Ordering::Relaxed);
+                                let leader_pkt = crypto::grp_encrypt(
+                                    &relay_cipher, my_sender_index, counter,
+                                    PKT_GRP_LEADER, &relay_my_pubkey,
+                                );
+                                let _ = relay_socket.send_to(&leader_pkt, from);
+                                log_fmt!("[group] sent PKT_GRP_LEADER response to {}", from);
                             }
                         }
                         continue;
