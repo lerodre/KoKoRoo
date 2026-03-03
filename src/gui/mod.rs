@@ -255,6 +255,7 @@ pub struct HostelApp {
     pub(crate) group_avatar_crop_group_id: Option<String>,
     pub(crate) group_settings_invite_mode: bool,
     pub(crate) group_settings_selected_members: Vec<bool>,
+    pub(crate) group_selected_channel: usize,
 
     // Group call state
     pub(crate) group_call_running: Arc<AtomicBool>,
@@ -459,6 +460,7 @@ impl HostelApp {
             group_avatar_crop_group_id: None,
             group_settings_invite_mode: false,
             group_settings_selected_members: Vec::new(),
+            group_selected_channel: 0,
             group_call_running: Arc::new(AtomicBool::new(false)),
             group_call_mic: Arc::new(AtomicBool::new(true)),
             group_call_hangup: None,

@@ -22,48 +22,76 @@ impl HostelApp {
     pub(crate) fn draw_groups_tab(&mut self, ui: &mut egui::Ui) {
         match self.group_view {
             GroupView::List | GroupView::Detail | GroupView::Settings => {
-                // 2-column layout: sidebar (group list) + panel (detail or placeholder)
+                // Always 3-column: icon strip (48px) + channels (140px) + detail/placeholder
                 let available = ui.available_rect_before_wrap();
                 let clip = ui.clip_rect();
                 let sep_w = 1.0;
-                let list_w = 165.0_f32.min(available.width() * 0.28);
-                let detail_w = (available.width() - list_w - sep_w - 4.0).max(100.0);
-
-                // Full-height sidebar background
-                let bg_rect = egui::Rect::from_min_max(
-                    egui::pos2(clip.min.x, clip.min.y),
-                    egui::pos2(clip.min.x + list_w + (available.min.x - clip.min.x), clip.max.y),
-                );
-                ui.painter().rect_filled(bg_rect, 0.0, self.settings.theme.sidebar_bg());
-
                 let line_stroke = egui::Stroke::new(sep_w, self.settings.theme.text_muted());
-                ui.painter().vline(clip.min.x, clip.y_range(), line_stroke);
-                let sep_x = available.min.x + list_w + 1.0;
-                ui.painter().vline(sep_x, clip.y_range(), line_stroke);
 
-                let list_rect = egui::Rect::from_min_size(
-                    available.min,
-                    egui::vec2(list_w, available.height()),
+                let mut open_idx: Option<usize> = None;
+                let mut go_create = false;
+
+                let icon_w = 48.0;
+                let chan_w = 140.0;
+                let detail_w = (available.width() - icon_w - chan_w - sep_w * 2.0 - 4.0).max(100.0);
+
+                // Icon strip background
+                let icon_bg = egui::Rect::from_min_max(
+                    egui::pos2(clip.min.x, clip.min.y),
+                    egui::pos2(clip.min.x + icon_w + (available.min.x - clip.min.x), clip.max.y),
+                );
+                ui.painter().rect_filled(icon_bg, 0.0, self.settings.theme.sidebar_bg());
+
+                // Channels background
+                let chan_x = available.min.x + icon_w + sep_w;
+                let chan_bg = egui::Rect::from_min_max(
+                    egui::pos2(chan_x, clip.min.y),
+                    egui::pos2(chan_x + chan_w, clip.max.y),
+                );
+                ui.painter().rect_filled(chan_bg, 0.0, self.settings.theme.panel_bg());
+
+                // Vertical separators
+                ui.painter().vline(clip.min.x, clip.y_range(), line_stroke);
+                let sep1_x = available.min.x + icon_w;
+                ui.painter().vline(sep1_x, clip.y_range(), line_stroke);
+                let sep2_x = chan_x + chan_w;
+                ui.painter().vline(sep2_x, clip.y_range(), line_stroke);
+
+                let icon_visual_w = icon_w + (available.min.x - clip.min.x);
+                let icon_rect = egui::Rect::from_min_size(
+                    egui::pos2(clip.min.x, available.min.y),
+                    egui::vec2(icon_visual_w, available.height()),
+                );
+                let chan_rect = egui::Rect::from_min_size(
+                    egui::pos2(chan_x, available.min.y),
+                    egui::vec2(chan_w, available.height()),
                 );
                 let detail_rect = egui::Rect::from_min_size(
-                    egui::pos2(available.min.x + list_w + sep_w + 4.0, available.min.y),
+                    egui::pos2(sep2_x + sep_w + 2.0, available.min.y),
                     egui::vec2(detail_w, available.height()),
                 );
 
-                // Left panel: group sidebar
-                let mut open_idx: Option<usize> = None;
-                let mut delete_idx: Option<usize> = None;
-                let mut settings_idx: Option<usize> = None;
-                let mut go_create = false;
-                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(list_rect), |ui| {
-                    self.draw_group_sidebar(ui, &mut open_idx, &mut delete_idx, &mut settings_idx, &mut go_create);
+                // Icon strip
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(icon_rect), |ui| {
+                    self.draw_group_icon_strip(ui, &mut open_idx, &mut go_create);
                 });
 
-                // Right panel: detail, settings, or placeholder
+                // Channels sidebar
+                let grp_name = self.group_detail_idx
+                    .and_then(|i| self.groups.get(i))
+                    .map(|g| g.name.clone())
+                    .unwrap_or_default();
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(chan_rect), |ui| {
+                    self.draw_channels_sidebar(ui, &grp_name);
+                });
+
+                // Detail panel
                 ui.allocate_new_ui(egui::UiBuilder::new().max_rect(detail_rect), |ui| {
                     if self.group_settings_idx.is_some() && self.group_view == GroupView::Settings {
                         self.draw_group_settings(ui);
-                    } else if self.group_detail_idx.is_some() && self.group_view == GroupView::Detail {
+                    } else if self.group_detail_idx.is_some()
+                        && (self.group_view == GroupView::Detail || self.group_view == GroupView::Settings)
+                    {
                         self.draw_group_detail(ui);
                     } else {
                         ui.add_space(40.0);
@@ -76,35 +104,11 @@ impl HostelApp {
                     }
                 });
 
-                // Deferred sidebar actions
-                if let Some(idx) = delete_idx {
-                    if idx < self.groups.len() {
-                        let group_id = self.groups[idx].group_id.clone();
-                        group::delete_group(&group_id);
-                        self.groups.remove(idx);
-                        // If the deleted group was active, clear selection
-                        if self.group_detail_idx == Some(idx) {
-                            self.group_detail_idx = None;
-                            self.group_view = GroupView::List;
-                        } else if let Some(active) = self.group_detail_idx {
-                            if active > idx {
-                                self.group_detail_idx = Some(active - 1);
-                            }
-                        }
-                    }
-                }
-                if let Some(idx) = settings_idx {
-                    self.group_settings_idx = Some(idx);
-                    self.group_detail_idx = Some(idx);
-                    if idx < self.groups.len() {
-                        self.group_rename_input = self.groups[idx].name.clone();
-                    }
-                    self.group_settings_invite_mode = false;
-                    self.group_settings_selected_members = Vec::new();
-                    self.group_view = GroupView::Settings;
-                }
+                // Deferred actions
                 if let Some(idx) = open_idx {
                     self.group_detail_idx = Some(idx);
+                    self.group_settings_idx = None;
+                    self.group_selected_channel = 0;
                     self.group_view = GroupView::Detail;
                 }
                 if go_create {
@@ -117,166 +121,6 @@ impl HostelApp {
             GroupView::Connecting => self.draw_group_connecting(ui),
             GroupView::InCall => self.draw_group_call(ui),
         }
-    }
-
-    fn draw_group_sidebar(
-        &mut self,
-        ui: &mut egui::Ui,
-        open_idx: &mut Option<usize>,
-        delete_idx: &mut Option<usize>,
-        settings_idx: &mut Option<usize>,
-        go_create: &mut bool,
-    ) {
-        ui.add_space(6.0);
-
-        // "+ Create Group" button at full width
-        let btn_w = ui.available_width() - 8.0;
-        ui.horizontal(|ui| {
-            ui.add_space(4.0);
-            if ui.add_sized(
-                egui::vec2(btn_w, 28.0),
-                egui::Button::new(egui::RichText::new("+ Create Group").strong().size(12.0)),
-            ).clicked() {
-                *go_create = true;
-            }
-        });
-
-        ui.add_space(4.0);
-
-        if self.groups.is_empty() {
-            ui.add_space(20.0);
-            ui.vertical_centered(|ui| {
-                ui.label(
-                    egui::RichText::new("No groups yet")
-                        .size(12.0)
-                        .color(self.settings.theme.text_muted()),
-                );
-            });
-            return;
-        }
-
-        let active_idx = self.group_detail_idx;
-
-        let max_height = ui.available_height().max(80.0);
-        egui::ScrollArea::vertical()
-            .max_height(max_height)
-            .id_salt("groups_sidebar_scroll")
-            .show(ui, |ui| {
-                for (idx, grp) in self.groups.iter().enumerate() {
-                    let is_active = active_idx == Some(idx)
-                        && (self.group_view == GroupView::Detail || self.group_view == GroupView::Settings);
-
-                    // Full-width highlight between separators
-                    let av_sz = 22.0;
-                    let row_h = 34.0;
-                    let row_width = ui.available_width();
-                    let (row_rect, row_resp) = ui.allocate_exact_size(
-                        egui::vec2(row_width, row_h),
-                        egui::Sense::click(),
-                    );
-
-                    if is_active {
-                        ui.painter().rect_filled(row_rect, 0.0, self.settings.theme.widget_bg());
-                    } else if row_resp.hovered() {
-                        ui.painter().rect_filled(
-                            row_rect, 0.0,
-                            self.settings.theme.widget_bg().gamma_multiply(0.5),
-                        );
-                    }
-
-                    // Group avatar (small circle)
-                    let av_rect = egui::Rect::from_min_size(
-                        egui::pos2(row_rect.min.x + 6.0, row_rect.center().y - av_sz / 2.0),
-                        egui::vec2(av_sz, av_sz),
-                    );
-                    let grp_id = &grp.group_id;
-                    if !self.group_avatar_textures.contains_key(grp_id) {
-                        if let Some(bytes) = avatar::load_group_avatar(grp_id) {
-                            if let Some(tex) = load_avatar_texture(
-                                ui.ctx(),
-                                &format!("gav_{}", &grp_id[..8.min(grp_id.len())]),
-                                &bytes,
-                                96,
-                            ) {
-                                self.group_avatar_textures.insert(grp_id.clone(), tex);
-                            }
-                        }
-                    }
-                    if let Some(tex) = self.group_avatar_textures.get(grp_id) {
-                        let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-                        ui.painter().image(tex.id(), av_rect, uv, egui::Color32::WHITE);
-                    } else {
-                        paint_initial_avatar(ui.painter(), av_rect, &grp.name, &self.settings.theme);
-                    }
-
-                    // Check if we are admin of this group
-                    let my_pubkey = self.identity.pubkey;
-                    let im_admin = grp.members.iter().any(|m| m.pubkey == my_pubkey && m.is_admin);
-
-                    // Draw group name to the right of the avatar (leave room for ⋮ button if admin)
-                    let dots_w = if im_admin { 20.0 } else { 0.0 };
-                    let text_x = av_rect.max.x + 6.0;
-                    let text_max_w = row_rect.max.x - text_x - dots_w - 4.0;
-                    let text_pos = egui::pos2(text_x, row_rect.center().y - 7.0);
-                    let name_galley = ui.painter().layout(
-                        grp.name.clone(),
-                        egui::FontId::proportional(12.0),
-                        self.settings.theme.text_primary(),
-                        text_max_w.max(20.0),
-                    );
-                    ui.painter().galley(
-                        text_pos,
-                        name_galley,
-                        self.settings.theme.text_primary(),
-                    );
-
-                    // ⋮ button (3 vertical dots) — admin only
-                    if im_admin {
-                        let dots_rect = egui::Rect::from_min_size(
-                            egui::pos2(row_rect.max.x - 20.0 - 2.0, row_rect.min.y),
-                            egui::vec2(20.0, row_rect.height()),
-                        );
-                        let dots_resp = ui.allocate_rect(dots_rect, egui::Sense::click());
-                        let dots_center = dots_rect.center();
-                        let dot_color = if dots_resp.hovered() {
-                            self.settings.theme.text_primary()
-                        } else {
-                            self.settings.theme.text_muted()
-                        };
-                        for dy in [-4.0_f32, 0.0, 4.0] {
-                            ui.painter().circle_filled(
-                                egui::pos2(dots_center.x, dots_center.y + dy),
-                                2.0,
-                                dot_color,
-                            );
-                        }
-                        if dots_resp.clicked() {
-                            *settings_idx = Some(idx);
-                        }
-                    }
-
-                    // Click on rest of row → open Detail (chat)
-                    if row_resp.clicked() {
-                        *open_idx = Some(idx);
-                    }
-
-                    // Right-click context menu
-                    row_resp.context_menu(|ui| {
-                        if im_admin {
-                            if ui.button("Settings").clicked() {
-                                *settings_idx = Some(idx);
-                                ui.close_menu();
-                            }
-                        }
-                        if ui.button("Delete").clicked() {
-                            *delete_idx = Some(idx);
-                            ui.close_menu();
-                        }
-                    });
-
-                    ui.separator();
-                }
-            });
     }
 
     fn draw_group_create(&mut self, ui: &mut egui::Ui) {
@@ -364,10 +208,19 @@ impl HostelApp {
         let identity_secret = self.identity.secret;
 
         let mut start_call = false;
+        let mut open_settings = false;
 
-        // ── Top bar: Group avatar + name + Call button ──
+        // Pre-compute column widths so the header can be constrained to chat area
+        let avail_for_split = ui.available_rect_before_wrap();
+        let sep_w = 1.0;
+        let members_w = 180.0_f32.max(avail_for_split.width() * 0.22).min(240.0);
+        let chat_w = (avail_for_split.width() - members_w - sep_w - 4.0).max(100.0);
+
+        // ── Top bar: Group avatar + name + Settings + Call button ──
         ui.add_space(4.0);
         ui.horizontal(|ui| {
+            ui.set_max_width(chat_w);
+
             // Group avatar in header (28px)
             let hdr_av = 28.0;
             let (av_rect, _) = ui.allocate_exact_size(
@@ -402,16 +255,28 @@ impl HostelApp {
                 if ui.add(call_btn).clicked() {
                     start_call = true;
                 }
+                if is_admin {
+                    let settings_btn = egui::Button::new(
+                        egui::RichText::new("Settings").size(12.0),
+                    );
+                    if ui.add(settings_btn).clicked() {
+                        open_settings = true;
+                    }
+                }
             });
         });
-        ui.separator();
 
-        // ── 2-column layout: Chat (left) | Members sidebar (right) ──
+        // Horizontal separator constrained to chat area width (not bleeding into members sidebar)
+        let sep_y = ui.cursor().top();
+        ui.painter().hline(
+            avail_for_split.min.x..=avail_for_split.min.x + chat_w,
+            sep_y,
+            egui::Stroke::new(1.0, self.settings.theme.text_muted()),
+        );
+        ui.add_space(2.0);
+
         let available = ui.available_rect_before_wrap();
         let clip = ui.clip_rect();
-        let sep_w = 1.0;
-        let members_w = 180.0_f32.max(available.width() * 0.22).min(240.0);
-        let chat_w = (available.width() - members_w - sep_w - 4.0).max(100.0);
 
         // Background for right sidebar
         let bg_rect = egui::Rect::from_min_max(
@@ -657,18 +522,56 @@ impl HostelApp {
                 );
             }
 
-            // Member rows — alternating colors, Nickname + Role only
+            // Member rows — alternating colors, Avatar + Nickname + Role
             egui::ScrollArea::vertical()
                 .id_salt("detail_members")
                 .show(ui, |ui| {
                     let row_w = ui.available_width();
                     for (i, member) in members.iter().enumerate() {
                         let bg = if i % 2 == 0 { color_even } else { color_odd };
-                        let row_rect = ui.allocate_space(egui::vec2(row_w, 26.0)).1;
+                        let row_rect = ui.allocate_space(egui::vec2(row_w, 32.0)).1;
                         ui.painter().rect_filled(row_rect, 0.0, bg);
 
                         let mut x = row_rect.min.x + 8.0;
                         let cy = row_rect.center().y;
+
+                        // Avatar (22px)
+                        let av_size = 22.0;
+                        let av_rect = egui::Rect::from_center_size(
+                            egui::pos2(x + av_size / 2.0, cy),
+                            egui::vec2(av_size, av_size),
+                        );
+                        let mut drew_av = false;
+                        if member.pubkey == my_pubkey {
+                            if let Some(tex) = &self.own_avatar_texture {
+                                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                                ui.painter().image(tex.id(), av_rect, uv, egui::Color32::WHITE);
+                                drew_av = true;
+                            }
+                        } else {
+                            let cid = identity::derive_contact_id(&my_pubkey, &member.pubkey);
+                            if !self.contact_avatar_textures.contains_key(&cid) {
+                                if let Some(bytes) = avatar::load_contact_avatar(&cid) {
+                                    if let Some(tex) = load_avatar_texture(
+                                        ui.ctx(),
+                                        &format!("dm_av_{}", &cid[..8.min(cid.len())]),
+                                        &bytes,
+                                        32,
+                                    ) {
+                                        self.contact_avatar_textures.insert(cid.clone(), tex);
+                                    }
+                                }
+                            }
+                            if let Some(tex) = self.contact_avatar_textures.get(&cid) {
+                                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                                ui.painter().image(tex.id(), av_rect, uv, egui::Color32::WHITE);
+                                drew_av = true;
+                            }
+                        }
+                        if !drew_av {
+                            paint_initial_avatar(ui.painter(), av_rect, &member.nickname, &self.settings.theme);
+                        }
+                        x += av_size + 6.0;
 
                         // Nickname
                         let nick_galley = ui.painter().layout_no_wrap(
@@ -720,6 +623,13 @@ impl HostelApp {
         });
 
         // Deferred actions
+        if open_settings {
+            self.group_settings_idx = Some(idx);
+            self.group_rename_input = grp_name.clone();
+            self.group_settings_invite_mode = false;
+            self.group_settings_selected_members = Vec::new();
+            self.group_view = GroupView::Settings;
+        }
         if start_call {
             self.start_group_call(is_admin);
         }
@@ -1609,6 +1519,241 @@ impl HostelApp {
 
         // Broadcast update to existing members
         self.broadcast_group_update(group_idx);
+    }
+
+    fn draw_group_icon_strip(
+        &mut self,
+        ui: &mut egui::Ui,
+        open_idx: &mut Option<usize>,
+        go_create: &mut bool,
+    ) {
+        ui.add_space(6.0);
+
+        // "+" create group button
+        {
+            let strip_w = ui.available_width();
+            let btn_sz = 32.0;
+            let row_h = 42.0;
+            let (row_rect, row_resp) = ui.allocate_exact_size(
+                egui::vec2(strip_w, row_h),
+                egui::Sense::click(),
+            );
+            if row_resp.hovered() {
+                ui.painter().rect_filled(
+                    row_rect, 4.0,
+                    self.settings.theme.widget_bg().gamma_multiply(0.5),
+                );
+            }
+            let circle_center = row_rect.center();
+            let radius = btn_sz / 2.0;
+            ui.painter().circle_stroke(
+                circle_center,
+                radius,
+                egui::Stroke::new(1.5, self.settings.theme.text_muted()),
+            );
+            ui.painter().text(
+                circle_center,
+                egui::Align2::CENTER_CENTER,
+                "+",
+                egui::FontId::proportional(18.0),
+                self.settings.theme.text_muted(),
+            );
+            row_resp.clone().on_hover_text("Create Group");
+            if row_resp.clicked() {
+                *go_create = true;
+            }
+
+            // Separator line below the + button
+            let sep_y = row_rect.max.y + 2.0;
+            ui.painter().hline(
+                row_rect.x_range(),
+                sep_y,
+                egui::Stroke::new(1.0, self.settings.theme.text_muted().gamma_multiply(0.4)),
+            );
+            ui.add_space(4.0);
+        }
+
+        let active_idx = self.group_detail_idx;
+
+        let max_height = ui.available_height().max(80.0);
+        egui::ScrollArea::vertical()
+            .max_height(max_height)
+            .id_salt("groups_icon_strip")
+            .show(ui, |ui| {
+                let strip_w = ui.available_width();
+                for (idx, grp) in self.groups.iter().enumerate() {
+                    let is_active = active_idx == Some(idx)
+                        && (self.group_view == GroupView::Detail || self.group_view == GroupView::Settings);
+
+                    let av_sz = 32.0;
+                    let row_h = 42.0;
+                    let (row_rect, row_resp) = ui.allocate_exact_size(
+                        egui::vec2(strip_w, row_h),
+                        egui::Sense::click(),
+                    );
+
+                    // Hover background
+                    if row_resp.hovered() && !is_active {
+                        ui.painter().rect_filled(
+                            row_rect, 4.0,
+                            self.settings.theme.widget_bg().gamma_multiply(0.5),
+                        );
+                    }
+
+                    // Active indicator: 3px pill on left edge
+                    if is_active {
+                        let pill_rect = egui::Rect::from_min_size(
+                            egui::pos2(row_rect.min.x, row_rect.center().y - 10.0),
+                            egui::vec2(3.0, 20.0),
+                        );
+                        ui.painter().rect_filled(pill_rect, 2.0, self.settings.theme.text_primary());
+                    }
+
+                    // Avatar centered
+                    let av_rect = egui::Rect::from_center_size(
+                        row_rect.center(),
+                        egui::vec2(av_sz, av_sz),
+                    );
+                    let grp_id = &grp.group_id;
+                    if let Some(tex) = self.group_avatar_textures.get(grp_id) {
+                        let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                        ui.painter().image(tex.id(), av_rect, uv, egui::Color32::WHITE);
+                    } else {
+                        // Try loading
+                        if !self.group_avatar_textures.contains_key(grp_id) {
+                            if let Some(bytes) = avatar::load_group_avatar(grp_id) {
+                                if let Some(tex) = load_avatar_texture(
+                                    ui.ctx(),
+                                    &format!("gis_{}", &grp_id[..8.min(grp_id.len())]),
+                                    &bytes,
+                                    96,
+                                ) {
+                                    self.group_avatar_textures.insert(grp_id.clone(), tex);
+                                }
+                            }
+                        }
+                        if let Some(tex) = self.group_avatar_textures.get(grp_id) {
+                            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                            ui.painter().image(tex.id(), av_rect, uv, egui::Color32::WHITE);
+                        } else {
+                            paint_initial_avatar(ui.painter(), av_rect, &grp.name, &self.settings.theme);
+                        }
+                    }
+
+                    // Tooltip with group name
+                    row_resp.clone().on_hover_text(&grp.name);
+
+                    if row_resp.clicked() {
+                        *open_idx = Some(idx);
+                    }
+                }
+            });
+    }
+
+    fn draw_channels_sidebar(&mut self, ui: &mut egui::Ui, group_name: &str) {
+        ui.add_space(8.0);
+
+        // Header: group name
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new(group_name)
+                    .strong()
+                    .size(13.0)
+                    .color(self.settings.theme.text_primary()),
+            );
+        });
+        ui.add_space(8.0);
+
+        // TEXT CHANNELS section header
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("TEXT CHANNELS")
+                    .size(10.0)
+                    .color(self.settings.theme.text_muted()),
+            );
+        });
+        ui.add_space(2.0);
+
+        // # general
+        {
+            let row_w = ui.available_width();
+            let (row_rect, row_resp) = ui.allocate_exact_size(
+                egui::vec2(row_w, 28.0),
+                egui::Sense::click(),
+            );
+            let is_sel = self.group_selected_channel == 0;
+            if is_sel {
+                ui.painter().rect_filled(row_rect, 4.0, self.settings.theme.widget_bg());
+            } else if row_resp.hovered() {
+                ui.painter().rect_filled(
+                    row_rect, 4.0,
+                    self.settings.theme.widget_bg().gamma_multiply(0.5),
+                );
+            }
+            let text_color = if is_sel {
+                self.settings.theme.text_primary()
+            } else {
+                self.settings.theme.text_muted()
+            };
+            ui.painter().text(
+                egui::pos2(row_rect.min.x + 12.0, row_rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                "# general",
+                egui::FontId::proportional(12.0),
+                text_color,
+            );
+            if row_resp.clicked() {
+                self.group_selected_channel = 0;
+            }
+        }
+
+        ui.add_space(10.0);
+
+        // VOICE CHANNELS section header
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("VOICE CHANNELS")
+                    .size(10.0)
+                    .color(self.settings.theme.text_muted()),
+            );
+        });
+        ui.add_space(2.0);
+
+        // >> General
+        {
+            let row_w = ui.available_width();
+            let (row_rect, row_resp) = ui.allocate_exact_size(
+                egui::vec2(row_w, 28.0),
+                egui::Sense::click(),
+            );
+            let is_sel = self.group_selected_channel == 1;
+            if is_sel {
+                ui.painter().rect_filled(row_rect, 4.0, self.settings.theme.widget_bg());
+            } else if row_resp.hovered() {
+                ui.painter().rect_filled(
+                    row_rect, 4.0,
+                    self.settings.theme.widget_bg().gamma_multiply(0.5),
+                );
+            }
+            let text_color = if is_sel {
+                self.settings.theme.text_primary()
+            } else {
+                self.settings.theme.text_muted()
+            };
+            ui.painter().text(
+                egui::pos2(row_rect.min.x + 12.0, row_rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                "\u{00BB} General",
+                egui::FontId::proportional(12.0),
+                text_color,
+            );
+            if row_resp.clicked() {
+                self.group_selected_channel = 1;
+            }
+        }
     }
 }
 
