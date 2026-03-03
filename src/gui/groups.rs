@@ -163,12 +163,15 @@ impl HostelApp {
             .id_salt("groups_sidebar_scroll")
             .show(ui, |ui| {
                 for (idx, grp) in self.groups.iter().enumerate() {
-                    let is_active = active_idx == Some(idx) && self.group_view == GroupView::Detail;
+                    let is_active = active_idx == Some(idx)
+                        && (self.group_view == GroupView::Detail || self.group_view == GroupView::Settings);
 
                     // Full-width highlight between separators
+                    let av_sz = 22.0;
+                    let row_h = 34.0;
                     let row_width = ui.available_width();
                     let (row_rect, row_resp) = ui.allocate_exact_size(
-                        egui::vec2(row_width, 28.0),
+                        egui::vec2(row_width, row_h),
                         egui::Sense::click(),
                     );
 
@@ -181,15 +184,41 @@ impl HostelApp {
                         );
                     }
 
-                    // Draw group name centered vertically in the row (leave room for ⋮ button)
+                    // Group avatar (small circle)
+                    let av_rect = egui::Rect::from_min_size(
+                        egui::pos2(row_rect.min.x + 6.0, row_rect.center().y - av_sz / 2.0),
+                        egui::vec2(av_sz, av_sz),
+                    );
+                    let grp_id = &grp.group_id;
+                    if !self.group_avatar_textures.contains_key(grp_id) {
+                        if let Some(bytes) = avatar::load_group_avatar(grp_id) {
+                            if let Some(tex) = load_avatar_texture(
+                                ui.ctx(),
+                                &format!("sidebar_gav_{}", &grp_id[..8.min(grp_id.len())]),
+                                &bytes,
+                                32,
+                            ) {
+                                self.group_avatar_textures.insert(grp_id.clone(), tex);
+                            }
+                        }
+                    }
+                    if let Some(tex) = self.group_avatar_textures.get(grp_id) {
+                        let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                        ui.painter().image(tex.id(), av_rect, uv, egui::Color32::WHITE);
+                    } else {
+                        paint_initial_avatar(ui.painter(), av_rect, &grp.name, &self.settings.theme);
+                    }
+
+                    // Draw group name to the right of the avatar (leave room for ⋮ button)
                     let dots_w = 20.0;
-                    let text_max_w = row_rect.width() - 8.0 - dots_w - 4.0;
-                    let text_pos = egui::pos2(row_rect.min.x + 8.0, row_rect.center().y - 7.0);
+                    let text_x = av_rect.max.x + 6.0;
+                    let text_max_w = row_rect.max.x - text_x - dots_w - 4.0;
+                    let text_pos = egui::pos2(text_x, row_rect.center().y - 7.0);
                     let name_galley = ui.painter().layout(
                         grp.name.clone(),
                         egui::FontId::proportional(12.0),
                         self.settings.theme.text_primary(),
-                        text_max_w,
+                        text_max_w.max(20.0),
                     );
                     ui.painter().galley(
                         text_pos,
@@ -328,9 +357,34 @@ impl HostelApp {
 
         let mut start_call = false;
 
-        // ── Top bar: Group name + Call button ──
+        // ── Top bar: Group avatar + name + Call button ──
         ui.add_space(4.0);
         ui.horizontal(|ui| {
+            // Group avatar in header (28px)
+            let hdr_av = 28.0;
+            let (av_rect, _) = ui.allocate_exact_size(
+                egui::vec2(hdr_av, hdr_av),
+                egui::Sense::hover(),
+            );
+            if !self.group_avatar_textures.contains_key(&grp_id) {
+                if let Some(bytes) = avatar::load_group_avatar(&grp_id) {
+                    if let Some(tex) = load_avatar_texture(
+                        ui.ctx(),
+                        &format!("hdr_gav_{}", &grp_id[..8.min(grp_id.len())]),
+                        &bytes,
+                        32,
+                    ) {
+                        self.group_avatar_textures.insert(grp_id.clone(), tex);
+                    }
+                }
+            }
+            if let Some(tex) = self.group_avatar_textures.get(&grp_id) {
+                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                ui.painter().image(tex.id(), av_rect, uv, egui::Color32::WHITE);
+            } else {
+                paint_initial_avatar(ui.painter(), av_rect, &grp_name, &self.settings.theme);
+            }
+
             ui.heading(&grp_name);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let label = if is_admin { "Start Call (Leader)" } else { "Join Call" };
