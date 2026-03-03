@@ -194,9 +194,9 @@ impl HostelApp {
                         if let Some(bytes) = avatar::load_group_avatar(grp_id) {
                             if let Some(tex) = load_avatar_texture(
                                 ui.ctx(),
-                                &format!("sidebar_gav_{}", &grp_id[..8.min(grp_id.len())]),
+                                &format!("gav_{}", &grp_id[..8.min(grp_id.len())]),
                                 &bytes,
-                                32,
+                                96,
                             ) {
                                 self.group_avatar_textures.insert(grp_id.clone(), tex);
                             }
@@ -370,9 +370,9 @@ impl HostelApp {
                 if let Some(bytes) = avatar::load_group_avatar(&grp_id) {
                     if let Some(tex) = load_avatar_texture(
                         ui.ctx(),
-                        &format!("hdr_gav_{}", &grp_id[..8.min(grp_id.len())]),
+                        &format!("gav_{}", &grp_id[..8.min(grp_id.len())]),
                         &bytes,
-                        32,
+                        96,
                     ) {
                         self.group_avatar_textures.insert(grp_id.clone(), tex);
                     }
