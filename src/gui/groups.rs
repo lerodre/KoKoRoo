@@ -150,37 +150,38 @@ impl HostelApp {
                 for (idx, grp) in self.groups.iter().enumerate() {
                     let is_active = active_idx == Some(idx) && self.group_view == GroupView::Detail;
 
-                    let frame = if is_active {
-                        egui::Frame::none()
-                            .fill(self.settings.theme.widget_bg())
-                            .rounding(6.0)
-                            .inner_margin(4.0)
-                    } else {
-                        egui::Frame::none().inner_margin(4.0)
-                    };
-
-                    let resp = frame.show(ui, |ui| {
-                        ui.vertical(|ui| {
-                            ui.label(
-                                egui::RichText::new(&grp.name)
-                                    .strong()
-                                    .size(12.0),
-                            );
-                        });
-                    });
-
-                    // Click to open
-                    let rect_resp = ui.interact(
-                        resp.response.rect,
-                        egui::Id::new(("grp_sidebar_item", idx)),
+                    // Full-width highlight between separators
+                    let row_width = ui.available_width();
+                    let (row_rect, row_resp) = ui.allocate_exact_size(
+                        egui::vec2(row_width, 28.0),
                         egui::Sense::click(),
                     );
-                    if rect_resp.clicked() {
+
+                    if is_active {
+                        ui.painter().rect_filled(row_rect, 0.0, self.settings.theme.widget_bg());
+                    } else if row_resp.hovered() {
+                        ui.painter().rect_filled(
+                            row_rect, 0.0,
+                            self.settings.theme.widget_bg().gamma_multiply(0.5),
+                        );
+                    }
+
+                    // Draw group name centered vertically in the row
+                    let text_pos = egui::pos2(row_rect.min.x + 8.0, row_rect.center().y - 7.0);
+                    ui.painter().text(
+                        text_pos,
+                        egui::Align2::LEFT_TOP,
+                        &grp.name,
+                        egui::FontId::proportional(12.0),
+                        self.settings.theme.text_primary(),
+                    );
+
+                    if row_resp.clicked() {
                         *open_idx = Some(idx);
                     }
 
                     // Right-click context menu
-                    rect_resp.context_menu(|ui| {
+                    row_resp.context_menu(|ui| {
                         if ui.button("Delete").clicked() {
                             *delete_idx = Some(idx);
                             ui.close_menu();
@@ -207,7 +208,10 @@ impl HostelApp {
 
         ui.horizontal(|ui| {
             ui.label("Group name:");
-            ui.text_edit_singleline(&mut self.group_create_name);
+            let te = egui::TextEdit::singleline(&mut self.group_create_name)
+                .hint_text("Enter group name…")
+                .frame(true);
+            ui.add(te);
         });
 
         ui.add_space(12.0);

@@ -131,121 +131,124 @@ impl HostelApp {
                 for (contact_id, name, _preview, online, unread) in &conversations {
                     let is_active = active_cid.as_deref() == Some(contact_id.as_str());
 
-                    // Highlight active chat with same bg as sidebar buttons
-                    let frame = if is_active {
-                        egui::Frame::none()
-                            .fill(self.settings.theme.widget_bg())
-                            .rounding(6.0)
-                            .inner_margin(4.0)
-                    } else {
-                        egui::Frame::none().inner_margin(4.0)
+                    // Full-width highlight between separators
+                    let row_width = ui.available_width();
+                    let row_height = 40.0;
+                    let (row_rect, row_resp) = ui.allocate_exact_size(
+                        egui::vec2(row_width, row_height),
+                        egui::Sense::click(),
+                    );
+
+                    if is_active {
+                        ui.painter().rect_filled(row_rect, 0.0, self.settings.theme.widget_bg());
+                    } else if row_resp.hovered() {
+                        ui.painter().rect_filled(
+                            row_rect, 0.0,
+                            self.settings.theme.widget_bg().gamma_multiply(0.5),
+                        );
+                    }
+
+                    // Paint content on top of the highlight
+                    let mut cursor_x = row_rect.min.x + 4.0;
+                    let center_y = row_rect.center().y;
+
+                    // Presence indicator
+                    let presence = self.msg_peer_presence.get(contact_id)
+                        .copied()
+                        .unwrap_or(if *online {
+                            crate::messaging::PresenceStatus::Online
+                        } else {
+                            crate::messaging::PresenceStatus::Offline
+                        });
+                    let color = match presence {
+                        crate::messaging::PresenceStatus::Online => egui::Color32::from_rgb(0x4C, 0xAF, 0x50),
+                        crate::messaging::PresenceStatus::Away => egui::Color32::from_rgb(0xFF, 0xC1, 0x07),
+                        crate::messaging::PresenceStatus::Offline => self.settings.theme.text_muted(),
                     };
+                    ui.painter().circle_filled(egui::pos2(cursor_x + 4.0, center_y), 4.0, color);
+                    cursor_x += 12.0;
 
-                    frame.show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            // Presence indicator
-                            let presence = self.msg_peer_presence.get(contact_id)
-                                .copied()
-                                .unwrap_or(if *online {
-                                    crate::messaging::PresenceStatus::Online
-                                } else {
-                                    crate::messaging::PresenceStatus::Offline
-                                });
-                            let color = match presence {
-                                crate::messaging::PresenceStatus::Online => egui::Color32::from_rgb(0x4C, 0xAF, 0x50),
-                                crate::messaging::PresenceStatus::Away => egui::Color32::from_rgb(0xFF, 0xC1, 0x07),
-                                crate::messaging::PresenceStatus::Offline => self.settings.theme.text_muted(),
-                            };
-                            let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-                            ui.painter().circle_filled(rect.center(), 4.0, color);
-
-                            // Avatar (32px circle)
-                            let avatar_size = 32.0;
-                            let is_self = name == "YO (you)";
-                            let avatar_tex = if is_self {
-                                // Use own avatar
-                                if self.own_avatar_texture.is_none() {
-                                    if let Some(bytes) = avatar::load_own_avatar() {
-                                        self.own_avatar_texture = load_avatar_texture(
-                                            ui.ctx(), "own_avatar", &bytes, 96,
-                                        );
-                                    }
-                                }
-                                self.own_avatar_texture.as_ref()
-                            } else {
-                                // Use contact avatar (lazy load)
-                                if !self.contact_avatar_textures.contains_key(contact_id) {
-                                    if let Some(bytes) = avatar::load_contact_avatar(contact_id) {
-                                        if let Some(tex) = load_avatar_texture(
-                                            ui.ctx(),
-                                            &format!("contact_avatar_{}", &contact_id[..8.min(contact_id.len())]),
-                                            &bytes, 32,
-                                        ) {
-                                            self.contact_avatar_textures.insert(contact_id.clone(), tex);
-                                        }
-                                    }
-                                }
-                                self.contact_avatar_textures.get(contact_id)
-                            };
-
-                            let (av_rect, _) = ui.allocate_exact_size(
-                                egui::vec2(avatar_size, avatar_size),
-                                egui::Sense::hover(),
-                            );
-                            if let Some(tex) = avatar_tex {
-                                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-                                ui.painter().image(tex.id(), av_rect, uv, egui::Color32::WHITE);
-                            } else {
-                                // Default placeholder
-                                if self.default_avatar_texture.is_none() {
-                                    self.default_avatar_texture = load_avatar_texture(
-                                        ui.ctx(), "default_avatar", DEFAULT_AVATAR_PNG, 96,
-                                    );
-                                }
-                                if let Some(tex) = &self.default_avatar_texture {
-                                    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-                                    ui.painter().image(tex.id(), av_rect, uv, egui::Color32::from_white_alpha(160));
+                    // Avatar (32px circle)
+                    let avatar_size = 32.0;
+                    let is_self = name == "YO (you)";
+                    let avatar_tex = if is_self {
+                        if self.own_avatar_texture.is_none() {
+                            if let Some(bytes) = avatar::load_own_avatar() {
+                                self.own_avatar_texture = load_avatar_texture(
+                                    ui.ctx(), "own_avatar", &bytes, 96,
+                                );
+                            }
+                        }
+                        self.own_avatar_texture.as_ref()
+                    } else {
+                        if !self.contact_avatar_textures.contains_key(contact_id) {
+                            if let Some(bytes) = avatar::load_contact_avatar(contact_id) {
+                                if let Some(tex) = load_avatar_texture(
+                                    ui.ctx(),
+                                    &format!("contact_avatar_{}", &contact_id[..8.min(contact_id.len())]),
+                                    &bytes, 32,
+                                ) {
+                                    self.contact_avatar_textures.insert(contact_id.clone(), tex);
                                 }
                             }
+                        }
+                        self.contact_avatar_textures.get(contact_id)
+                    };
 
-                            // Name + badge + preview (clickable)
-                            let text = if *unread > 0 {
-                                egui::RichText::new(name.as_str()).strong().size(12.0)
-                            } else {
-                                egui::RichText::new(name.as_str()).size(12.0)
-                            };
+                    let av_rect = egui::Rect::from_center_size(
+                        egui::pos2(cursor_x + avatar_size / 2.0, center_y),
+                        egui::vec2(avatar_size, avatar_size),
+                    );
+                    if let Some(tex) = avatar_tex {
+                        let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                        ui.painter().image(tex.id(), av_rect, uv, egui::Color32::WHITE);
+                    } else {
+                        if self.default_avatar_texture.is_none() {
+                            self.default_avatar_texture = load_avatar_texture(
+                                ui.ctx(), "default_avatar", DEFAULT_AVATAR_PNG, 96,
+                            );
+                        }
+                        if let Some(tex) = &self.default_avatar_texture {
+                            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                            ui.painter().image(tex.id(), av_rect, uv, egui::Color32::from_white_alpha(160));
+                        }
+                    }
+                    cursor_x += avatar_size + 6.0;
 
-                            ui.vertical(|ui| {
-                                let resp = ui.horizontal(|ui| {
-                                    let btn = ui.add(egui::Button::new(text).frame(false));
-                                    if *unread > 0 {
-                                        let badge_color = self.settings.theme.btn_negative();
-                                        let badge_text = format!("{}", unread);
-                                        let font = egui::FontId::proportional(9.0);
-                                        let galley = ui.painter().layout_no_wrap(badge_text, font, egui::Color32::WHITE);
-                                        let text_w = galley.size().x;
-                                        let text_h = galley.size().y;
-                                        let radius = (text_w / 2.0 + 4.0).max(8.0);
-                                        let (badge_rect, _) = ui.allocate_exact_size(
-                                            egui::vec2(radius * 2.0, text_h + 4.0),
-                                            egui::Sense::hover(),
-                                        );
-                                        let center = badge_rect.center();
-                                        ui.painter().circle_filled(center, radius, badge_color);
-                                        ui.painter().galley(
-                                            egui::pos2(center.x - text_w / 2.0, center.y - text_h / 2.0),
-                                            galley,
-                                            egui::Color32::WHITE,
-                                        );
-                                    }
-                                    btn.clicked()
-                                });
-                                if resp.inner {
-                                    *open_chat = Some(contact_id.clone());
-                                }
-                            });
-                        });
-                    });
+                    // Name text
+                    let text_color = self.settings.theme.text_primary();
+                    let font = if *unread > 0 {
+                        egui::FontId::proportional(12.0)
+                    } else {
+                        egui::FontId::proportional(12.0)
+                    };
+                    let name_galley = ui.painter().layout_no_wrap(
+                        name.clone(), font, text_color,
+                    );
+                    let name_pos = egui::pos2(cursor_x, center_y - name_galley.size().y / 2.0);
+                    ui.painter().galley(name_pos, name_galley, text_color);
+
+                    // Unread badge
+                    if *unread > 0 {
+                        let badge_color = self.settings.theme.btn_negative();
+                        let badge_text = format!("{}", unread);
+                        let badge_font = egui::FontId::proportional(9.0);
+                        let badge_galley = ui.painter().layout_no_wrap(badge_text, badge_font, egui::Color32::WHITE);
+                        let bw = badge_galley.size().x;
+                        let bh = badge_galley.size().y;
+                        let radius = (bw / 2.0 + 4.0).max(8.0);
+                        let badge_center = egui::pos2(row_rect.max.x - radius - 6.0, center_y);
+                        ui.painter().circle_filled(badge_center, radius, badge_color);
+                        ui.painter().galley(
+                            egui::pos2(badge_center.x - bw / 2.0, badge_center.y - bh / 2.0),
+                            badge_galley,
+                            egui::Color32::WHITE,
+                        );
+                    }
+
+                    if row_resp.clicked() {
+                        *open_chat = Some(contact_id.clone());
+                    }
                     ui.separator();
                 }
             });
