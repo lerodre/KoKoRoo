@@ -402,7 +402,7 @@ impl MsgDaemon {
                 }
                 let (last_retry, tier) = self.retry_state.get(contact_id)
                     .cloned()
-                    .unwrap_or((Instant::now() - Duration::from_secs(999), 0));
+                    .unwrap_or((Instant::now().checked_sub(Duration::from_secs(999)).unwrap_or_else(Instant::now), 0));
 
                 let backoff = RETRY_BACKOFFS.get(tier).copied()
                     .unwrap_or(*RETRY_BACKOFFS.last().unwrap());

@@ -175,7 +175,7 @@ impl MsgDaemon {
             notified_calls: HashMap::new(),
             rejected_ips: HashMap::new(),
             ip_announces: HashMap::new(),
-            last_ip_check: Instant::now() - IP_CHECK_INTERVAL, // trigger check on first housekeep
+            last_ip_check: Instant::now().checked_sub(IP_CHECK_INTERVAL).unwrap_or_else(Instant::now), // trigger check on first housekeep
             last_announced_ip: String::new(),
             peer_query_cooldowns: HashMap::new(),
             query_counts: HashMap::new(),
