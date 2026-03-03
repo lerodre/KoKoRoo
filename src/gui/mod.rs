@@ -905,10 +905,15 @@ impl eframe::App for HostelApp {
         if matches!(self.group_view, GroupView::InCall) {
             if let Some(rx) = &self.group_call_chat_rx {
                 while let Ok(msg) = rx.try_recv() {
+                    // Derive fingerprint from local group roster (trusted data, not peer-supplied)
+                    let sender_fp = self.group_call_group.as_ref()
+                        .and_then(|g| g.members.iter().find(|m| m.sender_index == msg.sender_index))
+                        .map(|m| m.fingerprint.clone())
+                        .unwrap_or_default();
                     // Persist to group chat history
                     if let Some(ref mut hist) = self.group_chat_history {
                         hist.add_message(
-                            String::new(), // fingerprint not available here
+                            sender_fp,
                             msg.sender_nickname.clone(),
                             msg.text.clone(),
                         );
@@ -1100,11 +1105,11 @@ impl eframe::App for HostelApp {
                             }
                         }
                     }
-                    MsgEvent::IncomingGroupChat { group_id, sender_nickname, text } => {
+                    MsgEvent::IncomingGroupChat { group_id, sender_fingerprint, sender_nickname, text } => {
                         // Save to group chat history
                         use crate::chat::GroupChatHistory;
                         let mut history = GroupChatHistory::load(&group_id, &self.identity.secret);
-                        history.add_message(String::new(), sender_nickname.clone(), text.clone());
+                        history.add_message(sender_fingerprint, sender_nickname.clone(), text.clone());
 
                         // If currently viewing this group, update the live messages
                         if let Some(idx) = self.group_detail_idx {

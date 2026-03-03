@@ -166,11 +166,6 @@ impl HostelApp {
                                     .strong()
                                     .size(12.0),
                             );
-                            ui.label(
-                                egui::RichText::new(format!("{} members", grp.members.len()))
-                                    .size(11.0)
-                                    .color(self.settings.theme.text_muted()),
-                            );
                         });
                     });
 
@@ -606,9 +601,10 @@ impl HostelApp {
             if !text.is_empty() {
                 // Save to local history
                 let my_nickname = self.settings.nickname.clone();
+                let my_fingerprint = self.identity.fingerprint.clone();
                 {
                     let mut history = GroupChatHistory::load(&grp_id, &self.identity.secret);
-                    history.add_message(String::new(), my_nickname.clone(), text.clone());
+                    history.add_message(my_fingerprint, my_nickname.clone(), text.clone());
                 }
                 // Send to all other group members via messaging daemon
                 if let Some(tx) = &self.msg_cmd_tx {
@@ -908,10 +904,11 @@ impl HostelApp {
                     tx.send(text.clone()).ok();
                 }
                 let my_nickname = self.settings.nickname.clone();
+                let my_fingerprint = self.identity.fingerprint.clone();
                 // Persist to group chat history
                 if let Some(ref mut hist) = self.group_chat_history {
                     hist.add_message(
-                        String::new(),
+                        my_fingerprint,
                         my_nickname.clone(),
                         text.clone(),
                     );

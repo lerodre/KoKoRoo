@@ -102,7 +102,8 @@ pub enum MsgEvent {
     /// Incoming group invite from a contact.
     IncomingGroupInvite { from_nickname: String, group_json: Vec<u8> },
     /// Incoming group chat message via messaging daemon.
-    IncomingGroupChat { group_id: String, sender_nickname: String, text: String },
+    /// `sender_fingerprint` is derived from the peer's verified pubkey (never from peer-supplied data).
+    IncomingGroupChat { group_id: String, sender_fingerprint: String, sender_nickname: String, text: String },
     /// A peer rejected our group invite — remove them from the group.
     GroupInviteRejected { contact_id: String, group_id: String },
 }
