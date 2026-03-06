@@ -42,6 +42,9 @@ pub fn start_as_leader(
     mic_active: Arc<AtomicBool>,
     my_sender_index: u16,
 ) -> Result<GroupCallInfo, String> {
+    log_fmt!("[groupcall] starting as LEADER for '{}' (mode=Relay, {} members)",
+        group.name, group.members.len());
+
     let bind_addr = format!("[::]:{local_port}");
     let socket = UdpSocket::bind(&bind_addr)
         .map_err(|e| format!("Failed to bind {bind_addr}: {e}"))?;
@@ -109,7 +112,6 @@ pub fn start_as_leader(
                                 {
                                     let mut conn = relay_connected.lock().unwrap();
                                     if !conn.contains_key(&member.sender_index) {
-                                        log_fmt!("[group] member joined: {} (idx={})", member.nickname, member.sender_index);
                                         conn.insert(member.sender_index, ConnectedMember {
                                             sender_index: member.sender_index,
                                             peer_addr: from,
@@ -117,6 +119,8 @@ pub fn start_as_leader(
                                             rtt_ms: None,
                                             ping_sent_at: None,
                                         });
+                                        log_fmt!("[groupcall] member joined: {} (idx={}) — {} connected",
+                                            member.nickname, member.sender_index, conn.len());
                                     }
                                 } else {
                                     log_fmt!("[group] GRP_HELLO from unknown address {} — no matching member", from);
@@ -233,8 +237,15 @@ pub fn start_as_leader(
                         }
 
                         PKT_GRP_HANGUP => {
-                            log_fmt!("[group] member left: idx={}", sender_index);
-                            relay_connected.lock().unwrap().remove(&sender_index);
+                            let nickname = relay_group.members.iter()
+                                .find(|m| m.sender_index == sender_index)
+                                .map(|m| m.nickname.as_str())
+                                .unwrap_or("unknown");
+                            let mut conn = relay_connected.lock().unwrap();
+                            conn.remove(&sender_index);
+                            log_fmt!("[groupcall] member left: {} (idx={}) — {} remaining",
+                                nickname, sender_index, conn.len());
+                            drop(conn);
                             decoders.remove(&sender_index);
                             relay_audio.lock().unwrap().remove(&sender_index);
                         }
@@ -403,8 +414,13 @@ pub fn start_as_leader(
                 .map(|(idx, _)| *idx)
                 .collect();
             for idx in timeout_indices {
-                log_fmt!("[group] member timed out: idx={}", idx);
+                let nickname = hk_group.members.iter()
+                    .find(|m| m.sender_index == idx)
+                    .map(|m| m.nickname.as_str())
+                    .unwrap_or("unknown");
                 conn.remove(&idx);
+                log_fmt!("[groupcall] member timed out: {} (idx={}) — {} remaining",
+                    nickname, idx, conn.len());
             }
         }
     });
@@ -434,6 +450,9 @@ pub fn start_as_member(
     mic_active: Arc<AtomicBool>,
     my_sender_index: u16,
 ) -> Result<GroupCallInfo, String> {
+    log_fmt!("[groupcall] starting as MEMBER for '{}' (mode=Relay, leader={})",
+        group.name, leader_addr);
+
     let bind_addr = format!("[::]:{local_port}");
     let socket = UdpSocket::bind(&bind_addr)
         .map_err(|e| format!("Failed to bind {bind_addr}: {e}"))?;
@@ -567,7 +586,13 @@ pub fn start_as_member(
                         PKT_GRP_LEADER => {
                             if let Some((_, _, data)) = crypto::grp_decrypt(&recv_cipher, &recv_buf[..n]) {
                                 if data.len() >= 32 {
-                                    log_fmt!("[group] received new leader announcement from idx={}", sender_index);
+                                    let old_leader = recv_leader_addr.lock().unwrap().clone();
+                                    let leader_nick = recv_group.members.iter()
+                                        .find(|m| m.sender_index == sender_index)
+                                        .map(|m| m.nickname.as_str())
+                                        .unwrap_or("unknown");
+                                    log_fmt!("[groupcall] leader changed: {} (idx={}) at {} (was {})",
+                                        leader_nick, sender_index, _from, old_leader);
                                     *recv_leader_addr.lock().unwrap() = _from.to_string();
                                     last_leader_packet = Instant::now();
                                 }
@@ -575,6 +600,12 @@ pub fn start_as_member(
                         }
 
                         PKT_GRP_HANGUP => {
+                            let nickname = recv_group.members.iter()
+                                .find(|m| m.sender_index == sender_index)
+                                .map(|m| m.nickname.as_str())
+                                .unwrap_or("unknown");
+                            log_fmt!("[groupcall] member disconnected (via relay): {} (idx={})",
+                                nickname, sender_index);
                             recv_audio.lock().unwrap().remove(&sender_index);
                             decoders.remove(&sender_index);
                         }

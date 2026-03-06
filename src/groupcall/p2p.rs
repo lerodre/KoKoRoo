@@ -40,6 +40,15 @@ pub fn start(
     mic_active: Arc<AtomicBool>,
     my_sender_index: u16,
 ) -> Result<GroupCallInfo, String> {
+    let target_peers = group.members.iter()
+        .filter(|m| m.pubkey != group.members.iter()
+            .find(|mm| mm.sender_index == my_sender_index)
+            .map(|mm| mm.pubkey).unwrap_or([0u8; 32])
+            && !m.address.is_empty() && !m.port.is_empty())
+        .count();
+    log_fmt!("[groupcall] starting P2P mesh for '{}' ({} potential peers)",
+        group.name, target_peers);
+
     let bind_addr = format!("[::]:{local_port}");
     let socket = UdpSocket::bind(&bind_addr)
         .map_err(|e| format!("Failed to bind {bind_addr}: {e}"))?;
@@ -123,12 +132,13 @@ pub fn start(
                                 {
                                     let mut peer_map = recv_peers.lock().unwrap();
                                     if !peer_map.contains_key(&member.sender_index) {
-                                        log_fmt!("[p2p] peer joined: {} (idx={})", member.nickname, member.sender_index);
                                         peer_map.insert(member.sender_index, PeerConnection {
                                             sender_index: member.sender_index,
                                             peer_addr: from,
                                             last_activity: Instant::now(),
                                         });
+                                        log_fmt!("[p2p] peer joined: {} (idx={}) — {} peers connected",
+                                            member.nickname, member.sender_index, peer_map.len());
                                         // Send HELLO back so they discover us too
                                         if let Some(gid_bytes) = crypto::group_id_to_bytes(&recv_group.group_id) {
                                             let mut dummy_pubkey = [0u8; 32];
@@ -191,8 +201,15 @@ pub fn start(
                         }
 
                         PKT_GRP_HANGUP => {
-                            log_fmt!("[p2p] peer left: idx={}", sender_index);
-                            recv_peers.lock().unwrap().remove(&sender_index);
+                            let nickname = recv_group.members.iter()
+                                .find(|m| m.sender_index == sender_index)
+                                .map(|m| m.nickname.as_str())
+                                .unwrap_or("unknown");
+                            let mut peer_map = recv_peers.lock().unwrap();
+                            peer_map.remove(&sender_index);
+                            log_fmt!("[p2p] peer left: {} (idx={}) — {} remaining",
+                                nickname, sender_index, peer_map.len());
+                            drop(peer_map);
                             decoders.remove(&sender_index);
                             recv_audio.lock().unwrap().remove(&sender_index);
                         }
@@ -312,8 +329,13 @@ pub fn start(
                 .map(|(idx, _)| *idx)
                 .collect();
             for idx in timeout_indices {
-                log_fmt!("[p2p] peer timed out: idx={}", idx);
+                let nickname = hk_group.members.iter()
+                    .find(|m| m.sender_index == idx)
+                    .map(|m| m.nickname.as_str())
+                    .unwrap_or("unknown");
                 peer_map.remove(&idx);
+                log_fmt!("[p2p] peer timed out: {} (idx={}) — {} remaining",
+                    nickname, idx, peer_map.len());
             }
         }
     });

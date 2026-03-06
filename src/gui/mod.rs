@@ -1047,13 +1047,33 @@ impl eframe::App for HostelApp {
                         // Could update delivery status UI here
                     }
                     MsgEvent::PeerStatus { contact_id, online } => {
+                        let was_online = self.msg_peer_online.get(&contact_id).copied().unwrap_or(false);
                         self.msg_peer_online.insert(contact_id.clone(), online);
+                        if online != was_online {
+                            let nickname = self.contacts.iter()
+                                .find(|c| c.contact_id == contact_id)
+                                .map(|c| c.nickname.as_str())
+                                .unwrap_or("unknown");
+                            if online {
+                                log_fmt!("[daemon] contact online: {} ({})", nickname, &contact_id[..8]);
+                            } else {
+                                log_fmt!("[daemon] contact offline: {} ({})", nickname, &contact_id[..8]);
+                            }
+                        }
                         if !online {
                             self.msg_peer_presence.insert(contact_id, crate::messaging::PresenceStatus::Offline);
                         }
                     }
                     MsgEvent::PresenceUpdate { contact_id, status } => {
-                        self.msg_peer_presence.insert(contact_id, status);
+                        let prev = self.msg_peer_presence.get(&contact_id).copied();
+                        self.msg_peer_presence.insert(contact_id.clone(), status);
+                        if prev != Some(status) {
+                            let nickname = self.contacts.iter()
+                                .find(|c| c.contact_id == contact_id)
+                                .map(|c| c.nickname.as_str())
+                                .unwrap_or("unknown");
+                            log_fmt!("[daemon] presence: {} -> {:?} ({})", nickname, status, &contact_id[..8]);
+                        }
                     }
                     MsgEvent::IncomingRequest { request_id, nickname, ip, fingerprint } => {
                         // Add to incoming requests if not already present
