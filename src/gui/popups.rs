@@ -65,6 +65,7 @@ impl HostelApp {
 
         if accept {
             if let Some(info) = self.incoming_call.take() {
+                log_fmt!("[gui] accepted incoming call from {}", info.nickname);
                 // Stop ringtone
                 if let Some(stop) = self.ringtone_stop.take() {
                     stop.store(true, Ordering::Relaxed);
@@ -81,6 +82,7 @@ impl HostelApp {
         }
         if reject {
             if let Some(info) = self.incoming_call.take() {
+                log_fmt!("[gui] rejected incoming call from {}", info.nickname);
                 // Stop ringtone
                 if let Some(stop) = self.ringtone_stop.take() {
                     stop.store(true, Ordering::Relaxed);

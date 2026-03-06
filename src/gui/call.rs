@@ -296,6 +296,7 @@ impl HostelApp {
             ).min_size(egui::vec2(130.0, 35.0)).fill(scr_color);
             if ui.add(scr_btn).clicked() {
                 if self.screen_sharing {
+                    log_fmt!("[gui] screen share: off");
                     self.screen_sharing = false;
                     if let Some(tx) = &self.screen_cmd_tx {
                         let _ = tx.send(ScreenCommand::Stop);
@@ -333,6 +334,7 @@ impl HostelApp {
             ).min_size(egui::vec2(120.0, 35.0)).fill(cam_color);
             if ui.add(cam_btn).clicked() {
                 if self.webcam_sharing {
+                    log_fmt!("[gui] webcam: off");
                     self.webcam_sharing = false;
                     if let Some(tx) = &self.screen_cmd_tx {
                         let _ = tx.send(ScreenCommand::Stop);
@@ -360,6 +362,7 @@ impl HostelApp {
                 egui::RichText::new("Hang Up").size(16.0).color(egui::Color32::WHITE)
             ).min_size(egui::vec2(100.0, 35.0)).fill(self.settings.theme.btn_negative());
             if ui.add(hangup_btn).clicked() {
+                log_fmt!("[gui] hangup button clicked");
                 self.show_hangup_confirm = true;
             }
         });
@@ -429,6 +432,7 @@ impl HostelApp {
                         egui::RichText::new("Share Screen").size(16.0).color(egui::Color32::WHITE)
                     ).min_size(egui::vec2(160.0, 35.0)).fill(self.settings.theme.btn_primary());
                     if ui.add(share_btn).clicked() {
+                        log_fmt!("[gui] screen share: on");
                         let quality = ScreenQuality::ALL[self.selected_screen_quality];
                         let audio_device = match self.selected_audio_device {
                             0 => None,
@@ -493,6 +497,7 @@ impl HostelApp {
                         else { self.settings.theme.btn_neutral() }
                     );
                     if ui.add_enabled(can_start, start_btn).clicked() {
+                        log_fmt!("[gui] webcam: on");
                         let quality = ScreenQuality::ALL[self.selected_screen_quality];
                         if let Some(tx) = &self.screen_cmd_tx {
                             let _ = tx.send(ScreenCommand::StartWebcam { quality, device_index: self.selected_camera });

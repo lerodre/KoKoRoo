@@ -155,6 +155,7 @@ pub struct VoiceEngine {
 
 impl Drop for VoiceEngine {
     fn drop(&mut self) {
+        log_fmt!("[voice] call ended");
         self.sys_audio_active.store(false, Ordering::Relaxed);
         // Recover producer before dropping stream (not strictly needed in drop, but clean)
         if let Some(ref stream) = self.sys_audio_stream {
@@ -531,6 +532,7 @@ pub fn start_engine(
     let peer_fingerprint = crypto::fingerprint(&peer_identity_pubkey);
     let contact_id = identity::derive_contact_id(&our_identity.pubkey, &peer_identity_pubkey);
 
+    log_fmt!("[voice] call established with {}", if peer_nickname.is_empty() { &peer_fingerprint } else { &peer_nickname });
     println!("Peer identity: {peer_fingerprint}");
     if !peer_nickname.is_empty() {
         println!("Peer nickname: {peer_nickname}");

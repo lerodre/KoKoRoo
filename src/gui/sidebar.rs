@@ -2,7 +2,7 @@ use eframe::egui;
 use super::{HostelApp, SidebarTab, load_icon_texture_sized};
 
 impl HostelApp {
-    pub(crate) fn draw_sidebar(&mut self, ui: &mut egui::Ui, in_call: bool, in_group_call: bool) {
+    pub(crate) fn draw_sidebar(&mut self, ui: &mut egui::Ui, in_call: bool, _in_group_call: bool) {
         ui.add_space(8.0);
 
         // Logo: load texture once (cropped + downscaled with Lanczos3 for crisp display)
@@ -55,8 +55,6 @@ impl HostelApp {
                 let is_selected = self.active_tab == tab;
                 let enabled = if in_call {
                     tab == SidebarTab::Call || tab == SidebarTab::Appearance || tab == SidebarTab::Logs
-                } else if in_group_call {
-                    tab == SidebarTab::Groups || tab == SidebarTab::Appearance || tab == SidebarTab::Logs
                 } else {
                     true
                 };

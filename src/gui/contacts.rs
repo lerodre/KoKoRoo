@@ -433,13 +433,14 @@ impl HostelApp {
     }
 
     fn handle_request_action(&mut self, request_id: &str, action: RequestAction) {
-        let ip = self.req_incoming.iter()
+        let (ip, nickname) = self.req_incoming.iter()
             .find(|(rid, ..)| rid == request_id)
-            .map(|(_, _, ip, _)| ip.clone())
+            .map(|(_, nick, ip, _)| (ip.clone(), nick.clone()))
             .unwrap_or_default();
 
         match action {
             RequestAction::Accept => {
+                log_fmt!("[gui] accepted contact request from {}", nickname);
                 if let Some(tx) = &self.msg_cmd_tx {
                     tx.send(MsgCommand::AcceptRequest {
                         request_id: request_id.to_string(),
@@ -447,6 +448,7 @@ impl HostelApp {
                 }
             }
             RequestAction::Reject => {
+                log_fmt!("[gui] rejected contact request from {}", nickname);
                 if let Some(tx) = &self.msg_cmd_tx {
                     tx.send(MsgCommand::RejectRequest {
                         request_id: request_id.to_string(),

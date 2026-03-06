@@ -386,6 +386,10 @@ impl MsgDaemon {
                 }
 
                 MsgCommand::SendFileOffer { contact_id, peer_addr, peer_pubkey, file_path } => {
+                    let filename_log = std::path::Path::new(&file_path)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "file".to_string());
                     // Compute SHA-256 and file size
                     let metadata = match std::fs::metadata(&file_path) {
                         Ok(m) => m,
@@ -399,6 +403,7 @@ impl MsgDaemon {
                         }
                     };
                     let file_size = metadata.len();
+                    log_fmt!("[daemon] SendFileOffer: file='{}' size={} to={}", filename_log, file_size, contact_id);
                     let filename = std::path::Path::new(&file_path)
                         .file_name()
                         .map(|n| n.to_string_lossy().to_string())
@@ -457,6 +462,7 @@ impl MsgDaemon {
                 }
 
                 MsgCommand::AcceptFileTransfer { contact_id, transfer_id } => {
+                    log_fmt!("[daemon] AcceptFileTransfer: id={} from={}", transfer_id, contact_id);
                     let key = (contact_id.clone(), transfer_id);
                     if let Some(ft) = self.file_transfers.remove(&key) {
                         if let FileTransfer::IncomingWaiting { transfer_id, contact_id, filename, file_size, sha256 } = ft {
@@ -481,6 +487,7 @@ impl MsgDaemon {
                 }
 
                 MsgCommand::RejectFileTransfer { contact_id, transfer_id } => {
+                    log_fmt!("[daemon] RejectFileTransfer: id={} from={}", transfer_id, contact_id);
                     let key = (contact_id.clone(), transfer_id);
                     if let Some(ft) = self.file_transfers.remove(&key) {
                         if let FileTransfer::IncomingWaiting { transfer_id, contact_id, .. } = ft {
@@ -496,6 +503,7 @@ impl MsgDaemon {
                 }
 
                 MsgCommand::CancelFileTransfer { contact_id, transfer_id } => {
+                    log_fmt!("[daemon] CancelFileTransfer: id={}", transfer_id);
                     let key = (contact_id.clone(), transfer_id);
                     if let Some(mut ft) = self.file_transfers.remove(&key) {
                         // Send cancel to peer

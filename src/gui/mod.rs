@@ -61,6 +61,17 @@ pub(crate) enum FriendsSubTab {
     Requests,
 }
 
+#[derive(Clone, Copy, PartialEq, Default)]
+pub(crate) enum LogFilter {
+    #[default]
+    All,
+    Daemon,
+    Groups,
+    Voice,
+    Gui,
+    Network,
+}
+
 pub(crate) struct DeviceList {
     pub(crate) input_names: Vec<String>,
     pub(crate) output_names: Vec<String>,
@@ -196,6 +207,9 @@ pub struct HostelApp {
     // Friends tab sub-tab
     pub(crate) friends_sub_tab: FriendsSubTab,
 
+    // Logs tab filter
+    pub(crate) log_filter: LogFilter,
+
     // IP privacy: censored by default
     pub(crate) show_ips: bool,
 
@@ -280,6 +294,9 @@ pub struct HostelApp {
     pub(crate) group_call_role: Option<GroupRole>,
     pub(crate) group_chat_history: Option<GroupChatHistory>,
     pub(crate) group_connect_result: Arc<std::sync::Mutex<Option<Result<GroupCallInfo, String>>>>,
+    /// After hang-up, if others were still in the call, remember the locked mode for that channel.
+    /// Key = channel_id, Value = the CallMode that was active. Cleared when we re-join or group updates.
+    pub(crate) group_call_ongoing: std::collections::HashMap<String, crate::group::CallMode>,
 }
 
 pub(crate) struct IncomingCallInfo {
@@ -443,6 +460,7 @@ impl HostelApp {
             req_port_input: String::new(),
             req_status: String::new(),
             friends_sub_tab: FriendsSubTab::List,
+            log_filter: LogFilter::All,
             show_ips: false,
             incoming_call: None,
             incoming_call_attention: false,
@@ -502,10 +520,12 @@ impl HostelApp {
             group_call_role: None,
             group_chat_history: None,
             group_connect_result: Arc::new(std::sync::Mutex::new(None)),
+            group_call_ongoing: std::collections::HashMap::new(),
         }
     }
 
     pub(crate) fn start_call(&mut self) {
+        log_fmt!("[gui] start_call: peer=[{}]:{}", self.peer_ip, self.peer_port);
         // Tell messaging daemon to release the socket for voice
         if let Some(tx) = &self.msg_cmd_tx {
             tx.send(MsgCommand::YieldSocket).ok();
@@ -624,6 +644,7 @@ impl HostelApp {
     }
 
     pub(crate) fn hang_up(&mut self) {
+        log_fmt!("[gui] hang_up");
         if let Some(ref lh) = self.local_hangup {
             lh.store(true, Ordering::Relaxed);
         }
@@ -632,11 +653,13 @@ impl HostelApp {
     }
 
     pub(crate) fn on_remote_hangup(&mut self) {
+        log_fmt!("[gui] remote hangup");
         self.running.store(false, Ordering::Relaxed);
         self.cleanup_call();
     }
 
     pub(crate) fn cleanup_call(&mut self) {
+        log_fmt!("[gui] cleanup_call");
         self.local_hangup = None;
         self.verification_code.clear();
         self.peer_fingerprint.clear();
@@ -682,6 +705,7 @@ impl HostelApp {
     }
 
     pub(crate) fn start_group_call(&mut self, channel_id: &str) {
+        log_fmt!("[gui] start_group_call: channel={}", channel_id);
         let idx = match self.group_detail_idx {
             Some(i) if i < self.groups.len() => i,
             _ => return,
@@ -712,6 +736,7 @@ impl HostelApp {
         self.group_connect_result = Arc::new(std::sync::Mutex::new(None));
         self.group_call_members.clear();
         self.group_call_channel_id = Some(channel_id.to_string());
+        self.group_call_ongoing.remove(channel_id);
         self.group_screen_sharing = false;
         self.group_webcam_sharing = false;
 
@@ -771,6 +796,20 @@ impl HostelApp {
     }
 
     pub(crate) fn cleanup_group_call(&mut self) {
+        log_fmt!("[gui] cleanup_group_call");
+        // If others were still in the call, mark the channel as having an ongoing call
+        // so the mode selector is locked when we view the idle screen.
+        let had_others = self.group_call_members.len() > 1;
+        if had_others {
+            if let (Some(ch_id), Some(grp_idx)) = (self.group_call_channel_id.clone(), self.group_detail_idx) {
+                if let Some(grp) = self.groups.get(grp_idx) {
+                    self.group_call_ongoing.insert(ch_id, grp.call_mode);
+                }
+            }
+        } else if let Some(ch_id) = &self.group_call_channel_id {
+            self.group_call_ongoing.remove(ch_id);
+        }
+
         self.group_call_running.store(false, Ordering::Relaxed);
         if let Some(ref h) = self.group_call_hangup {
             h.store(true, Ordering::Relaxed);
@@ -832,6 +871,7 @@ impl eframe::App for HostelApp {
                         if info.key_change_warning.is_some() {
                             self.screen = Screen::KeyWarning;
                         } else {
+                            log_fmt!("[gui] call connected");
                             self.screen = Screen::InCall;
                         }
                     }
@@ -840,6 +880,7 @@ impl eframe::App for HostelApp {
                         if e == "Cancelled" {
                             self.screen = Screen::Setup;
                         } else {
+                            log_fmt!("[gui] call error: {}", e);
                             self.screen = Screen::Error(e);
                         }
                     }
@@ -914,7 +955,7 @@ impl eframe::App for HostelApp {
         }
 
         // Check for group call connecting result
-        if matches!(self.group_view, GroupView::Connecting) {
+        if self.group_call_channel_id.is_some() && self.group_call_chat_rx.is_none() {
             let grp_result = self.group_connect_result.lock().unwrap().take();
             if let Some(res) = grp_result {
                 match res {
@@ -941,7 +982,7 @@ impl eframe::App for HostelApp {
         }
 
         // Poll group call chat messages + roster updates + detect hangup
-        if matches!(self.group_view, GroupView::InCall) {
+        if self.group_call_channel_id.is_some() && self.group_call_chat_rx.is_some() {
             if let Some(rx) = &self.group_call_chat_rx {
                 while let Ok(msg) = rx.try_recv() {
                     // Derive fingerprint from local group roster (trusted data, not peer-supplied)
@@ -1366,13 +1407,11 @@ impl eframe::App for HostelApp {
         style.visuals.selection.stroke.color = t.text_primary();
         ctx.set_style(style);
 
-        // Force Call tab when call is active
+        // Force Call tab when 1:1 call is active (fullscreen UI)
         let in_call = matches!(self.screen, Screen::Connecting | Screen::KeyWarning | Screen::InCall | Screen::Error(_));
-        let in_group_call = matches!(self.group_view, GroupView::Connecting | GroupView::InCall);
+        let in_group_call = self.group_call_channel_id.is_some();
         if in_call {
             self.active_tab = SidebarTab::Call;
-        } else if in_group_call {
-            self.active_tab = SidebarTab::Groups;
         }
 
         // Video-only fullscreen: skip all UI except video + overlay

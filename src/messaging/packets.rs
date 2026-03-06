@@ -637,6 +637,7 @@ impl MsgDaemon {
                                             recv.flush();
                                             if recv.verify_hash() {
                                                 if let Some(saved_path) = recv.finalize() {
+                                                    log_fmt!("[daemon] file transfer complete: id={}", transfer_id);
                                                     self.event_tx.send(MsgEvent::FileTransferComplete {
                                                         contact_id,
                                                         transfer_id,
@@ -644,6 +645,7 @@ impl MsgDaemon {
                                                     }).ok();
                                                 } else {
                                                     recv.cleanup();
+                                                    log_fmt!("[daemon] file transfer failed: id={}", transfer_id);
                                                     self.event_tx.send(MsgEvent::FileTransferFailed {
                                                         contact_id, transfer_id,
                                                         reason: "Failed to save file".into(),
@@ -651,6 +653,7 @@ impl MsgDaemon {
                                                 }
                                             } else {
                                                 recv.cleanup();
+                                                log_fmt!("[daemon] file transfer failed: id={}", transfer_id);
                                                 self.event_tx.send(MsgEvent::FileTransferFailed {
                                                     contact_id, transfer_id,
                                                     reason: "Hash verification failed".into(),
@@ -676,6 +679,7 @@ impl MsgDaemon {
                                 if let FileTransfer::Receiving(ref mut recv) = ft {
                                     recv.cleanup();
                                 }
+                                log_fmt!("[daemon] file transfer failed: id={}", transfer_id);
                                 self.event_tx.send(MsgEvent::FileTransferFailed {
                                     contact_id,
                                     transfer_id,
