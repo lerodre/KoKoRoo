@@ -734,6 +734,9 @@ impl HostelApp {
             }).ok();
         }
 
+        // Brief delay so daemon sends signal before YieldSocket disconnects peers
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
         // Yield socket from messaging daemon
         if let Some(tx) = &self.msg_cmd_tx {
             tx.send(MsgCommand::YieldSocket).ok();

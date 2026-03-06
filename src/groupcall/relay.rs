@@ -106,8 +106,9 @@ pub fn start_as_leader(
                         if let Some((_, group_id_bytes)) = crypto::parse_grp_hello(&recv_buf[..n]) {
                             let gid = crypto::group_id_from_bytes(&group_id_bytes);
                             if gid == relay_group.group_id {
+                                let from_ip = from.ip().to_string();
                                 if let Some(member) = relay_group.members.iter()
-                                    .find(|m| from.ip().to_string().contains(&m.address) || m.address.is_empty())
+                                    .find(|m| !m.address.is_empty() && from_ip.contains(&m.address))
                                 {
                                     log_fmt!("[probe] IN GRP_HELLO from {} ({}), responding PKT_GRP_LEADER", member.nickname, from);
                                     let mut conn = relay_connected.lock().unwrap();
@@ -410,7 +411,7 @@ pub fn start_as_leader(
 
             // Remove timed-out members (>15s)
             let timeout_indices: Vec<u16> = conn.iter()
-                .filter(|(_, m)| m.last_activity.elapsed().as_secs() > 15)
+                .filter(|(_, m)| m.last_activity.elapsed().as_secs() > 30)
                 .map(|(idx, _)| *idx)
                 .collect();
             for idx in timeout_indices {

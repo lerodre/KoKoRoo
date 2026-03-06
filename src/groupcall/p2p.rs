@@ -127,8 +127,9 @@ pub fn start(
                         if let Some((_, group_id_bytes)) = crypto::parse_grp_hello(&recv_buf[..n]) {
                             let gid = crypto::group_id_from_bytes(&group_id_bytes);
                             if gid == recv_group.group_id {
+                                let from_ip = from.ip().to_string();
                                 if let Some(member) = recv_group.members.iter()
-                                    .find(|m| from.ip().to_string().contains(&m.address) || m.address.is_empty())
+                                    .find(|m| !m.address.is_empty() && from_ip.contains(&m.address))
                                 {
                                     log_fmt!("[probe] IN GRP_HELLO from {} ({}), responding GRP_HELLO", member.nickname, from);
                                     let mut peer_map = recv_peers.lock().unwrap();
@@ -326,7 +327,7 @@ pub fn start(
 
             // Remove timed-out peers (>15s)
             let timeout_indices: Vec<u16> = peer_map.iter()
-                .filter(|(_, p)| p.last_activity.elapsed().as_secs() > 15)
+                .filter(|(_, p)| p.last_activity.elapsed().as_secs() > 30)
                 .map(|(idx, _)| *idx)
                 .collect();
             for idx in timeout_indices {
