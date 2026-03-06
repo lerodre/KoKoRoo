@@ -130,6 +130,7 @@ pub fn start(
                                 if let Some(member) = recv_group.members.iter()
                                     .find(|m| from.ip().to_string().contains(&m.address) || m.address.is_empty())
                                 {
+                                    log_fmt!("[probe] IN GRP_HELLO from {} ({}), responding GRP_HELLO", member.nickname, from);
                                     let mut peer_map = recv_peers.lock().unwrap();
                                     if !peer_map.contains_key(&member.sender_index) {
                                         peer_map.insert(member.sender_index, PeerConnection {

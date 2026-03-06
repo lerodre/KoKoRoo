@@ -70,6 +70,7 @@ pub const PKT_GRP_SCREEN_OFFER: u8 = 0x43; // group screen share beacon
 pub const PKT_GRP_SCREEN_STOP: u8  = 0x44; // group screen share stopped
 pub const PKT_GRP_MEMBER_SYNC: u8  = 0x45; // per-member sync after invite accept
 pub const PKT_GRP_AVATAR_ACK: u8   = 0x46; // group avatar received: group_id\n + sha256
+pub const PKT_GRP_CALL_SIGNAL: u8  = 0x47; // group call presence signal via daemon
 
 /// Size of an X25519 public key.
 pub const PUBKEY_SIZE: usize = 32;

@@ -67,6 +67,8 @@ pub enum MsgCommand {
     SendGroupUpdate { group_id: String, group_json: Vec<u8>, member_contacts: Vec<(String, std::net::SocketAddr, [u8; 32])> },
     /// Broadcast a group avatar to all members of the group.
     SendGroupAvatar { group_id: String, avatar_data: Vec<u8>, sha256: [u8; 32], member_contacts: Vec<(String, std::net::SocketAddr, [u8; 32])> },
+    /// Broadcast group call presence signal to all group members.
+    SendCallSignal { group_id: String, channel_id: String, active: bool, call_mode: u8, member_contacts: Vec<(String, std::net::SocketAddr, [u8; 32])> },
     /// Voice call starting — daemon must release the UDP socket.
     YieldSocket,
     /// Voice call ended — daemon can reclaim the UDP socket.
@@ -116,4 +118,6 @@ pub enum MsgEvent {
     GroupMemberSynced { group_id: String, member: crate::group::GroupMember },
     /// A group avatar was fully received and saved to disk.
     GroupAvatarReceived { group_id: String },
+    /// A group call presence signal from a peer.
+    GroupCallSignal { contact_id: String, group_id: String, channel_id: String, active: bool, call_mode: u8 },
 }

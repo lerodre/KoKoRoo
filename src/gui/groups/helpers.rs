@@ -43,7 +43,7 @@ impl HostelApp {
     }
 
     /// Build the (contact_id, addr, pubkey) list for all members of a group, excluding ourselves.
-    fn group_member_contacts(&self, group_idx: usize) -> Vec<(String, std::net::SocketAddr, [u8; 32])> {
+    pub(crate) fn group_member_contacts(&self, group_idx: usize) -> Vec<(String, std::net::SocketAddr, [u8; 32])> {
         let grp = &self.groups[group_idx];
         let my_pubkey = self.identity.pubkey;
         let mut result = Vec::new();

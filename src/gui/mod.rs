@@ -294,9 +294,8 @@ pub struct HostelApp {
     pub(crate) group_call_role: Option<GroupRole>,
     pub(crate) group_chat_history: Option<GroupChatHistory>,
     pub(crate) group_connect_result: Arc<std::sync::Mutex<Option<Result<GroupCallInfo, String>>>>,
-    /// After hang-up, if others were still in the call, remember the locked mode for that channel.
-    /// Key = channel_id, Value = the CallMode that was active. Cleared when we re-join or group updates.
-    pub(crate) group_call_ongoing: std::collections::HashMap<String, crate::group::CallMode>,
+    /// Group call presence from signaling: group_id → channel_id → Vec<(contact_id, call_mode)>
+    pub(crate) group_call_presence: std::collections::HashMap<String, std::collections::HashMap<String, Vec<(String, u8)>>>,
 }
 
 pub(crate) struct IncomingCallInfo {
@@ -520,7 +519,7 @@ impl HostelApp {
             group_call_role: None,
             group_chat_history: None,
             group_connect_result: Arc::new(std::sync::Mutex::new(None)),
-            group_call_ongoing: std::collections::HashMap::new(),
+            group_call_presence: std::collections::HashMap::new(),
         }
     }
 
@@ -717,6 +716,24 @@ impl HostelApp {
             self.cleanup_group_call();
         }
 
+        let my_pubkey = self.identity.pubkey;
+
+        // Send call signal BEFORE yielding socket (daemon still owns it)
+        let call_mode_byte = match self.groups[idx].call_mode {
+            crate::group::CallMode::Relay => 0u8,
+            crate::group::CallMode::P2P => 1u8,
+        };
+        if let Some(tx) = &self.msg_cmd_tx {
+            let member_contacts = self.group_member_contacts(idx);
+            tx.send(MsgCommand::SendCallSignal {
+                group_id: self.groups[idx].group_id.clone(),
+                channel_id: channel_id.to_string(),
+                active: true,
+                call_mode: call_mode_byte,
+                member_contacts,
+            }).ok();
+        }
+
         // Yield socket from messaging daemon
         if let Some(tx) = &self.msg_cmd_tx {
             tx.send(MsgCommand::YieldSocket).ok();
@@ -736,13 +753,25 @@ impl HostelApp {
         self.group_connect_result = Arc::new(std::sync::Mutex::new(None));
         self.group_call_members.clear();
         self.group_call_channel_id = Some(channel_id.to_string());
-        self.group_call_ongoing.remove(channel_id);
         self.group_screen_sharing = false;
         self.group_webcam_sharing = false;
 
         self.group_view = GroupView::Connecting;
 
-        let group = self.groups[idx].clone();
+        // Refresh member addresses from live contact data before passing to groupcall
+        let mut group = self.groups[idx].clone();
+        for member in &mut group.members {
+            if member.pubkey == my_pubkey { continue; }
+            let cid = crate::identity::derive_contact_id(&my_pubkey, &member.pubkey);
+            if let Some(contact) = self.contacts.iter().find(|c| c.contact_id == cid) {
+                if !contact.last_address.is_empty() {
+                    member.address = contact.last_address.clone();
+                }
+                if !contact.last_port.is_empty() {
+                    member.port = contact.last_port.clone();
+                }
+            }
+        }
         let channel_id_owned = channel_id.to_string();
         let local_port = self.local_port.clone();
         let running = self.group_call_running.clone();
@@ -750,7 +779,6 @@ impl HostelApp {
         let result = self.group_connect_result.clone();
         let input_idx = self.selected_input;
         let output_idx = self.selected_output;
-        let my_pubkey = self.identity.pubkey;
 
         let my_sender_index = group.members.iter()
             .find(|m| m.pubkey == my_pubkey)
@@ -797,18 +825,19 @@ impl HostelApp {
 
     pub(crate) fn cleanup_group_call(&mut self) {
         log_fmt!("[gui] cleanup_group_call");
-        // If others were still in the call, mark the channel as having an ongoing call
-        // so the mode selector is locked when we view the idle screen.
-        let had_others = self.group_call_members.len() > 1;
-        if had_others {
-            if let (Some(ch_id), Some(grp_idx)) = (self.group_call_channel_id.clone(), self.group_detail_idx) {
-                if let Some(grp) = self.groups.get(grp_idx) {
-                    self.group_call_ongoing.insert(ch_id, grp.call_mode);
-                }
-            }
-        } else if let Some(ch_id) = &self.group_call_channel_id {
-            self.group_call_ongoing.remove(ch_id);
-        }
+
+        // Save group info for signal before clearing state
+        let signal_info: Option<(String, String, u8, usize)> = self.group_call_channel_id.as_ref().and_then(|ch_id| {
+            self.group_detail_idx.and_then(|grp_idx| {
+                self.groups.get(grp_idx).map(|grp| {
+                    let mode = match grp.call_mode {
+                        crate::group::CallMode::Relay => 0u8,
+                        crate::group::CallMode::P2P => 1u8,
+                    };
+                    (grp.group_id.clone(), ch_id.clone(), mode, grp_idx)
+                })
+            })
+        });
 
         self.group_call_running.store(false, Ordering::Relaxed);
         if let Some(ref h) = self.group_call_hangup {
@@ -835,9 +864,20 @@ impl HostelApp {
         // Stay on group detail view (not back to list)
         self.group_view = GroupView::Detail;
 
-        // Reclaim socket
+        // Reclaim socket and send leave signal
         if let Some(tx) = &self.msg_cmd_tx {
             tx.send(MsgCommand::ReclaimSocket).ok();
+            // Send leave signal after reclaim so daemon can send it
+            if let Some((group_id, channel_id, call_mode, grp_idx)) = signal_info {
+                let member_contacts = self.group_member_contacts(grp_idx);
+                tx.send(MsgCommand::SendCallSignal {
+                    group_id,
+                    channel_id,
+                    active: false,
+                    call_mode,
+                    member_contacts,
+                }).ok();
+            }
         }
     }
 }
@@ -1379,6 +1419,16 @@ impl eframe::App for HostelApp {
                                 });
                             }
                         }
+                    }
+                    MsgEvent::GroupCallSignal { contact_id, group_id, channel_id, active, call_mode } => {
+                        let channels = self.group_call_presence.entry(group_id).or_default();
+                        let members = channels.entry(channel_id).or_default();
+                        members.retain(|(cid, _)| *cid != contact_id);
+                        if active {
+                            members.push((contact_id, call_mode));
+                        }
+                        // Clean up empty entries
+                        channels.retain(|_, v| !v.is_empty());
                     }
                 }
             }

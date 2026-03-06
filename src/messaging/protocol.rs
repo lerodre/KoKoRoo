@@ -11,6 +11,7 @@ use crate::crypto::{
     PKT_GRP_INVITE_ACK, PKT_GRP_INVITE_NACK,
     PKT_GRP_UPDATE, PKT_GRP_AVATAR_OFFER, PKT_GRP_AVATAR_DATA, PKT_GRP_AVATAR_ACK,
     PKT_GRP_MEMBER_SYNC,
+    PKT_GRP_CALL_SIGNAL,
 };
 use crate::identity::Identity;
 
@@ -809,4 +810,35 @@ pub fn handle_group_avatar_ack(data: &[u8], peer: &mut PeerSession) -> Option<(S
     let mut sha256 = [0u8; 32];
     sha256.copy_from_slice(&rest[..32]);
     Some((group_id, sha256))
+}
+
+/// Send a group call presence signal. Payload: group_id + '\n' + channel_id + '\n' + active_byte + call_mode_byte
+pub fn send_call_signal(
+    peer: &PeerSession,
+    socket: &UdpSocket,
+    group_id: &str,
+    channel_id: &str,
+    active: bool,
+    call_mode: u8,
+) -> Result<(), String> {
+    let mut payload = format!("{}\n{}\n", group_id, channel_id).into_bytes();
+    payload.push(if active { 1 } else { 0 });
+    payload.push(call_mode);
+    let pkt = peer.encrypt_packet(PKT_GRP_CALL_SIGNAL, &payload).ok_or("no session")?;
+    socket.send_to(&pkt, peer.peer_addr).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Handle an incoming group call signal. Returns (group_id, channel_id, active, call_mode).
+pub fn handle_call_signal(data: &[u8], peer: &mut PeerSession) -> Option<(String, String, bool, u8)> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
+    if pkt_type != PKT_GRP_CALL_SIGNAL || plain.len() < 4 {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&plain[..plain.len() - 2]);
+    let parts: Vec<&str> = s.splitn(3, '\n').collect();
+    if parts.len() < 2 { return None; }
+    let active = plain[plain.len() - 2] == 1;
+    let call_mode = plain[plain.len() - 1];
+    Some((parts[0].to_string(), parts[1].to_string(), active, call_mode))
 }

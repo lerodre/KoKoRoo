@@ -106,10 +106,10 @@ pub fn start_as_leader(
                         if let Some((_, group_id_bytes)) = crypto::parse_grp_hello(&recv_buf[..n]) {
                             let gid = crypto::group_id_from_bytes(&group_id_bytes);
                             if gid == relay_group.group_id {
-                                log_fmt!("[group] GRP_HELLO from {} for group {}", from, gid);
                                 if let Some(member) = relay_group.members.iter()
                                     .find(|m| from.ip().to_string().contains(&m.address) || m.address.is_empty())
                                 {
+                                    log_fmt!("[probe] IN GRP_HELLO from {} ({}), responding PKT_GRP_LEADER", member.nickname, from);
                                     let mut conn = relay_connected.lock().unwrap();
                                     if !conn.contains_key(&member.sender_index) {
                                         conn.insert(member.sender_index, ConnectedMember {
@@ -123,7 +123,7 @@ pub fn start_as_leader(
                                             member.nickname, member.sender_index, conn.len());
                                     }
                                 } else {
-                                    log_fmt!("[group] GRP_HELLO from unknown address {} — no matching member", from);
+                                    log_fmt!("[probe] IN GRP_HELLO from unknown address {}", from);
                                 }
                                 // Respond with PKT_GRP_LEADER so probing peers know we exist
                                 let counter = relay_counter.fetch_add(1, Ordering::Relaxed);
@@ -132,7 +132,7 @@ pub fn start_as_leader(
                                     PKT_GRP_LEADER, &relay_my_pubkey,
                                 );
                                 let _ = relay_socket.send_to(&leader_pkt, from);
-                                log_fmt!("[group] sent PKT_GRP_LEADER response to {}", from);
+                                log_fmt!("[probe] OUT PKT_GRP_LEADER -> {}", from);
                             }
                         }
                         continue;

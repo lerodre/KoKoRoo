@@ -598,6 +598,34 @@ impl MsgDaemon {
                     }
                 }
 
+                MsgCommand::SendCallSignal { group_id, channel_id, active, call_mode, member_contacts } => {
+                    log_fmt!("[probe] SIGNAL OUT active={} group={} channel={} mode={}", active, group_id, channel_id, call_mode);
+                    if let Some(ref socket) = self.socket {
+                        for (contact_id, peer_addr, peer_pubkey) in &member_contacts {
+                            let mut sent = false;
+                            if let Some(addr) = self.contact_addrs.get(contact_id) {
+                                if let Some(peer) = self.peers.get(addr) {
+                                    if peer.is_connected() {
+                                        protocol::send_call_signal(peer, socket, &group_id, &channel_id, active, call_mode).ok();
+                                        sent = true;
+                                    }
+                                }
+                            }
+                            if !sent {
+                                if !self.contact_addrs.contains_key(contact_id) {
+                                    if let Some(session) = protocol::initiate_handshake(
+                                        socket, contact_id, *peer_addr, *peer_pubkey,
+                                    ) {
+                                        self.contact_addrs.insert(contact_id.clone(), *peer_addr);
+                                        self.hello_retries.insert(*peer_addr, 0);
+                                        self.peers.insert(*peer_addr, session);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 MsgCommand::SendMessage { contact_id, peer_addr, peer_pubkey, text } => {
                     // Ensure outbox exists
                     let outbox = self.outboxes.entry(contact_id.clone())

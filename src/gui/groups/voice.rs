@@ -14,13 +14,18 @@ impl HostelApp {
             _ => return,
         };
         let selected_channel_id = self.group_selected_channel.clone();
+        let group_id = self.groups[idx].group_id.clone();
         let channel_name = self.groups[idx].voice_channels.iter()
             .find(|ch| ch.channel_id == selected_channel_id)
             .map(|ch| ch.name.clone())
             .unwrap_or_else(|| "Voice".to_string());
 
-        // Check if there's an ongoing call on this channel that we left
-        let ongoing_mode = self.group_call_ongoing.get(&selected_channel_id).copied();
+        // Check presence signals for this channel (clone to avoid borrow conflict)
+        let presence: Option<Vec<(String, u8)>> = self.group_call_presence
+            .get(&group_id)
+            .and_then(|ch| ch.get(&selected_channel_id))
+            .cloned();
+        let has_ongoing = presence.as_ref().map(|p| !p.is_empty()).unwrap_or(false);
 
         ui.add_space(60.0);
         ui.vertical_centered(|ui| {
@@ -31,12 +36,28 @@ impl HostelApp {
             );
             ui.add_space(16.0);
 
-            if ongoing_mode.is_some() {
+            if has_ongoing {
+                let count = presence.as_ref().map(|p| p.len()).unwrap_or(0);
                 ui.label(
-                    egui::RichText::new("A call is in progress on this channel")
+                    egui::RichText::new(format!("A call is in progress ({} member{})", count, if count == 1 { "" } else { "s" }))
                         .size(14.0)
                         .color(self.settings.theme.btn_primary()),
                 );
+                // Show nicknames of members in call
+                if let Some(ref members_in_call) = presence {
+                    let nicknames: Vec<String> = members_in_call.iter().filter_map(|(cid, _)| {
+                        self.contacts.iter()
+                            .find(|c| c.contact_id == *cid)
+                            .map(|c| c.nickname.clone())
+                    }).collect();
+                    if !nicknames.is_empty() {
+                        ui.label(
+                            egui::RichText::new(nicknames.join(", "))
+                                .size(12.0)
+                                .color(self.settings.theme.text_muted()),
+                        );
+                    }
+                }
             } else {
                 ui.label(
                     egui::RichText::new("No active call — you will start a new session")
@@ -45,14 +66,12 @@ impl HostelApp {
                 );
             }
 
-            // Mode selector: only when there's no ongoing call
+            // Mode selector: locked when there's an ongoing call
             ui.add_space(20.0);
-            if let Some(locked_mode) = ongoing_mode {
-                // Mode locked — show it but disabled
-                let mode_label = match locked_mode {
-                    group::CallMode::Relay => "Relay",
-                    group::CallMode::P2P => "P2P",
-                };
+            if has_ongoing {
+                // Determine locked mode from first member's signal
+                let locked_mode = presence.as_ref().and_then(|p| p.first()).map(|(_, m)| *m).unwrap_or(0);
+                let mode_label = if locked_mode == 1 { "P2P" } else { "Relay" };
                 ui.horizontal(|ui| {
                     ui.label("Mode:");
                     ui.label(
@@ -66,6 +85,14 @@ impl HostelApp {
                             .color(self.settings.theme.text_muted()),
                     );
                 });
+                // Sync the group's call_mode to match the ongoing call
+                if let Some(grp) = self.groups.get_mut(idx) {
+                    let target_mode = if locked_mode == 1 { group::CallMode::P2P } else { group::CallMode::Relay };
+                    if grp.call_mode != target_mode {
+                        grp.call_mode = target_mode;
+                        group::save_group(grp);
+                    }
+                }
             } else if let Some(grp) = self.groups.get(idx) {
                 let mode = grp.call_mode;
                 ui.horizontal(|ui| {
@@ -88,11 +115,7 @@ impl HostelApp {
             }
 
             ui.add_space(20.0);
-            let btn_text = if ongoing_mode.is_some() {
-                "Join Call"
-            } else {
-                "Start Voice Channel"
-            };
+            let btn_text = if has_ongoing { "Join Call" } else { "Start Voice Channel" };
             let join_btn = egui::Button::new(
                 egui::RichText::new(btn_text)
                     .strong()

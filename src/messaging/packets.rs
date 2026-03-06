@@ -15,6 +15,7 @@ use crate::crypto::{
     PKT_GRP_INVITE_ACK, PKT_GRP_INVITE_NACK,
     PKT_GRP_UPDATE, PKT_GRP_AVATAR_OFFER, PKT_GRP_AVATAR_DATA, PKT_GRP_AVATAR_ACK,
     PKT_GRP_MEMBER_SYNC,
+    PKT_GRP_CALL_SIGNAL,
 };
 use crate::identity::{self};
 use crate::filetransfer;
@@ -1083,6 +1084,23 @@ impl MsgDaemon {
                                     }).ok();
                                 }
                             }
+                        }
+                    }
+                }
+
+                PKT_GRP_CALL_SIGNAL => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((group_id, channel_id, active, call_mode)) = protocol::handle_call_signal(data, peer) {
+                            peer.touch();
+                            let contact_id = peer.contact_id.clone();
+                            log_fmt!("[probe] SIGNAL IN from={} active={} group={} channel={}", &contact_id[..8.min(contact_id.len())], active, group_id, channel_id);
+                            self.event_tx.send(MsgEvent::GroupCallSignal {
+                                contact_id,
+                                group_id,
+                                channel_id,
+                                active,
+                                call_mode,
+                            }).ok();
                         }
                     }
                 }
