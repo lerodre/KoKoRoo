@@ -80,6 +80,9 @@ pub fn start(
     // Per-sender decoded audio frames
     let audio_frames: AudioFrames = Arc::new(Mutex::new(HashMap::new()));
 
+    // Per-sender voice levels (RMS) for speaking indicator
+    let voice_levels: engine::VoiceLevels = Arc::new(Mutex::new(HashMap::new()));
+
     // Audio streams — streams are !Send, so caller must keep AudioKeepAlive alive
     let pipeline = engine::setup_audio_streams(input_device, output_device)?;
     let mut mic_consumer = pipeline.mic_consumer;
@@ -124,6 +127,7 @@ pub fn start(
     let recv_peers = peers.clone();
     let recv_screen_viewer = screen_viewer.clone();
     let recv_screen_sharer = screen_sharer.clone();
+    let recv_voice_levels = voice_levels.clone();
 
     let _receiver = thread::spawn(move || {
         let mut recv_buf = [0u8; 4096];
@@ -210,6 +214,9 @@ pub fn start(
                                 if let Ok(packet) = Packet::try_from(opus_data.as_slice()) {
                                     if let Ok(decoded) = decoder.decode_float(Some(packet), output, false) {
                                         let frame = pcm[..decoded].to_vec();
+                                        // Compute RMS for speaking indicator
+                                        let rms = (frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32).sqrt();
+                                        recv_voice_levels.lock().unwrap().insert(si, rms);
                                         recv_audio.lock().unwrap().insert(si, frame);
                                     }
                                 }
@@ -228,6 +235,7 @@ pub fn start(
                             drop(peer_map);
                             decoders.remove(&sender_index);
                             recv_audio.lock().unwrap().remove(&sender_index);
+                            recv_voice_levels.lock().unwrap().remove(&sender_index);
                         }
 
                         PKT_GRP_SCREEN | PKT_GRP_SCREEN_OFFER | PKT_GRP_SCREEN_STOP => {
@@ -348,6 +356,7 @@ pub fn start(
     let sender_peers = peers.clone();
     let sender_counter = send_counter.clone();
     let sender_cipher = crypto::grp_cipher_from_key(&group_key);
+    let sender_voice_levels = voice_levels.clone();
 
     let _sender = thread::spawn(move || {
         let mut encoder = Encoder::new(
@@ -400,6 +409,10 @@ pub fn start(
                     pcm_frame[offset + i] = denoise_out[i] / 32768.0;
                 }
             }
+
+            // Local voice level for speaking indicator
+            let local_rms = (pcm_frame.iter().map(|s| s * s).sum::<f32>() / pcm_frame.len() as f32).sqrt();
+            sender_voice_levels.lock().unwrap().insert(my_sender_index, local_rms);
 
             // Encode + encrypt + send to ALL peers
             let encoded_len = match encoder.encode_float(&pcm_frame, &mut opus_buf) {
@@ -473,5 +486,6 @@ pub fn start(
         screen_viewer,
         screen_sharer,
         screen_active,
+        voice_levels,
     }, audio_keep_alive))
 }

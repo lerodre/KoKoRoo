@@ -77,6 +77,9 @@ pub fn start_as_leader(
     // Per-member audio storage
     let audio_frames: AudioFrames = Arc::new(Mutex::new(HashMap::new()));
 
+    // Per-sender voice levels (RMS) for speaking indicator
+    let voice_levels: engine::VoiceLevels = Arc::new(Mutex::new(HashMap::new()));
+
     // Audio streams — streams are !Send, so caller must keep AudioKeepAlive alive
     let pipeline = engine::setup_audio_streams(input_device, output_device)?;
     let mut mic_consumer = pipeline.mic_consumer;
@@ -99,6 +102,7 @@ pub fn start_as_leader(
     let relay_counter = send_counter.clone();
     let relay_screen_viewer = screen_viewer.clone();
     let relay_screen_sharer = screen_sharer.clone();
+    let relay_voice_levels = voice_levels.clone();
     let relay_my_pubkey = group.members.iter()
         .find(|m| m.sender_index == my_sender_index)
         .map(|m| m.pubkey)
@@ -196,6 +200,9 @@ pub fn start_as_leader(
                                 if let Ok(packet) = Packet::try_from(opus_data.as_slice()) {
                                     if let Ok(decoded) = decoder.decode_float(Some(packet), output, false) {
                                         let frame = pcm[..decoded].to_vec();
+                                        // Compute RMS for speaking indicator
+                                        let rms = (frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32).sqrt();
+                                        relay_voice_levels.lock().unwrap().insert(sender_index, rms);
                                         relay_audio.lock().unwrap().insert(sender_index, frame);
                                     }
                                 }
@@ -389,6 +396,7 @@ pub fn start_as_leader(
     let sender_connected = connected.clone();
     let sender_counter = send_counter.clone();
     let sender_cipher = crypto::grp_cipher_from_key(&group_key);
+    let sender_voice_levels = voice_levels.clone();
     let chat_out_rx_arc = Arc::new(Mutex::new(chat_out_rx));
     let chat_out_rx_sender = chat_out_rx_arc.clone();
 
@@ -453,6 +461,10 @@ pub fn start_as_leader(
                     pcm_frame[offset + i] = denoise_out[i] / 32768.0;
                 }
             }
+
+            // Local voice level for speaking indicator
+            let local_rms = (pcm_frame.iter().map(|s| s * s).sum::<f32>() / pcm_frame.len() as f32).sqrt();
+            sender_voice_levels.lock().unwrap().insert(my_sender_index, local_rms);
 
             // Encode + encrypt + send to all members
             let encoded_len = match encoder.encode_float(&pcm_frame, &mut opus_buf) {
@@ -563,6 +575,7 @@ pub fn start_as_leader(
         screen_viewer,
         screen_sharer,
         screen_active,
+        voice_levels,
     }, audio_keep_alive))
 }
 
@@ -620,6 +633,9 @@ pub fn start_as_member(
     // Per-sender decoded audio frames
     let audio_frames: AudioFrames = Arc::new(Mutex::new(HashMap::new()));
 
+    // Per-sender voice levels (RMS) for speaking indicator
+    let voice_levels: engine::VoiceLevels = Arc::new(Mutex::new(HashMap::new()));
+
     // Audio streams — streams are !Send, so caller must keep AudioKeepAlive alive
     let pipeline = engine::setup_audio_streams(input_device, output_device)?;
     let mut mic_consumer = pipeline.mic_consumer;
@@ -640,6 +656,7 @@ pub fn start_as_member(
     let recv_leader_addr = leader_addr_shared.clone();
     let recv_screen_viewer = screen_viewer.clone();
     let recv_screen_sharer = screen_sharer.clone();
+    let recv_voice_levels = voice_levels.clone();
     let recv_send_counter = send_counter.clone();
     let my_pubkey = recv_group.members.iter()
         .find(|m| m.sender_index == my_sender_index)
@@ -680,6 +697,9 @@ pub fn start_as_member(
                                 if let Ok(packet) = Packet::try_from(opus_data.as_slice()) {
                                     if let Ok(decoded) = decoder.decode_float(Some(packet), output, false) {
                                         let frame = pcm[..decoded].to_vec();
+                                        // Compute RMS for speaking indicator
+                                        let rms = (frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32).sqrt();
+                                        recv_voice_levels.lock().unwrap().insert(si, rms);
                                         recv_audio.lock().unwrap().insert(si, frame);
                                     }
                                 }
@@ -901,6 +921,7 @@ pub fn start_as_member(
     let sender_counter2 = Arc::new(AtomicU32::new(0));
     let sender_cipher2 = crypto::grp_cipher_from_key(&group_key);
     let sender_leader_addr = leader_addr_shared.clone();
+    let sender_voice_levels = voice_levels.clone();
 
     let _sender = thread::spawn(move || {
         let mut encoder = Encoder::new(
@@ -964,6 +985,10 @@ pub fn start_as_member(
                 }
             }
 
+            // Local voice level for speaking indicator
+            let local_rms = (pcm_frame.iter().map(|s| s * s).sum::<f32>() / pcm_frame.len() as f32).sqrt();
+            sender_voice_levels.lock().unwrap().insert(my_sender_index, local_rms);
+
             // Encode + encrypt + send to current leader
             let encoded_len = match encoder.encode_float(&pcm_frame, &mut opus_buf) {
                 Ok(n) => n,
@@ -995,6 +1020,7 @@ pub fn start_as_member(
         screen_viewer,
         screen_sharer,
         screen_active,
+        voice_levels,
     }, audio_keep_alive))
 }
 

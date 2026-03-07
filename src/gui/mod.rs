@@ -296,6 +296,7 @@ pub struct HostelApp {
     pub(crate) group_call_members: Vec<GroupMember>,
     pub(crate) group_call_group: Option<Group>,
     pub(crate) group_call_role: Option<GroupRole>,
+    pub(crate) group_voice_levels: Option<crate::groupcall::VoiceLevels>,
     pub(crate) group_chat_history: Option<GroupChatHistory>,
     pub(crate) group_connect_result: Arc<std::sync::Mutex<Option<Result<GroupCallInfo, String>>>>,
     /// Group call presence from signaling: group_id → channel_id → Vec<(contact_id, call_mode)>
@@ -525,6 +526,7 @@ impl HostelApp {
             group_call_members: Vec::new(),
             group_call_group: None,
             group_call_role: None,
+            group_voice_levels: None,
             group_chat_history: None,
             group_connect_result: Arc::new(std::sync::Mutex::new(None)),
             group_call_presence: std::collections::HashMap::new(),
@@ -885,6 +887,7 @@ impl HostelApp {
         self.group_call_members.clear();
         self.group_call_group = None;
         self.group_call_role = None;
+        self.group_voice_levels = None;
         self.group_call_channel_id = None;
         self.group_screen_sharing = false;
         self.group_webcam_sharing = false;
@@ -1041,6 +1044,7 @@ impl eframe::App for HostelApp {
                         self.group_screen_cmd_tx = Some(info.screen_cmd_tx);
                         self.group_screen_viewer = Some(info.screen_viewer);
                         self.group_screen_sharer = Some(info.screen_sharer);
+                        self.group_voice_levels = Some(info.voice_levels);
                         self.group_call_members = self.group_call_group.as_ref()
                             .and_then(|g| g.members.iter()
                                 .find(|m| m.pubkey == self.identity.pubkey).cloned())

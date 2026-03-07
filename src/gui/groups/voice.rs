@@ -43,19 +43,36 @@ impl HostelApp {
                         .size(14.0)
                         .color(self.settings.theme.btn_primary()),
                 );
-                // Show nicknames of members in call
+                // Show avatars + nicknames of members in call
                 if let Some(ref members_in_call) = presence {
-                    let nicknames: Vec<String> = members_in_call.iter().filter_map(|(cid, _)| {
-                        self.contacts.iter()
-                            .find(|c| c.contact_id == *cid)
-                            .map(|c| c.nickname.clone())
-                    }).collect();
-                    if !nicknames.is_empty() {
-                        ui.label(
-                            egui::RichText::new(nicknames.join(", "))
-                                .size(12.0)
-                                .color(self.settings.theme.text_muted()),
-                        );
+                    ui.add_space(8.0);
+                    let my_pubkey = self.identity.pubkey;
+                    for (cid, _) in members_in_call {
+                        if let Some(contact) = self.contacts.iter().find(|c| c.contact_id == *cid) {
+                            ui.horizontal(|ui| {
+                                let av_size = 24.0;
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(av_size, av_size),
+                                    egui::Sense::hover(),
+                                );
+                                // Draw avatar
+                                let mut drew_av = false;
+                                let contact_cid = crate::identity::derive_contact_id(&my_pubkey, &contact.pubkey);
+                                if let Some(tex) = self.contact_avatar_textures.get(&contact_cid) {
+                                    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                                    ui.painter().image(tex.id(), rect, uv, egui::Color32::WHITE);
+                                    drew_av = true;
+                                }
+                                if !drew_av {
+                                    paint_initial_avatar(ui.painter(), rect, &contact.nickname, &self.settings.theme);
+                                }
+                                ui.label(
+                                    egui::RichText::new(&contact.nickname)
+                                        .size(13.0)
+                                        .color(self.settings.theme.text_primary()),
+                                );
+                            });
+                        }
                     }
                 }
             } else {
@@ -408,6 +425,13 @@ impl HostelApp {
             let hline_stroke = egui::Stroke::new(1.0, self.settings.theme.text_muted());
             ui.painter().hline(header_rect.x_range(), header_rect.max.y, hline_stroke);
 
+            // Snapshot voice levels for this frame
+            let voice_levels_snapshot: std::collections::HashMap<u16, f32> = self.group_voice_levels
+                .as_ref()
+                .and_then(|vl| vl.lock().ok().map(|m| m.clone()))
+                .unwrap_or_default();
+            let speaking_threshold = 0.01;
+
             // Member rows with avatars
             egui::ScrollArea::vertical()
                 .id_salt("voice_call_members")
@@ -421,12 +445,28 @@ impl HostelApp {
                         let mut x = row_rect.min.x + 8.0;
                         let cy = row_rect.center().y;
 
+                        // Check if this member is speaking
+                        let is_speaking = voice_levels_snapshot.get(&member.sender_index)
+                            .map(|&level| level > speaking_threshold)
+                            .unwrap_or(false);
+
                         // Avatar (22px)
                         let av_size = 22.0;
                         let av_rect = egui::Rect::from_center_size(
                             egui::pos2(x + av_size / 2.0, cy),
                             egui::vec2(av_size, av_size),
                         );
+
+                        // Green border when speaking
+                        if is_speaking {
+                            let border_rect = av_rect.expand(2.0);
+                            ui.painter().rect_stroke(
+                                border_rect,
+                                egui::Rounding::same(3.0),
+                                egui::Stroke::new(2.0, egui::Color32::from_rgb(67, 181, 129)),
+                            );
+                        }
+
                         let mut drew_av = false;
                         if member.pubkey == my_pubkey {
                             if let Some(tex) = &self.own_avatar_texture {

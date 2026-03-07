@@ -33,6 +33,9 @@ pub struct GroupChatMsg {
     pub text: String,
 }
 
+/// Per-member voice level (RMS), keyed by sender_index.
+pub type VoiceLevels = Arc<Mutex<HashMap<u16, f32>>>;
+
 /// Bridge between the group call engine and the GUI.
 pub struct GroupCallInfo {
     pub group: Group,
@@ -52,6 +55,7 @@ pub struct GroupCallInfo {
     pub screen_sharer: Arc<Mutex<Option<u16>>>,
     #[allow(dead_code)]
     pub screen_active: Arc<AtomicBool>,
+    pub voice_levels: VoiceLevels,
 }
 
 /// Audio streams + ring buffers returned by `setup_audio_streams()`.

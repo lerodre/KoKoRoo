@@ -2,7 +2,7 @@ pub mod engine;
 pub mod relay;
 pub mod p2p;
 
-pub use engine::{AudioKeepAlive, GroupCallInfo, GroupChatMsg, GroupRole};
+pub use engine::{AudioKeepAlive, GroupCallInfo, GroupChatMsg, GroupRole, VoiceLevels};
 
 use crate::crypto;
 use crate::group::{CallMode, Group};
