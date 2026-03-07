@@ -158,21 +158,10 @@ impl MsgDaemon {
                             ));
                         }
                     }
-                    // Disconnect all peers and drop socket for voice call
-                    if let Some(ref socket) = self.socket {
-                        for peer in self.peers.values() {
-                            protocol::send_bye(peer, socket);
-                        }
-                    }
-                    // Notify GUI that all peers went offline
-                    for (_, peer) in &self.peers {
-                        if peer.is_connected() {
-                            self.event_tx.send(MsgEvent::PeerStatus {
-                                contact_id: peer.contact_id.clone(),
-                                online: false,
-                            }).ok();
-                        }
-                    }
+                    // Drop socket for voice call — do NOT send BYE, because we're
+                    // temporarily yielding for a call and will reconnect shortly via
+                    // ReclaimSocket. Sending BYE would make remote peers mark us as
+                    // offline/disconnected, which is misleading.
                     self.peers.clear();
                     self.contact_addrs.clear();
                     self.hello_retries.clear();

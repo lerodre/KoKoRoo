@@ -196,6 +196,7 @@ pub fn start(
                         PKT_GRP_VOICE => {
                             if let Some((_, si, opus_data)) = crypto::grp_decrypt(&recv_cipher, &recv_buf[..n]) {
                                 let decoder = decoders.entry(si).or_insert_with(|| {
+                                    log_fmt!("[p2p] created decoder for peer idx={}", si);
                                     Decoder::new(SampleRate::Hz48000, Channels::Mono)
                                         .expect("opus decoder")
                                 });
@@ -409,6 +410,9 @@ pub fn start(
                 PKT_GRP_VOICE, &opus_buf[..encoded_len],
             );
             let peer_map = sender_peers.lock().unwrap();
+            if counter % 250 == 0 {
+                log_fmt!("[p2p] voice sent {} frames to {} peers", counter, peer_map.len());
+            }
             for peer in peer_map.values() {
                 let _ = send_socket.send_to(&pkt, peer.peer_addr);
             }

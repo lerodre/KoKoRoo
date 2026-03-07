@@ -367,168 +367,6 @@ impl HostelApp {
             }
         });
 
-        // ── Screen share config popup ──
-        if self.show_screen_popup {
-            let mut open = true;
-            egui::Window::new("Screen Share")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .open(&mut open)
-                .show(ui.ctx(), |ui| {
-                    ui.label("Display:");
-                    let display_label = self.display_names.get(self.selected_display)
-                        .cloned().unwrap_or_else(|| "Display 1".to_string());
-                    egui::ComboBox::from_id_salt("popup_display")
-                        .width(200.0)
-                        .selected_text(&display_label)
-                        .show_ui(ui, |ui| {
-                            for (i, name) in self.display_names.iter().enumerate() {
-                                ui.selectable_value(&mut self.selected_display, i, name.as_str());
-                            }
-                        });
-
-                    #[cfg(target_os = "linux")]
-                    if crate::screen::wayland::is_wayland() {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(180, 180, 255),
-                            "Display will be selected via system dialog",
-                        );
-                    }
-
-                    ui.add_space(4.0);
-                    ui.label("Quality:");
-                    let current_label = ScreenQuality::ALL[self.selected_screen_quality].label();
-                    egui::ComboBox::from_id_salt("popup_quality")
-                        .width(160.0)
-                        .selected_text(current_label)
-                        .show_ui(ui, |ui| {
-                            for (i, q) in ScreenQuality::ALL.iter().enumerate() {
-                                ui.selectable_value(&mut self.selected_screen_quality, i, q.label());
-                            }
-                        });
-
-                    ui.add_space(4.0);
-                    ui.label("System Audio:");
-                    let audio_label = match self.selected_audio_device {
-                        0 => "None".to_string(),
-                        1 => "Default".to_string(),
-                        n => self.loopback_devices.get(n - 2)
-                            .cloned().unwrap_or_else(|| "Unknown".to_string()),
-                    };
-                    egui::ComboBox::from_id_salt("popup_audio")
-                        .width(240.0)
-                        .selected_text(&audio_label)
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.selected_audio_device, 0, "None");
-                            ui.selectable_value(&mut self.selected_audio_device, 1, "Default");
-                            for (i, name) in self.loopback_devices.iter().enumerate() {
-                                ui.selectable_value(&mut self.selected_audio_device, i + 2, name.as_str());
-                            }
-                        });
-
-                    ui.add_space(8.0);
-                    let share_btn = egui::Button::new(
-                        egui::RichText::new("Share Screen").size(16.0).color(egui::Color32::WHITE)
-                    ).min_size(egui::vec2(160.0, 35.0)).fill(self.settings.theme.btn_primary());
-                    if ui.add(share_btn).clicked() {
-                        log_fmt!("[gui] screen share: on");
-                        let quality = ScreenQuality::ALL[self.selected_screen_quality];
-                        let audio_device = match self.selected_audio_device {
-                            0 => None,
-                            1 => Some(String::new()),
-                            n => self.loopback_devices.get(n - 2).cloned(),
-                        };
-                        let tx = if self.group_call_channel_id.is_some() {
-                            self.group_screen_cmd_tx.as_ref()
-                        } else {
-                            self.screen_cmd_tx.as_ref()
-                        };
-                        if let Some(tx) = tx {
-                            let _ = tx.send(ScreenCommand::StartScreen { quality, audio_device, display_index: self.selected_display });
-                        }
-                        if self.group_call_channel_id.is_some() {
-                            self.group_screen_sharing = true;
-                        } else {
-                            self.screen_sharing = true;
-                        }
-                        self.show_screen_popup = false;
-                    }
-                });
-            if !open {
-                self.show_screen_popup = false;
-            }
-        }
-
-        // ── Webcam config popup ──
-        if self.show_webcam_popup {
-            let mut open = true;
-            egui::Window::new("Webcam")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .open(&mut open)
-                .show(ui.ctx(), |ui| {
-                    ui.label("Camera:");
-                    if self.camera_names.is_empty() {
-                        ui.colored_label(self.settings.theme.error(), "No cameras found");
-                    } else {
-                        let cam_label = self.camera_names.get(self.selected_camera)
-                            .cloned().unwrap_or_else(|| "Camera 0".to_string());
-                        egui::ComboBox::from_id_salt("popup_camera")
-                            .width(240.0)
-                            .selected_text(&cam_label)
-                            .show_ui(ui, |ui| {
-                                for (i, name) in self.camera_names.iter().enumerate() {
-                                    ui.selectable_value(&mut self.selected_camera, i, name.as_str());
-                                }
-                            });
-                    }
-
-                    ui.add_space(4.0);
-                    ui.label("Quality:");
-                    let current_label = ScreenQuality::ALL[self.selected_screen_quality].label();
-                    egui::ComboBox::from_id_salt("popup_cam_quality")
-                        .width(160.0)
-                        .selected_text(current_label)
-                        .show_ui(ui, |ui| {
-                            for (i, q) in ScreenQuality::ALL.iter().enumerate() {
-                                ui.selectable_value(&mut self.selected_screen_quality, i, q.label());
-                            }
-                        });
-
-                    ui.add_space(8.0);
-                    let can_start = !self.camera_names.is_empty();
-                    let start_btn = egui::Button::new(
-                        egui::RichText::new("Start Camera").size(16.0).color(egui::Color32::WHITE)
-                    ).min_size(egui::vec2(160.0, 35.0)).fill(
-                        if can_start { self.settings.theme.btn_positive() }
-                        else { self.settings.theme.btn_neutral() }
-                    );
-                    if ui.add_enabled(can_start, start_btn).clicked() {
-                        log_fmt!("[gui] webcam: on");
-                        let quality = ScreenQuality::ALL[self.selected_screen_quality];
-                        let tx = if self.group_call_channel_id.is_some() {
-                            self.group_screen_cmd_tx.as_ref()
-                        } else {
-                            self.screen_cmd_tx.as_ref()
-                        };
-                        if let Some(tx) = tx {
-                            let _ = tx.send(ScreenCommand::StartWebcam { quality, device_index: self.selected_camera });
-                        }
-                        if self.group_call_channel_id.is_some() {
-                            self.group_webcam_sharing = true;
-                        } else {
-                            self.webcam_sharing = true;
-                        }
-                        self.show_webcam_popup = false;
-                    }
-                });
-            if !open {
-                self.show_webcam_popup = false;
-            }
-        }
-
         // ── Hang up confirmation ──
         if self.show_hangup_confirm {
             let mut open = true;
@@ -900,5 +738,168 @@ impl HostelApp {
                 response.request_focus();
             }
         });
+    }
+
+    /// Screen share config popup — works for both 1:1 and group calls.
+    /// Rendered at the top level in update() so it appears regardless of active tab.
+    pub(crate) fn draw_screen_share_popup(&mut self, ctx: &egui::Context) {
+        let mut open = true;
+        egui::Window::new("Screen Share")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("Display:");
+                let display_label = self.display_names.get(self.selected_display)
+                    .cloned().unwrap_or_else(|| "Display 1".to_string());
+                egui::ComboBox::from_id_salt("popup_display")
+                    .width(200.0)
+                    .selected_text(&display_label)
+                    .show_ui(ui, |ui| {
+                        for (i, name) in self.display_names.iter().enumerate() {
+                            ui.selectable_value(&mut self.selected_display, i, name.as_str());
+                        }
+                    });
+
+                #[cfg(target_os = "linux")]
+                if crate::screen::wayland::is_wayland() {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(180, 180, 255),
+                        "Display will be selected via system dialog",
+                    );
+                }
+
+                ui.add_space(4.0);
+                ui.label("Quality:");
+                let current_label = ScreenQuality::ALL[self.selected_screen_quality].label();
+                egui::ComboBox::from_id_salt("popup_quality")
+                    .width(160.0)
+                    .selected_text(current_label)
+                    .show_ui(ui, |ui| {
+                        for (i, q) in ScreenQuality::ALL.iter().enumerate() {
+                            ui.selectable_value(&mut self.selected_screen_quality, i, q.label());
+                        }
+                    });
+
+                ui.add_space(4.0);
+                ui.label("System Audio:");
+                let audio_label = match self.selected_audio_device {
+                    0 => "None".to_string(),
+                    1 => "Default".to_string(),
+                    n => self.loopback_devices.get(n - 2)
+                        .cloned().unwrap_or_else(|| "Unknown".to_string()),
+                };
+                egui::ComboBox::from_id_salt("popup_audio")
+                    .width(240.0)
+                    .selected_text(&audio_label)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.selected_audio_device, 0, "None");
+                        ui.selectable_value(&mut self.selected_audio_device, 1, "Default");
+                        for (i, name) in self.loopback_devices.iter().enumerate() {
+                            ui.selectable_value(&mut self.selected_audio_device, i + 2, name.as_str());
+                        }
+                    });
+
+                ui.add_space(8.0);
+                let share_btn = egui::Button::new(
+                    egui::RichText::new("Share Screen").size(16.0).color(egui::Color32::WHITE)
+                ).min_size(egui::vec2(160.0, 35.0)).fill(self.settings.theme.btn_primary());
+                if ui.add(share_btn).clicked() {
+                    log_fmt!("[gui] screen share: on");
+                    let quality = ScreenQuality::ALL[self.selected_screen_quality];
+                    let audio_device = match self.selected_audio_device {
+                        0 => None,
+                        1 => Some(String::new()),
+                        n => self.loopback_devices.get(n - 2).cloned(),
+                    };
+                    let tx = if self.group_call_channel_id.is_some() {
+                        self.group_screen_cmd_tx.as_ref()
+                    } else {
+                        self.screen_cmd_tx.as_ref()
+                    };
+                    if let Some(tx) = tx {
+                        let _ = tx.send(ScreenCommand::StartScreen { quality, audio_device, display_index: self.selected_display });
+                    }
+                    if self.group_call_channel_id.is_some() {
+                        self.group_screen_sharing = true;
+                    } else {
+                        self.screen_sharing = true;
+                    }
+                    self.show_screen_popup = false;
+                }
+            });
+        if !open {
+            self.show_screen_popup = false;
+        }
+    }
+
+    /// Webcam config popup — works for both 1:1 and group calls.
+    pub(crate) fn draw_webcam_popup(&mut self, ctx: &egui::Context) {
+        let mut open = true;
+        egui::Window::new("Webcam")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("Camera:");
+                if self.camera_names.is_empty() {
+                    ui.colored_label(self.settings.theme.error(), "No cameras found");
+                } else {
+                    let cam_label = self.camera_names.get(self.selected_camera)
+                        .cloned().unwrap_or_else(|| "Camera 0".to_string());
+                    egui::ComboBox::from_id_salt("popup_camera")
+                        .width(240.0)
+                        .selected_text(&cam_label)
+                        .show_ui(ui, |ui| {
+                            for (i, name) in self.camera_names.iter().enumerate() {
+                                ui.selectable_value(&mut self.selected_camera, i, name.as_str());
+                            }
+                        });
+                }
+
+                ui.add_space(4.0);
+                ui.label("Quality:");
+                let current_label = ScreenQuality::ALL[self.selected_screen_quality].label();
+                egui::ComboBox::from_id_salt("popup_cam_quality")
+                    .width(160.0)
+                    .selected_text(current_label)
+                    .show_ui(ui, |ui| {
+                        for (i, q) in ScreenQuality::ALL.iter().enumerate() {
+                            ui.selectable_value(&mut self.selected_screen_quality, i, q.label());
+                        }
+                    });
+
+                ui.add_space(8.0);
+                let can_start = !self.camera_names.is_empty();
+                let start_btn = egui::Button::new(
+                    egui::RichText::new("Start Camera").size(16.0).color(egui::Color32::WHITE)
+                ).min_size(egui::vec2(160.0, 35.0)).fill(
+                    if can_start { self.settings.theme.btn_positive() }
+                    else { self.settings.theme.btn_neutral() }
+                );
+                if ui.add_enabled(can_start, start_btn).clicked() {
+                    log_fmt!("[gui] webcam: on");
+                    let quality = ScreenQuality::ALL[self.selected_screen_quality];
+                    let tx = if self.group_call_channel_id.is_some() {
+                        self.group_screen_cmd_tx.as_ref()
+                    } else {
+                        self.screen_cmd_tx.as_ref()
+                    };
+                    if let Some(tx) = tx {
+                        let _ = tx.send(ScreenCommand::StartWebcam { quality, device_index: self.selected_camera });
+                    }
+                    if self.group_call_channel_id.is_some() {
+                        self.group_webcam_sharing = true;
+                    } else {
+                        self.webcam_sharing = true;
+                    }
+                    self.show_webcam_popup = false;
+                }
+            });
+        if !open {
+            self.show_webcam_popup = false;
+        }
     }
 }

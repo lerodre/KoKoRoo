@@ -463,6 +463,9 @@ pub fn start_as_leader(
                 PKT_GRP_VOICE, &opus_buf[..encoded_len],
             );
             let conn = sender_connected.lock().unwrap();
+            if counter % 250 == 0 {
+                log_fmt!("[groupcall] leader voice sent {} frames to {} members", counter, conn.len());
+            }
             for member in conn.values() {
                 let _ = send_socket.send_to(&pkt, member.peer_addr);
             }
@@ -967,6 +970,9 @@ pub fn start_as_member(
                 &sender_cipher2, my_sender_index, counter,
                 PKT_GRP_VOICE, &opus_buf[..encoded_len],
             );
+            if counter % 250 == 0 {
+                log_fmt!("[groupcall] member voice sent {} frames to leader {}", counter, current_leader);
+            }
             let _ = send_socket2.send_to(&pkt, &current_leader);
         }
     });

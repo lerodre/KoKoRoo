@@ -1563,6 +1563,14 @@ impl eframe::App for HostelApp {
             self.draw_firewall_prompt(ctx);
         }
 
+        // ── Screen share / webcam popups (work for both 1:1 and group calls) ──
+        if self.show_screen_popup {
+            self.draw_screen_share_popup(ctx);
+        }
+        if self.show_webcam_popup {
+            self.draw_webcam_popup(ctx);
+        }
+
         // ── Crop editor popup ──
         if self.show_crop_editor {
             self.draw_crop_editor(ctx);
