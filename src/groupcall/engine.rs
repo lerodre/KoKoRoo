@@ -7,6 +7,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
 use crate::group::{Group, GroupMember};
+use crate::screen::{ScreenCommand, ScreenViewer};
 
 /// Opus frame size: 960 samples @ 48kHz = 20ms.
 pub const FRAME_SIZE: usize = 960;
@@ -46,6 +47,11 @@ pub struct GroupCallInfo {
     pub chat_rx: mpsc::Receiver<GroupChatMsg>,
     pub roster_rx: mpsc::Receiver<Vec<GroupMember>>,
     pub local_hangup: Arc<AtomicBool>,
+    pub screen_cmd_tx: mpsc::Sender<ScreenCommand>,
+    pub screen_viewer: Arc<Mutex<ScreenViewer>>,
+    pub screen_sharer: Arc<Mutex<Option<u16>>>,
+    #[allow(dead_code)]
+    pub screen_active: Arc<AtomicBool>,
 }
 
 /// Audio streams + ring buffers returned by `setup_audio_streams()`.

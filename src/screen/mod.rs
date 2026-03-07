@@ -15,7 +15,9 @@ use vpx_sys::vpx_codec_cx_pkt_kind::VPX_CODEC_CX_FRAME_PKT;
 #[cfg(target_os = "linux")]
 pub mod wayland;
 
-use crate::crypto::{Session, PKT_SCREEN, PKT_SCREEN_OFFER};
+use crate::crypto::{Session, PKT_SCREEN, PKT_SCREEN_OFFER, PKT_GRP_SCREEN, PKT_GRP_SCREEN_OFFER, PKT_GRP_SCREEN_STOP};
+use chacha20poly1305::ChaCha20Poly1305;
+use std::sync::atomic::AtomicU32;
 
 // ── Capture Source ──
 
@@ -1061,4 +1063,387 @@ fn capture_loop_scrap(
     }
 
     active.store(false, Ordering::Relaxed);
+}
+
+// ── Group capture: multi-peer sending with group encryption ──
+
+/// Where to send group screen share packets.
+pub enum GroupSendTarget {
+    /// Relay: send to leader (or to all members if we ARE the leader)
+    Relay { addrs: Arc<std::sync::Mutex<Vec<SocketAddr>>> },
+    /// P2P: send to all connected peers
+    P2P { peers: Arc<std::sync::Mutex<HashMap<u16, SocketAddr>>> },
+}
+
+impl GroupSendTarget {
+    fn send_all(&self, socket: &UdpSocket, data: &[u8]) {
+        match self {
+            GroupSendTarget::Relay { addrs } => {
+                if let Ok(list) = addrs.lock() {
+                    for addr in list.iter() {
+                        let _ = socket.send_to(data, addr);
+                    }
+                }
+            }
+            GroupSendTarget::P2P { peers } => {
+                if let Ok(map) = peers.lock() {
+                    for addr in map.values() {
+                        let _ = socket.send_to(data, addr);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Group capture loop: captures screen/webcam, encodes VP8, encrypts with group key, sends to all peers.
+pub fn group_capture_loop(
+    socket: UdpSocket,
+    cipher: ChaCha20Poly1305,
+    sender_index: u16,
+    send_counter: Arc<AtomicU32>,
+    target: GroupSendTarget,
+    active: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
+    quality: ScreenQuality,
+    source: CaptureSource,
+) {
+    match source {
+        CaptureSource::Scrap { display_index } => {
+            group_capture_loop_scrap(socket, cipher, sender_index, send_counter, target, active, running, quality, display_index);
+        }
+        #[cfg(target_os = "linux")]
+        CaptureSource::PipeWire { capture } => {
+            group_capture_loop_pipewire(socket, cipher, sender_index, send_counter, target, active, running, quality, capture);
+        }
+        CaptureSource::Webcam { device_index } => {
+            group_capture_loop_webcam(socket, cipher, sender_index, send_counter, target, active, running, quality, device_index);
+        }
+    }
+}
+
+/// Helper: encrypt a chunk and send to all group targets.
+fn grp_send_screen_chunk(
+    socket: &UdpSocket,
+    cipher: &ChaCha20Poly1305,
+    sender_index: u16,
+    send_counter: &Arc<AtomicU32>,
+    target: &GroupSendTarget,
+    pkt_type: u8,
+    data: &[u8],
+) {
+    let counter = send_counter.fetch_add(1, Ordering::Relaxed);
+    let pkt = crate::crypto::grp_encrypt(cipher, sender_index, counter, pkt_type, data);
+    target.send_all(socket, &pkt);
+}
+
+fn group_capture_loop_scrap(
+    socket: UdpSocket,
+    cipher: ChaCha20Poly1305,
+    sender_index: u16,
+    send_counter: Arc<AtomicU32>,
+    target: GroupSendTarget,
+    active: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
+    quality: ScreenQuality,
+    display_index: usize,
+) {
+    let displays = scrap::Display::all().unwrap_or_default();
+    let display = match displays.into_iter().nth(display_index)
+        .or_else(|| scrap::Display::all().ok().and_then(|d| d.into_iter().next()))
+    {
+        Some(d) => d,
+        None => {
+            log_fmt!("[grp-screen] ERROR: no display found");
+            active.store(false, Ordering::Relaxed);
+            return;
+        }
+    };
+
+    let native_w = display.width();
+    let native_h = display.height();
+    let enc_w = quality.width().min(native_w as u32);
+    let enc_h = quality.height().min(native_h as u32);
+    let enc_fps = quality.fps();
+    let enc_bps = quality.bitrate_kbps();
+    log_fmt!("[grp-screen] scrap: {}x{} {}fps {}kbps", enc_w, enc_h, enc_fps, enc_bps);
+
+    let mut capturer = match scrap::Capturer::new(display) {
+        Ok(c) => c,
+        Err(e) => {
+            log_fmt!("[grp-screen] ERROR: capturer: {e}");
+            active.store(false, Ordering::Relaxed);
+            return;
+        }
+    };
+
+    // Send offer (0x01 = screen)
+    grp_send_screen_chunk(&socket, &cipher, sender_index, &send_counter, &target, PKT_GRP_SCREEN_OFFER, &[0x01]);
+
+    let mut encoder = ScreenEncoder::new(enc_w, enc_h, enc_fps, enc_bps);
+    let frame_duration = Duration::from_secs_f64(1.0 / enc_fps as f64);
+    let mut frame_id: u16 = 0;
+    let mut frame_count: u32 = 0;
+
+    while active.load(Ordering::Relaxed) && running.load(Ordering::Relaxed) {
+        let frame_start = Instant::now();
+
+        let bgra_frame = match capturer.frame() {
+            Ok(frame) => {
+                let stride = frame.len() / native_h;
+                if stride == native_w * 4 {
+                    frame.to_vec()
+                } else {
+                    let mut clean = Vec::with_capacity(native_w * native_h * 4);
+                    for row in 0..native_h {
+                        let start = row * stride;
+                        clean.extend_from_slice(&frame[start..start + native_w * 4]);
+                    }
+                    clean
+                }
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+        };
+
+        let scaled = scale_bgra(&bgra_frame, native_w, native_h, enc_w as usize, enc_h as usize);
+        let force_kf = frame_count % KEYFRAME_INTERVAL == 0;
+        let encoded = encoder.encode(&scaled, force_kf);
+
+        if !encoded.is_empty() {
+            let chunks = ScreenEncoder::fragment(&encoded, frame_id, force_kf);
+            for (i, chunk) in chunks.iter().enumerate() {
+                grp_send_screen_chunk(&socket, &cipher, sender_index, &send_counter, &target, PKT_GRP_SCREEN, chunk);
+                if i + 1 < chunks.len() {
+                    std::thread::sleep(Duration::from_micros(200));
+                }
+            }
+            if frame_count % 30 == 0 || frame_count < 5 {
+                log_fmt!("[grp-screen] frame #{} ({} bytes, {} chunks, kf={})", frame_count, encoded.len(), chunks.len(), force_kf);
+            }
+            frame_id = frame_id.wrapping_add(1);
+        }
+        frame_count += 1;
+
+        let elapsed = frame_start.elapsed();
+        if elapsed < frame_duration {
+            std::thread::sleep(frame_duration - elapsed);
+        }
+    }
+
+    // Send stop (3x for reliability)
+    for _ in 0..3 {
+        grp_send_screen_chunk(&socket, &cipher, sender_index, &send_counter, &target, PKT_GRP_SCREEN_STOP, &[]);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    active.store(false, Ordering::Relaxed);
+    log_fmt!("[grp-screen] scrap loop exited");
+}
+
+#[cfg(target_os = "linux")]
+fn group_capture_loop_pipewire(
+    socket: UdpSocket,
+    cipher: ChaCha20Poly1305,
+    sender_index: u16,
+    send_counter: Arc<AtomicU32>,
+    target: GroupSendTarget,
+    active: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
+    quality: ScreenQuality,
+    capture: wayland::PortalCapture,
+) {
+    use std::sync::Mutex;
+
+    let native_w = capture.width;
+    let native_h = capture.height;
+    let frame_buf: Arc<Mutex<Option<(Vec<u8>, u32, u32)>>> = Arc::new(Mutex::new(None));
+
+    let pw_handle = {
+        let fb = frame_buf.clone();
+        let a = active.clone();
+        let r = running.clone();
+        std::thread::spawn(move || {
+            wayland::run_pipewire_capture(capture, fb, a, r);
+        })
+    };
+
+    let enc_w = quality.width().min(native_w);
+    let enc_h = quality.height().min(native_h);
+    let enc_fps = quality.fps();
+    let enc_bps = quality.bitrate_kbps();
+    log_fmt!("[grp-screen] pw: {}x{} {}fps {}kbps", enc_w, enc_h, enc_fps, enc_bps);
+
+    // Send offer
+    grp_send_screen_chunk(&socket, &cipher, sender_index, &send_counter, &target, PKT_GRP_SCREEN_OFFER, &[0x01]);
+
+    let mut encoder = ScreenEncoder::new(enc_w, enc_h, enc_fps, enc_bps);
+    let frame_duration = Duration::from_secs_f64(1.0 / enc_fps as f64);
+    let mut frame_id: u16 = 0;
+    let mut frame_count: u32 = 0;
+
+    while active.load(Ordering::Relaxed) && running.load(Ordering::Relaxed) {
+        let frame_start = Instant::now();
+        let frame = { frame_buf.lock().unwrap().take() };
+
+        if let Some((bgra, w, h)) = frame {
+            let scaled = scale_bgra(&bgra, w as usize, h as usize, enc_w as usize, enc_h as usize);
+            let force_kf = frame_count % KEYFRAME_INTERVAL == 0;
+            let encoded = encoder.encode(&scaled, force_kf);
+
+            if !encoded.is_empty() {
+                let chunks = ScreenEncoder::fragment(&encoded, frame_id, force_kf);
+                for (i, chunk) in chunks.iter().enumerate() {
+                    grp_send_screen_chunk(&socket, &cipher, sender_index, &send_counter, &target, PKT_GRP_SCREEN, chunk);
+                    if i + 1 < chunks.len() {
+                        std::thread::sleep(Duration::from_micros(200));
+                    }
+                }
+                if frame_count % 30 == 0 || frame_count < 5 {
+                    log_fmt!("[grp-screen] pw frame #{} ({} bytes, {} chunks)", frame_count, encoded.len(), chunks.len());
+                }
+                frame_id = frame_id.wrapping_add(1);
+            }
+            frame_count += 1;
+        }
+
+        let elapsed = frame_start.elapsed();
+        if elapsed < frame_duration {
+            std::thread::sleep(frame_duration - elapsed);
+        }
+    }
+
+    for _ in 0..3 {
+        grp_send_screen_chunk(&socket, &cipher, sender_index, &send_counter, &target, PKT_GRP_SCREEN_STOP, &[]);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    active.store(false, Ordering::Relaxed);
+    let _ = pw_handle.join();
+    log_fmt!("[grp-screen] pw loop exited");
+}
+
+fn group_capture_loop_webcam(
+    socket: UdpSocket,
+    cipher: ChaCha20Poly1305,
+    sender_index: u16,
+    send_counter: Arc<AtomicU32>,
+    target: GroupSendTarget,
+    active: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
+    quality: ScreenQuality,
+    device_index: usize,
+) {
+    use nokhwa::pixel_format::RgbFormat;
+    use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
+    use nokhwa::Camera;
+
+    log_fmt!("[grp-screen] webcam: device_index={}, quality={:?}", device_index, quality);
+
+    let index = CameraIndex::Index(device_index as u32);
+    let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
+
+    let mut camera = match Camera::new(index, requested) {
+        Ok(c) => c,
+        Err(e) => {
+            log_fmt!("[grp-screen] ERROR: camera open: {}", e);
+            active.store(false, Ordering::Relaxed);
+            return;
+        }
+    };
+
+    if let Err(e) = camera.open_stream() {
+        log_fmt!("[grp-screen] ERROR: camera stream: {}", e);
+        active.store(false, Ordering::Relaxed);
+        return;
+    }
+
+    let res = camera.resolution();
+    let native_w = res.width() as u32;
+    let native_h = res.height() as u32;
+    let enc_w = quality.width().min(native_w);
+    let enc_h = quality.height().min(native_h);
+    let enc_fps = quality.fps();
+    let enc_bps = quality.bitrate_kbps();
+    log_fmt!("[grp-screen] webcam encoder: {}x{} {}fps {}kbps", enc_w, enc_h, enc_fps, enc_bps);
+
+    // Send offer (0x02 = webcam)
+    grp_send_screen_chunk(&socket, &cipher, sender_index, &send_counter, &target, PKT_GRP_SCREEN_OFFER, &[0x02]);
+
+    let mut encoder = ScreenEncoder::new(enc_w, enc_h, enc_fps, enc_bps);
+    let frame_duration = Duration::from_secs_f64(1.0 / enc_fps as f64);
+    let mut frame_id: u16 = 0;
+    let mut frame_count: u32 = 0;
+
+    while active.load(Ordering::Relaxed) && running.load(Ordering::Relaxed) {
+        let frame_start = Instant::now();
+
+        let frame = match camera.frame() {
+            Ok(f) => f,
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+        };
+
+        let decoded = match frame.decode_image::<RgbFormat>() {
+            Ok(img) => img,
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+        };
+        let w = decoded.width() as usize;
+        let h = decoded.height() as usize;
+        let rgb_data = decoded.into_raw();
+
+        let expected_rgb = w * h * 3;
+        if rgb_data.len() < expected_rgb {
+            std::thread::sleep(Duration::from_millis(10));
+            continue;
+        }
+
+        let mut bgra = vec![0u8; w * h * 4];
+        for i in 0..(w * h) {
+            bgra[i * 4] = rgb_data[i * 3 + 2];
+            bgra[i * 4 + 1] = rgb_data[i * 3 + 1];
+            bgra[i * 4 + 2] = rgb_data[i * 3];
+            bgra[i * 4 + 3] = 255;
+        }
+
+        let scaled = scale_bgra(&bgra, w, h, enc_w as usize, enc_h as usize);
+        let force_kf = frame_count % KEYFRAME_INTERVAL == 0;
+        let encoded = encoder.encode(&scaled, force_kf);
+
+        if !encoded.is_empty() {
+            let chunks = ScreenEncoder::fragment(&encoded, frame_id, force_kf);
+            for (i, chunk) in chunks.iter().enumerate() {
+                grp_send_screen_chunk(&socket, &cipher, sender_index, &send_counter, &target, PKT_GRP_SCREEN, chunk);
+                if i + 1 < chunks.len() {
+                    std::thread::sleep(Duration::from_micros(200));
+                }
+            }
+            if frame_count % 30 == 0 || frame_count < 5 {
+                log_fmt!("[grp-screen] webcam frame #{} ({} bytes, {} chunks)", frame_count, encoded.len(), chunks.len());
+            }
+            frame_id = frame_id.wrapping_add(1);
+        }
+        frame_count += 1;
+
+        let elapsed = frame_start.elapsed();
+        if elapsed < frame_duration {
+            std::thread::sleep(frame_duration - elapsed);
+        }
+    }
+
+    for _ in 0..3 {
+        grp_send_screen_chunk(&socket, &cipher, sender_index, &send_counter, &target, PKT_GRP_SCREEN_STOP, &[]);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    active.store(false, Ordering::Relaxed);
+    log_fmt!("[grp-screen] webcam loop exited");
 }

@@ -439,10 +439,19 @@ impl HostelApp {
                             1 => Some(String::new()),
                             n => self.loopback_devices.get(n - 2).cloned(),
                         };
-                        if let Some(tx) = &self.screen_cmd_tx {
+                        let tx = if self.group_call_channel_id.is_some() {
+                            self.group_screen_cmd_tx.as_ref()
+                        } else {
+                            self.screen_cmd_tx.as_ref()
+                        };
+                        if let Some(tx) = tx {
                             let _ = tx.send(ScreenCommand::StartScreen { quality, audio_device, display_index: self.selected_display });
                         }
-                        self.screen_sharing = true;
+                        if self.group_call_channel_id.is_some() {
+                            self.group_screen_sharing = true;
+                        } else {
+                            self.screen_sharing = true;
+                        }
                         self.show_screen_popup = false;
                     }
                 });
@@ -499,10 +508,19 @@ impl HostelApp {
                     if ui.add_enabled(can_start, start_btn).clicked() {
                         log_fmt!("[gui] webcam: on");
                         let quality = ScreenQuality::ALL[self.selected_screen_quality];
-                        if let Some(tx) = &self.screen_cmd_tx {
+                        let tx = if self.group_call_channel_id.is_some() {
+                            self.group_screen_cmd_tx.as_ref()
+                        } else {
+                            self.screen_cmd_tx.as_ref()
+                        };
+                        if let Some(tx) = tx {
                             let _ = tx.send(ScreenCommand::StartWebcam { quality, device_index: self.selected_camera });
                         }
-                        self.webcam_sharing = true;
+                        if self.group_call_channel_id.is_some() {
+                            self.group_webcam_sharing = true;
+                        } else {
+                            self.webcam_sharing = true;
+                        }
                         self.show_webcam_popup = false;
                     }
                 });

@@ -11,8 +11,11 @@ use std::time::Instant;
 
 use nnnoiseless::DenoiseState;
 
-use crate::crypto::{self, PKT_GRP_HANGUP, PKT_GRP_HELLO, PKT_GRP_VOICE};
+use crate::crypto::{self, PKT_GRP_HANGUP, PKT_GRP_HELLO, PKT_GRP_VOICE,
+    PKT_GRP_SCREEN, PKT_GRP_SCREEN_OFFER, PKT_GRP_SCREEN_STOP};
 use crate::group::{Group, GroupMember};
+
+use crate::screen::{ScreenCommand, ScreenViewer, CaptureSource, GroupSendTarget};
 
 use super::engine::{
     self, AudioFrames, GroupCallInfo, GroupChatMsg, GroupRole,
@@ -64,6 +67,12 @@ pub fn start(
 
     let local_hangup = Arc::new(AtomicBool::new(false));
 
+    // Screen sharing state
+    let (screen_cmd_tx, screen_cmd_rx) = mpsc::channel::<ScreenCommand>();
+    let screen_viewer = Arc::new(Mutex::new(ScreenViewer::new()));
+    let screen_sharer: Arc<Mutex<Option<u16>>> = Arc::new(Mutex::new(None));
+    let screen_active = Arc::new(AtomicBool::new(false));
+
     // Connected peers map
     let peers: Arc<Mutex<HashMap<u16, PeerConnection>>> =
         Arc::new(Mutex::new(HashMap::new()));
@@ -111,6 +120,8 @@ pub fn start(
     let recv_cipher = crypto::grp_cipher_from_key(&group_key);
     let recv_group = group.clone();
     let recv_peers = peers.clone();
+    let recv_screen_viewer = screen_viewer.clone();
+    let recv_screen_sharer = screen_sharer.clone();
 
     let _receiver = thread::spawn(move || {
         let mut recv_buf = [0u8; 4096];
@@ -216,6 +227,26 @@ pub fn start(
                             recv_audio.lock().unwrap().remove(&sender_index);
                         }
 
+                        PKT_GRP_SCREEN | PKT_GRP_SCREEN_OFFER | PKT_GRP_SCREEN_STOP => {
+                            if let Some((pt, si, data)) = crypto::grp_decrypt(&recv_cipher, &recv_buf[..n]) {
+                                match pt {
+                                    PKT_GRP_SCREEN => {
+                                        recv_screen_viewer.lock().unwrap().receive_chunk(&data);
+                                        *recv_screen_sharer.lock().unwrap() = Some(si);
+                                    }
+                                    PKT_GRP_SCREEN_OFFER => {
+                                        *recv_screen_sharer.lock().unwrap() = Some(si);
+                                        recv_screen_viewer.lock().unwrap().offer_active = true;
+                                    }
+                                    PKT_GRP_SCREEN_STOP => {
+                                        *recv_screen_sharer.lock().unwrap() = None;
+                                        recv_screen_viewer.lock().unwrap().stopped = true;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+
                         _ => {}
                     }
                 }
@@ -223,6 +254,84 @@ pub fn start(
                 Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {}
                 Err(ref e) if e.kind() == std::io::ErrorKind::ConnectionReset => {}
                 Err(_) => {}
+            }
+        }
+    });
+
+    // ── Screen command handler thread (P2P) ──
+    let pscr_socket = socket.try_clone().unwrap();
+    let pscr_running = running.clone();
+    let pscr_active = screen_active.clone();
+    let pscr_peers = peers.clone();
+    let pscr_counter = send_counter.clone();
+    let pscr_cipher = crypto::grp_cipher_from_key(&group_key);
+
+    let _screen_handler = thread::spawn(move || {
+        while pscr_running.load(Ordering::Relaxed) {
+            match screen_cmd_rx.try_recv() {
+                Ok(cmd) => {
+                    match cmd {
+                        ScreenCommand::StartScreen { quality, audio_device: _, display_index } => {
+                            pscr_active.store(true, Ordering::Relaxed);
+                            let peer_addrs: HashMap<u16, SocketAddr> = pscr_peers.lock().unwrap()
+                                .iter().map(|(k, v)| (*k, v.peer_addr)).collect();
+                            let target = GroupSendTarget::P2P {
+                                peers: Arc::new(Mutex::new(peer_addrs)),
+                            };
+                            let sock = pscr_socket.try_clone().unwrap();
+                            let cipher = pscr_cipher.clone();
+                            let counter = pscr_counter.clone();
+                            let active = pscr_active.clone();
+                            let running = pscr_running.clone();
+
+                            #[cfg(target_os = "linux")]
+                            let source = if crate::screen::wayland::is_wayland() {
+                                match crate::screen::wayland::request_capture() {
+                                    Some(cap) => CaptureSource::PipeWire { capture: cap },
+                                    None => CaptureSource::Scrap { display_index },
+                                }
+                            } else {
+                                CaptureSource::Scrap { display_index }
+                            };
+                            #[cfg(not(target_os = "linux"))]
+                            let source = CaptureSource::Scrap { display_index };
+
+                            thread::spawn(move || {
+                                crate::screen::group_capture_loop(
+                                    sock, cipher, my_sender_index, counter, target,
+                                    active, running, quality, source,
+                                );
+                            });
+                        }
+                        ScreenCommand::StartWebcam { quality, device_index } => {
+                            pscr_active.store(true, Ordering::Relaxed);
+                            let peer_addrs: HashMap<u16, SocketAddr> = pscr_peers.lock().unwrap()
+                                .iter().map(|(k, v)| (*k, v.peer_addr)).collect();
+                            let target = GroupSendTarget::P2P {
+                                peers: Arc::new(Mutex::new(peer_addrs)),
+                            };
+                            let sock = pscr_socket.try_clone().unwrap();
+                            let cipher = pscr_cipher.clone();
+                            let counter = pscr_counter.clone();
+                            let active = pscr_active.clone();
+                            let running = pscr_running.clone();
+                            thread::spawn(move || {
+                                crate::screen::group_capture_loop(
+                                    sock, cipher, my_sender_index, counter, target,
+                                    active, running, quality, CaptureSource::Webcam { device_index },
+                                );
+                            });
+                        }
+                        ScreenCommand::Stop => {
+                            pscr_active.store(false, Ordering::Relaxed);
+                        }
+                        _ => {}
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(mpsc::TryRecvError::Disconnected) => break,
             }
         }
     });
@@ -352,5 +461,9 @@ pub fn start(
         chat_rx: chat_in_rx,
         roster_rx,
         local_hangup,
+        screen_cmd_tx,
+        screen_viewer,
+        screen_sharer,
+        screen_active,
     })
 }

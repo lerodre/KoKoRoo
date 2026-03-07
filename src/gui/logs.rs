@@ -12,6 +12,7 @@ fn matches_log_filter(line: &str, filter: LogFilter) -> bool {
                 || line.contains("] [groupcall]")
                 || line.contains("] [p2p]")
                 || line.contains("] [failover]")
+                || line.contains("] [grp-screen]")
         }
         LogFilter::Voice => {
             line.contains("] [voice]")

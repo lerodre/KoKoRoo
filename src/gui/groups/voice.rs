@@ -236,13 +236,13 @@ impl HostelApp {
                     if ui.add(scr_btn).clicked() {
                         if self.group_screen_sharing {
                             self.group_screen_sharing = false;
-                            if let Some(tx) = &self.screen_cmd_tx {
+                            if let Some(tx) = &self.group_screen_cmd_tx {
                                 let _ = tx.send(ScreenCommand::Stop);
                             }
                         } else {
                             if self.group_webcam_sharing {
                                 self.group_webcam_sharing = false;
-                                if let Some(tx) = &self.screen_cmd_tx {
+                                if let Some(tx) = &self.group_screen_cmd_tx {
                                     let _ = tx.send(ScreenCommand::Stop);
                                 }
                             }
@@ -273,13 +273,13 @@ impl HostelApp {
                     if ui.add(cam_btn).clicked() {
                         if self.group_webcam_sharing {
                             self.group_webcam_sharing = false;
-                            if let Some(tx) = &self.screen_cmd_tx {
+                            if let Some(tx) = &self.group_screen_cmd_tx {
                                 let _ = tx.send(ScreenCommand::Stop);
                             }
                         } else {
                             if self.group_screen_sharing {
                                 self.group_screen_sharing = false;
-                                if let Some(tx) = &self.screen_cmd_tx {
+                                if let Some(tx) = &self.group_screen_cmd_tx {
                                     let _ = tx.send(ScreenCommand::Stop);
                                 }
                             }
@@ -303,6 +303,72 @@ impl HostelApp {
                     }
                 });
             });
+
+            // ── Video display area ──
+            let mut has_group_video = false;
+            if let Some(viewer) = &self.group_screen_viewer {
+                if let Ok(mut v) = viewer.lock() {
+                    let vw = v.frame_width;
+                    let vh = v.frame_height;
+                    if let Some(rgba_frame) = v.take_frame() {
+                        let image = egui::ColorImage::from_rgba_unmultiplied(
+                            [vw as usize, vh as usize],
+                            &rgba_frame,
+                        );
+                        self.group_screen_texture = Some(
+                            ui.ctx().load_texture("grp_screen", image, Default::default())
+                        );
+                    } else if v.stopped && self.group_screen_texture.is_some() {
+                        self.group_screen_texture = None;
+                    }
+                }
+            }
+
+            if let Some(tex) = &self.group_screen_texture {
+                has_group_video = true;
+                ui.add_space(8.0);
+
+                // Show who is sharing
+                if let Some(sharer) = &self.group_screen_sharer {
+                    if let Ok(si) = sharer.lock() {
+                        if let Some(idx) = *si {
+                            let nick = self.group_call_members.iter()
+                                .find(|m| m.sender_index == idx)
+                                .map(|m| m.nickname.as_str())
+                                .unwrap_or("Someone");
+                            ui.label(
+                                egui::RichText::new(format!("{} is sharing", nick))
+                                    .size(12.0)
+                                    .color(self.settings.theme.text_muted()),
+                            );
+                        }
+                    }
+                }
+
+                let avail_w = ui.available_width();
+                let avail_h = (ui.available_height() - 8.0).max(100.0);
+                let video_w = self.group_screen_viewer.as_ref()
+                    .and_then(|v| v.lock().ok().map(|v| v.frame_width))
+                    .unwrap_or(1280) as f32;
+                let video_h = self.group_screen_viewer.as_ref()
+                    .and_then(|v| v.lock().ok().map(|v| v.frame_height))
+                    .unwrap_or(720) as f32;
+                let aspect = video_w / video_h;
+                let (dw, dh) = {
+                    let h_from_w = avail_w / aspect;
+                    if h_from_w <= avail_h {
+                        (avail_w, h_from_w)
+                    } else {
+                        (avail_h * aspect, avail_h)
+                    }
+                };
+                let pad = (avail_w - dw).max(0.0) / 2.0;
+                ui.horizontal(|ui| {
+                    ui.add_space(pad);
+                    ui.image(egui::load::SizedTexture::new(tex.id(), egui::vec2(dw, dh)));
+                });
+            }
+            let _ = has_group_video;
         });
 
         // ── Right panel: Members + mode selector ──

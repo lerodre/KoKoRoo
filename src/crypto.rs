@@ -62,11 +62,8 @@ pub const PKT_GRP_INVITE_NACK: u8 = 0x3E; // peer rejected group invite
 pub const PKT_GRP_UPDATE: u8       = 0x3F; // group metadata update (full JSON)
 pub const PKT_GRP_AVATAR_OFFER: u8 = 0x40; // group avatar: group_id\n + sha256 + size
 pub const PKT_GRP_AVATAR_DATA: u8  = 0x41; // group avatar chunk: group_id\n + chunk_idx + data
-#[allow(dead_code)]
 pub const PKT_GRP_SCREEN: u8       = 0x42; // group screen share VP8 chunk data
-#[allow(dead_code)]
 pub const PKT_GRP_SCREEN_OFFER: u8 = 0x43; // group screen share beacon
-#[allow(dead_code)]
 pub const PKT_GRP_SCREEN_STOP: u8  = 0x44; // group screen share stopped
 pub const PKT_GRP_MEMBER_SYNC: u8  = 0x45; // per-member sync after invite accept
 pub const PKT_GRP_AVATAR_ACK: u8   = 0x46; // group avatar received: group_id\n + sha256

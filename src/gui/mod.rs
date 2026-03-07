@@ -281,6 +281,10 @@ pub struct HostelApp {
     pub(crate) group_call_channel_id: Option<String>,
     pub(crate) group_screen_sharing: bool,
     pub(crate) group_webcam_sharing: bool,
+    pub(crate) group_screen_cmd_tx: Option<mpsc::Sender<ScreenCommand>>,
+    pub(crate) group_screen_viewer: Option<Arc<Mutex<ScreenViewer>>>,
+    pub(crate) group_screen_sharer: Option<Arc<Mutex<Option<u16>>>>,
+    pub(crate) group_screen_texture: Option<egui::TextureHandle>,
     pub(crate) group_call_running: Arc<AtomicBool>,
     pub(crate) group_call_mic: Arc<AtomicBool>,
     pub(crate) group_call_hangup: Option<Arc<AtomicBool>>,
@@ -506,6 +510,10 @@ impl HostelApp {
             group_call_channel_id: None,
             group_screen_sharing: false,
             group_webcam_sharing: false,
+            group_screen_cmd_tx: None,
+            group_screen_viewer: None,
+            group_screen_sharer: None,
+            group_screen_texture: None,
             group_call_running: Arc::new(AtomicBool::new(false)),
             group_call_mic: Arc::new(AtomicBool::new(true)),
             group_call_hangup: None,
@@ -863,6 +871,10 @@ impl HostelApp {
         self.group_call_channel_id = None;
         self.group_screen_sharing = false;
         self.group_webcam_sharing = false;
+        self.group_screen_cmd_tx = None;
+        self.group_screen_viewer = None;
+        self.group_screen_sharer = None;
+        self.group_screen_texture = None;
         *self.group_connect_result.lock().unwrap() = None;
         // Stay on group detail view (not back to list)
         self.group_view = GroupView::Detail;
@@ -1009,6 +1021,9 @@ impl eframe::App for HostelApp {
                         self.group_call_chat_tx = Some(info.chat_tx);
                         self.group_call_chat_rx = Some(info.chat_rx);
                         self.group_call_roster_rx = Some(info.roster_rx);
+                        self.group_screen_cmd_tx = Some(info.screen_cmd_tx);
+                        self.group_screen_viewer = Some(info.screen_viewer);
+                        self.group_screen_sharer = Some(info.screen_sharer);
                         self.group_call_members = self.group_call_group.as_ref()
                             .and_then(|g| g.members.iter()
                                 .find(|m| m.pubkey == self.identity.pubkey).cloned())
