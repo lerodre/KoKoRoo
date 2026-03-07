@@ -20,7 +20,7 @@ use crate::group::{Group, GroupMember};
 use crate::screen::{ScreenCommand, ScreenViewer, CaptureSource, GroupSendTarget};
 
 use super::engine::{
-    self, AudioFrames, GroupCallInfo, GroupChatMsg, GroupRole,
+    self, AudioFrames, AudioKeepAlive, GroupCallInfo, GroupChatMsg, GroupRole,
     FRAME_SIZE, DENOISE_FRAME, MAX_OPUS_PACKET,
 };
 
@@ -44,7 +44,7 @@ pub fn start_as_leader(
     running: Arc<AtomicBool>,
     mic_active: Arc<AtomicBool>,
     my_sender_index: u16,
-) -> Result<GroupCallInfo, String> {
+) -> Result<(GroupCallInfo, AudioKeepAlive), String> {
     log_fmt!("[groupcall] starting as LEADER for '{}' (mode=Relay, {} members)",
         group.name, group.members.len());
 
@@ -77,11 +77,13 @@ pub fn start_as_leader(
     // Per-member audio storage
     let audio_frames: AudioFrames = Arc::new(Mutex::new(HashMap::new()));
 
-    // Audio streams
+    // Audio streams — streams are !Send, so caller must keep AudioKeepAlive alive
     let pipeline = engine::setup_audio_streams(input_device, output_device)?;
     let mut mic_consumer = pipeline.mic_consumer;
-    let _input = pipeline._input_stream;
-    let _output = pipeline._output_stream;
+    let audio_keep_alive = AudioKeepAlive {
+        _input_stream: pipeline._input_stream,
+        _output_stream: pipeline._output_stream,
+    };
 
     // Mixer thread
     engine::spawn_mixer_thread(running.clone(), audio_frames.clone(), pipeline.spk_producer);
@@ -547,7 +549,7 @@ pub fn start_as_leader(
         }
     });
 
-    Ok(GroupCallInfo {
+    Ok((GroupCallInfo {
         group,
         role: GroupRole::Leader,
         channel_id: channel_id.to_string(),
@@ -561,7 +563,7 @@ pub fn start_as_leader(
         screen_viewer,
         screen_sharer,
         screen_active,
-    })
+    }, audio_keep_alive))
 }
 
 /// Start a group call as a member (client) with failover support.
@@ -575,7 +577,7 @@ pub fn start_as_member(
     running: Arc<AtomicBool>,
     mic_active: Arc<AtomicBool>,
     my_sender_index: u16,
-) -> Result<GroupCallInfo, String> {
+) -> Result<(GroupCallInfo, AudioKeepAlive), String> {
     log_fmt!("[groupcall] starting as MEMBER for '{}' (mode=Relay, leader={})",
         group.name, leader_addr);
 
@@ -618,11 +620,13 @@ pub fn start_as_member(
     // Per-sender decoded audio frames
     let audio_frames: AudioFrames = Arc::new(Mutex::new(HashMap::new()));
 
-    // Audio streams
+    // Audio streams — streams are !Send, so caller must keep AudioKeepAlive alive
     let pipeline = engine::setup_audio_streams(input_device, output_device)?;
     let mut mic_consumer = pipeline.mic_consumer;
-    let _input = pipeline._input_stream;
-    let _output = pipeline._output_stream;
+    let audio_keep_alive = AudioKeepAlive {
+        _input_stream: pipeline._input_stream,
+        _output_stream: pipeline._output_stream,
+    };
 
     // Mixer thread
     engine::spawn_mixer_thread(running.clone(), audio_frames.clone(), pipeline.spk_producer);
@@ -977,7 +981,7 @@ pub fn start_as_member(
         }
     });
 
-    Ok(GroupCallInfo {
+    Ok((GroupCallInfo {
         group,
         role: GroupRole::Member,
         channel_id: channel_id.to_string(),
@@ -991,7 +995,7 @@ pub fn start_as_member(
         screen_viewer,
         screen_sharer,
         screen_active,
-    })
+    }, audio_keep_alive))
 }
 
 // ── Failover protocol ──

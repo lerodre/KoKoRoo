@@ -62,6 +62,13 @@ pub struct AudioPipeline {
     pub _output_stream: cpal::Stream,
 }
 
+/// Holds cpal streams to prevent them from being dropped.
+/// cpal::Stream is !Send so this must stay on the thread that created it.
+pub struct AudioKeepAlive {
+    pub _input_stream: cpal::Stream,
+    pub _output_stream: cpal::Stream,
+}
+
 /// Per-member decoded audio frames, keyed by sender_index.
 pub type AudioFrames = Arc<Mutex<HashMap<u16, Vec<f32>>>>;
 

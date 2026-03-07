@@ -815,6 +815,7 @@ impl HostelApp {
 
             // Retry socket binding up to 3 times (old call threads may still hold the socket)
             let mut call_result = Err("Not started".to_string());
+            let mut _audio_keep_alive = None;
             for attempt in 0..3 {
                 if attempt > 0 {
                     thread::sleep(std::time::Duration::from_millis(500));
@@ -823,14 +824,30 @@ impl HostelApp {
                     call_result = Err("Cancelled".to_string());
                     break;
                 }
-                call_result = crate::groupcall::start_group_call(
+                match crate::groupcall::start_group_call(
                     group.clone(), &channel_id_owned, &input_device, &output_device,
                     &local_port, running.clone(), mic_active.clone(), my_sender_index,
-                );
-                if call_result.is_ok() { break; }
+                ) {
+                    Ok((info, keep_alive)) => {
+                        _audio_keep_alive = Some(keep_alive);
+                        call_result = Ok(info);
+                        break;
+                    }
+                    Err(e) => {
+                        call_result = Err(e);
+                    }
+                }
             }
 
             *result.lock().unwrap() = Some(call_result);
+
+            // Keep audio streams alive (cpal::Stream is !Send, must stay on this thread)
+            // Block until call ends so streams don't get dropped
+            if _audio_keep_alive.is_some() {
+                while running.load(Ordering::Relaxed) {
+                    thread::sleep(std::time::Duration::from_millis(200));
+                }
+            }
         });
     }
 

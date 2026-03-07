@@ -2,7 +2,7 @@ pub mod engine;
 pub mod relay;
 pub mod p2p;
 
-pub use engine::{GroupCallInfo, GroupChatMsg, GroupRole};
+pub use engine::{AudioKeepAlive, GroupCallInfo, GroupChatMsg, GroupRole};
 
 use crate::crypto;
 use crate::group::{CallMode, Group};
@@ -25,7 +25,7 @@ pub fn start_group_call(
     running: Arc<AtomicBool>,
     mic_active: Arc<AtomicBool>,
     my_sender_index: u16,
-) -> Result<GroupCallInfo, String> {
+) -> Result<(GroupCallInfo, AudioKeepAlive), String> {
     match group.call_mode {
         CallMode::P2P => {
             p2p::start(

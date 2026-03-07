@@ -18,7 +18,7 @@ use crate::group::{Group, GroupMember};
 use crate::screen::{ScreenCommand, ScreenViewer, CaptureSource, GroupSendTarget};
 
 use super::engine::{
-    self, AudioFrames, GroupCallInfo, GroupChatMsg, GroupRole,
+    self, AudioFrames, AudioKeepAlive, GroupCallInfo, GroupChatMsg, GroupRole,
     FRAME_SIZE, DENOISE_FRAME, MAX_OPUS_PACKET,
 };
 
@@ -42,7 +42,7 @@ pub fn start(
     running: Arc<AtomicBool>,
     mic_active: Arc<AtomicBool>,
     my_sender_index: u16,
-) -> Result<GroupCallInfo, String> {
+) -> Result<(GroupCallInfo, AudioKeepAlive), String> {
     let target_peers = group.members.iter()
         .filter(|m| m.pubkey != group.members.iter()
             .find(|mm| mm.sender_index == my_sender_index)
@@ -80,11 +80,13 @@ pub fn start(
     // Per-sender decoded audio frames
     let audio_frames: AudioFrames = Arc::new(Mutex::new(HashMap::new()));
 
-    // Audio streams
+    // Audio streams — streams are !Send, so caller must keep AudioKeepAlive alive
     let pipeline = engine::setup_audio_streams(input_device, output_device)?;
     let mut mic_consumer = pipeline.mic_consumer;
-    let _input = pipeline._input_stream;
-    let _output = pipeline._output_stream;
+    let audio_keep_alive = AudioKeepAlive {
+        _input_stream: pipeline._input_stream,
+        _output_stream: pipeline._output_stream,
+    };
 
     // Mixer thread
     engine::spawn_mixer_thread(running.clone(), audio_frames.clone(), pipeline.spk_producer);
@@ -457,7 +459,7 @@ pub fn start(
         }
     });
 
-    Ok(GroupCallInfo {
+    Ok((GroupCallInfo {
         group,
         role: GroupRole::Leader, // In P2P, everyone is equal — use Leader as placeholder
         channel_id: channel_id.to_string(),
@@ -471,5 +473,5 @@ pub fn start(
         screen_viewer,
         screen_sharer,
         screen_active,
-    })
+    }, audio_keep_alive))
 }
