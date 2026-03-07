@@ -328,7 +328,9 @@ pub fn start_as_leader(
 
                             #[cfg(target_os = "linux")]
                             let source = if crate::screen::wayland::is_wayland() {
-                                match crate::screen::wayland::request_capture() {
+                                match crate::screen::wayland::WaylandPortal::request()
+                                    .and_then(|p| p.new_capture())
+                                {
                                     Some(cap) => CaptureSource::PipeWire { capture: cap },
                                     None => CaptureSource::Scrap { display_index },
                                 }
@@ -830,7 +832,9 @@ pub fn start_as_member(
 
                             #[cfg(target_os = "linux")]
                             let source = if crate::screen::wayland::is_wayland() {
-                                match crate::screen::wayland::request_capture() {
+                                match crate::screen::wayland::WaylandPortal::request()
+                                    .and_then(|p| p.new_capture())
+                                {
                                     Some(cap) => CaptureSource::PipeWire { capture: cap },
                                     None => CaptureSource::Scrap { display_index },
                                 }
