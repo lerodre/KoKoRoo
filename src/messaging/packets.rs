@@ -10,7 +10,7 @@ use crate::crypto::{
     PKT_MSG_FILE_OFFER, PKT_MSG_FILE_ACCEPT, PKT_MSG_FILE_REJECT,
     PKT_MSG_FILE_CHUNK, PKT_MSG_FILE_ACK, PKT_MSG_FILE_COMPLETE, PKT_MSG_FILE_CANCEL,
     PKT_MSG_FILE_NACK,
-    PKT_MSG_AVATAR_OFFER, PKT_MSG_AVATAR_DATA, PKT_MSG_AVATAR_ACK,
+    PKT_MSG_AVATAR_OFFER, PKT_MSG_AVATAR_DATA, PKT_MSG_AVATAR_ACK, PKT_MSG_AVATAR_NACK,
     PKT_GRP_INVITE, PKT_GRP_MSG_CHAT,
     PKT_GRP_INVITE_ACK, PKT_GRP_INVITE_NACK,
     PKT_GRP_UPDATE, PKT_GRP_AVATAR_OFFER, PKT_GRP_AVATAR_DATA, PKT_GRP_AVATAR_ACK,
@@ -229,6 +229,8 @@ impl MsgDaemon {
                                         sent: false,
                                         sent_at: Instant::now(),
                                         retries: 0,
+                                        offer_sent: false,
+                                        needs_send: false,
                                     });
                                 }
                             }
@@ -708,12 +710,13 @@ impl MsgDaemon {
                                     if let Some(ref socket) = self.socket {
                                         protocol::send_avatar_ack(peer, socket, &sha256);
                                     }
+                                    log_fmt!("[daemon] avatar ACK (already have it) -> {}", from);
                                     continue;
                                 }
                             }
                             let chunk_size = super::daemon::AVATAR_CHUNK_SIZE;
                             let total_chunks = ((total_size as usize + chunk_size - 1) / chunk_size) as u16;
-                            log_fmt!("[daemon] AVATAR_OFFER from {} size={} chunks={}", from, total_size, total_chunks);
+                            log_fmt!("[daemon] AVATAR_OFFER from {} size={} chunks={} — sending NACK (need data)", from, total_size, total_chunks);
                             self.avatar_recvs.insert(from, super::daemon::AvatarRecvState {
                                 sha256,
                                 total_size,
@@ -722,6 +725,10 @@ impl MsgDaemon {
                                 started_at: Instant::now(),
                                 contact_id,
                             });
+                            // Send NACK to request avatar data
+                            if let Some(ref socket) = self.socket {
+                                protocol::send_avatar_nack(peer, socket, &sha256);
+                            }
                         }
                     }
                 }
@@ -781,7 +788,22 @@ impl MsgDaemon {
                             if let Some(state) = self.avatar_sends.get(&cid) {
                                 if state.sha256 == sha256 {
                                     self.avatar_sends.remove(&cid);
-                                    log_fmt!("[daemon] avatar ACK from {}, send cancelled", cid);
+                                    log_fmt!("[daemon] avatar ACK from {}, send complete", cid);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                PKT_MSG_AVATAR_NACK => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some(sha256) = protocol::handle_avatar_nack(data, peer) {
+                            peer.touch();
+                            let cid = peer.contact_id.clone();
+                            if let Some(state) = self.avatar_sends.get_mut(&cid) {
+                                if state.sha256 == sha256 {
+                                    state.needs_send = true;
+                                    log_fmt!("[daemon] avatar NACK from {} — will send chunks", cid);
                                 }
                             }
                         }

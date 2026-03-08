@@ -20,6 +20,10 @@ pub struct AvatarSendState {
     pub sent: bool,
     pub sent_at: Instant,
     pub retries: u8,
+    /// Whether the offer has been sent (waiting for ACK/NACK).
+    pub offer_sent: bool,
+    /// Set to true when NACK received — peer wants the data.
+    pub needs_send: bool,
 }
 
 /// State for an incoming avatar receive from one peer.

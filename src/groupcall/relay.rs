@@ -274,11 +274,18 @@ pub fn start_as_leader(
                                 .unwrap_or("unknown");
                             let mut conn = relay_connected.lock().unwrap();
                             conn.remove(&sender_index);
-                            log_fmt!("[groupcall] member left: {} (idx={}) — {} remaining",
+                            // Relay hangup to all other members
+                            for (idx, member) in conn.iter() {
+                                if *idx != sender_index {
+                                    let _ = relay_socket.send_to(&recv_buf[..n], member.peer_addr);
+                                }
+                            }
+                            log_fmt!("[groupcall] member left: {} (idx={}) — {} remaining (relayed hangup)",
                                 nickname, sender_index, conn.len());
                             drop(conn);
                             decoders.remove(&sender_index);
                             relay_audio.lock().unwrap().remove(&sender_index);
+                            relay_voice_levels.lock().unwrap().remove(&sender_index);
                         }
 
                         PKT_GRP_SCREEN | PKT_GRP_SCREEN_OFFER | PKT_GRP_SCREEN_STOP => {
@@ -409,6 +416,7 @@ pub fn start_as_leader(
     let sender_voice_levels = voice_levels.clone();
     let chat_out_rx_arc = Arc::new(Mutex::new(chat_out_rx));
     let chat_out_rx_sender = chat_out_rx_arc.clone();
+    let local_hangup_sender = local_hangup.clone();
 
     let _sender = thread::spawn(move || {
         let mut encoder = Encoder::new(
@@ -493,6 +501,25 @@ pub fn start_as_leader(
             for member in conn.values() {
                 let _ = send_socket.send_to(&pkt, member.peer_addr);
             }
+        }
+
+        // Send explicit GRP_HANGUP to all members on exit
+        if local_hangup_sender.load(Ordering::Relaxed) {
+            let conn = sender_connected.lock().unwrap();
+            let addrs: Vec<SocketAddr> = conn.values().map(|m| m.peer_addr).collect();
+            drop(conn);
+            for _ in 0..3 {
+                let counter = sender_counter.fetch_add(1, Ordering::Relaxed);
+                let pkt = crypto::grp_encrypt(
+                    &sender_cipher, my_sender_index, counter,
+                    PKT_GRP_HANGUP, &[],
+                );
+                for addr in &addrs {
+                    let _ = send_socket.send_to(&pkt, addr);
+                }
+                thread::sleep(std::time::Duration::from_millis(30));
+            }
+            log_fmt!("[groupcall] leader sent GRP_HANGUP to {} members", addrs.len());
         }
     });
 
@@ -788,6 +815,7 @@ pub fn start_as_member(
                             log_fmt!("[groupcall] member disconnected (via relay): {} (idx={})",
                                 nickname, sender_index);
                             recv_audio.lock().unwrap().remove(&sender_index);
+                            recv_voice_levels.lock().unwrap().remove(&sender_index);
                             decoders.remove(&sender_index);
                         }
 
@@ -943,6 +971,7 @@ pub fn start_as_member(
     let sender_cipher2 = crypto::grp_cipher_from_key(&group_key);
     let sender_leader_addr = leader_addr_shared.clone();
     let sender_voice_levels = voice_levels.clone();
+    let local_hangup_member = local_hangup.clone();
 
     let _sender = thread::spawn(move || {
         let mut encoder = Encoder::new(
@@ -1024,6 +1053,21 @@ pub fn start_as_member(
                 log_fmt!("[groupcall] member voice sent {} frames to leader {}", counter, current_leader);
             }
             let _ = send_socket2.send_to(&pkt, &current_leader);
+        }
+
+        // Send explicit GRP_HANGUP to leader on exit
+        if local_hangup_member.load(Ordering::Relaxed) {
+            let current_leader = sender_leader_addr.lock().unwrap().clone();
+            for _ in 0..3 {
+                let counter = sender_counter2.fetch_add(1, Ordering::Relaxed);
+                let pkt = crypto::grp_encrypt(
+                    &sender_cipher2, my_sender_index, counter,
+                    PKT_GRP_HANGUP, &[],
+                );
+                let _ = send_socket2.send_to(&pkt, &current_leader);
+                thread::sleep(std::time::Duration::from_millis(30));
+            }
+            log_fmt!("[groupcall] member sent GRP_HANGUP to leader {}", current_leader);
         }
     });
 

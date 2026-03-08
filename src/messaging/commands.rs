@@ -544,6 +544,8 @@ impl MsgDaemon {
                                 sent: false,
                                 sent_at: Instant::now(),
                                 retries: 0,
+                                offer_sent: false,
+                                needs_send: false,
                             });
                         }
                     }
@@ -556,6 +558,8 @@ impl MsgDaemon {
                         sent: false,
                         sent_at: Instant::now(),
                         retries: 0,
+                        offer_sent: false,
+                        needs_send: false,
                     });
                 }
 

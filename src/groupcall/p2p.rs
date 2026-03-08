@@ -369,6 +369,7 @@ pub fn start(
     let sender_cipher = crypto::grp_cipher_from_key(&group_key);
     let sender_voice_levels = voice_levels.clone();
 
+    let local_hangup_sender = local_hangup.clone();
     let _sender = thread::spawn(move || {
         let mut encoder = Encoder::new(
             SampleRate::Hz48000, Channels::Mono, Application::Voip,
@@ -442,6 +443,24 @@ pub fn start(
             for peer in peer_map.values() {
                 let _ = send_socket.send_to(&pkt, peer.peer_addr);
             }
+        }
+
+        // Send explicit GRP_HANGUP to all peers on exit
+        if local_hangup_sender.load(Ordering::Relaxed) {
+            let peers_snapshot: Vec<SocketAddr> = sender_peers.lock().unwrap()
+                .values().map(|p| p.peer_addr).collect();
+            for _ in 0..3 {
+                let counter = sender_counter.fetch_add(1, Ordering::Relaxed);
+                let pkt = crypto::grp_encrypt(
+                    &sender_cipher, my_sender_index, counter,
+                    PKT_GRP_HANGUP, &[],
+                );
+                for addr in &peers_snapshot {
+                    let _ = send_socket.send_to(&pkt, addr);
+                }
+                thread::sleep(std::time::Duration::from_millis(30));
+            }
+            log_fmt!("[p2p] sent GRP_HANGUP to {} peers", peers_snapshot.len());
         }
     });
 

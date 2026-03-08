@@ -237,33 +237,52 @@ impl MsgDaemon {
             }
         }
 
-        // ── Avatar send ticking ──
+        // ── Avatar send ticking (offer-wait protocol) ──
         if let Some(ref socket) = self.socket {
             let mut avatar_done: Vec<String> = Vec::new();
             for (contact_id, state) in &mut self.avatar_sends {
                 if state.sent {
-                    // Check if we should retry
+                    // Already sent chunks + got ACK or waiting for ACK
                     if state.sent_at.elapsed() >= AVATAR_SEND_RETRY_INTERVAL {
                         if state.retries >= AVATAR_MAX_RETRIES {
                             avatar_done.push(contact_id.clone());
                             continue;
                         }
-                        // Retry: resend everything
+                        // Retry: resend offer (not chunks)
+                        state.offer_sent = false;
+                        state.needs_send = false;
                         state.sent = false;
                         state.retries += 1;
                     }
                     continue;
                 }
-                // Send offer + all chunks
                 if let Some(addr) = self.contact_addrs.get(contact_id) {
                     if let Some(peer) = self.peers.get(addr) {
                         if peer.is_connected() {
-                            protocol::send_avatar_offer(
-                                peer, socket, &state.sha256, state.avatar_data.len() as u32,
-                            );
-                            protocol::send_avatar_chunks(peer, socket, &state.avatar_data);
-                            state.sent = true;
-                            state.sent_at = Instant::now();
+                            if !state.offer_sent {
+                                // Step 1: send only the offer, wait for NACK
+                                protocol::send_avatar_offer(
+                                    peer, socket, &state.sha256, state.avatar_data.len() as u32,
+                                );
+                                state.offer_sent = true;
+                                state.sent_at = Instant::now();
+                                log_fmt!("[daemon] avatar offer sent to {} ({}B, waiting for NACK)", contact_id, state.avatar_data.len());
+                            } else if state.needs_send {
+                                // Step 2: NACK received — peer wants the data, send chunks now
+                                protocol::send_avatar_chunks(peer, socket, &state.avatar_data);
+                                state.sent = true;
+                                state.sent_at = Instant::now();
+                                log_fmt!("[daemon] avatar chunks sent to {} ({} bytes)", contact_id, state.avatar_data.len());
+                            } else if state.sent_at.elapsed() >= AVATAR_SEND_RETRY_INTERVAL {
+                                // No ACK/NACK response — retry offer
+                                if state.retries >= AVATAR_MAX_RETRIES {
+                                    avatar_done.push(contact_id.clone());
+                                    continue;
+                                }
+                                state.offer_sent = false;
+                                state.retries += 1;
+                                log_fmt!("[daemon] avatar offer retry {} for {}", state.retries, contact_id);
+                            }
                         }
                     }
                 }

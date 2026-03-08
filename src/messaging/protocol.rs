@@ -6,7 +6,7 @@ use crate::crypto::{
     PKT_MSG_REQUEST, PKT_MSG_REQUEST_ACK,
     PKT_MSG_IP_ANNOUNCE, PKT_MSG_PEER_QUERY, PKT_MSG_PEER_RESPONSE,
     PKT_MSG_PRESENCE,
-    PKT_MSG_AVATAR_OFFER, PKT_MSG_AVATAR_DATA, PKT_MSG_AVATAR_ACK,
+    PKT_MSG_AVATAR_OFFER, PKT_MSG_AVATAR_DATA, PKT_MSG_AVATAR_ACK, PKT_MSG_AVATAR_NACK,
     PKT_GRP_INVITE, PKT_GRP_MSG_CHAT,
     PKT_GRP_INVITE_ACK, PKT_GRP_INVITE_NACK,
     PKT_GRP_UPDATE, PKT_GRP_AVATAR_OFFER, PKT_GRP_AVATAR_DATA, PKT_GRP_AVATAR_ACK,
@@ -545,6 +545,28 @@ pub fn send_avatar_ack(
 pub fn handle_avatar_ack(data: &[u8], peer: &mut PeerSession) -> Option<[u8; 32]> {
     let (pkt_type, plain) = peer.decrypt_packet(data)?;
     if pkt_type != PKT_MSG_AVATAR_ACK || plain.len() < 32 {
+        return None;
+    }
+    let mut sha256 = [0u8; 32];
+    sha256.copy_from_slice(&plain[..32]);
+    Some(sha256)
+}
+
+/// Send an AVATAR_NACK to request avatar data. Payload: [32B sha256].
+pub fn send_avatar_nack(
+    peer: &PeerSession,
+    socket: &UdpSocket,
+    sha256: &[u8; 32],
+) {
+    if let Some(pkt) = peer.encrypt_packet(PKT_MSG_AVATAR_NACK, sha256) {
+        socket.send_to(&pkt, peer.peer_addr).ok();
+    }
+}
+
+/// Handle an incoming AVATAR_NACK. Returns the sha256 from the NACK.
+pub fn handle_avatar_nack(data: &[u8], peer: &mut PeerSession) -> Option<[u8; 32]> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
+    if pkt_type != PKT_MSG_AVATAR_NACK || plain.len() < 32 {
         return None;
     }
     let mut sha256 = [0u8; 32];

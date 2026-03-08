@@ -872,10 +872,11 @@ impl HostelApp {
             })
         });
 
-        self.group_call_running.store(false, Ordering::Relaxed);
+        // Set local_hangup BEFORE running=false so sender threads see it before exiting
         if let Some(ref h) = self.group_call_hangup {
             h.store(true, Ordering::Relaxed);
         }
+        self.group_call_running.store(false, Ordering::Relaxed);
         // Save chat history before clearing
         if let Some(ref h) = self.group_chat_history {
             h.save();

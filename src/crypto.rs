@@ -42,6 +42,7 @@ pub const PKT_MSG_CONFIRM: u8       = 0x23; // identity-bound key upgrade confir
 pub const PKT_MSG_AVATAR_OFFER: u8  = 0x24; // avatar offer: encrypted [32B sha256][4B total_size LE]
 pub const PKT_MSG_AVATAR_DATA: u8   = 0x25; // avatar chunk: encrypted [2B chunk_index LE][up to 1200B data]
 pub const PKT_MSG_AVATAR_ACK: u8    = 0x26; // avatar received: encrypted [32B sha256]
+pub const PKT_MSG_AVATAR_NACK: u8   = 0x27; // avatar needed: encrypted [32B sha256]
 
 // Group call packet types (shared-key encryption with sender_index nonces)
 pub const PKT_GRP_HELLO: u8        = 0x30; // join request: [0x30][32B ephemeral pubkey][16B group_id]
