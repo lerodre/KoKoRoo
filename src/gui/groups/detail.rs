@@ -473,12 +473,18 @@ impl HostelApp {
                         if member.pubkey == my_pubkey {
                             continue;
                         }
-                        if member.address.is_empty() || member.port.is_empty() {
+                        let contact_id = identity::derive_contact_id(&my_pubkey, &member.pubkey);
+                        // Use live contact address (updated by messaging daemon) instead of
+                        // potentially stale group member address
+                        let (addr_ip, addr_port) = self.contacts.iter()
+                            .find(|c| c.contact_id == contact_id)
+                            .map(|c| (c.last_address.clone(), c.last_port.clone()))
+                            .unwrap_or_else(|| (member.address.clone(), member.port.clone()));
+                        if addr_ip.is_empty() || addr_port.is_empty() {
                             continue;
                         }
-                        let addr_str = format!("[{}]:{}", member.address, member.port);
+                        let addr_str = format!("[{}]:{}", addr_ip, addr_port);
                         if let Ok(addr) = addr_str.parse() {
-                            let contact_id = identity::derive_contact_id(&my_pubkey, &member.pubkey);
                             tx.send(crate::messaging::MsgCommand::SendGroupChat {
                                 contact_id,
                                 peer_addr: addr,
