@@ -115,6 +115,10 @@ impl HostelApp {
                     self.group_channel_creating = false;
                     self.group_channel_create_name.clear();
                     self.group_view = GroupView::Detail;
+                    // Clear unread badge for this group
+                    if let Some(grp) = self.groups.get(idx) {
+                        self.group_unread.remove(&grp.group_id);
+                    }
                 }
                 if go_create {
                     self.group_view = GroupView::Create;

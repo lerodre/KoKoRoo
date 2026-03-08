@@ -39,7 +39,7 @@ impl HostelApp {
                 (SidebarTab::Profile, "Profile".to_string(), 0),
                 (SidebarTab::Friends, "Friends".to_string(), friends_badge),
                 (SidebarTab::Messages, "Messages".to_string(), total_unread),
-                (SidebarTab::Groups, "Groups".to_string(), 0),
+                (SidebarTab::Groups, "Groups".to_string(), self.group_unread.values().sum()),
                 (SidebarTab::Call, "Call".to_string(), 0),
                 (SidebarTab::Settings, "Settings".to_string(), 0),
                 (SidebarTab::Appearance, "Colors".to_string(), 0),

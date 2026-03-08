@@ -193,6 +193,7 @@ pub struct Settings {
     #[serde(default)] pub banned_ips: Vec<String>,
     #[serde(default)] pub theme: Theme,
     #[serde(default)] pub firewall_port: String,
+    #[serde(default)] pub muted_groups: Vec<String>,
 }
 
 impl Settings {

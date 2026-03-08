@@ -125,11 +125,46 @@ impl HostelApp {
                         }
                     }
 
+                    // Unread badge (red circle at top-right of avatar)
+                    let grp_id_ref = &grp.group_id;
+                    if let Some(&count) = self.group_unread.get(grp_id_ref) {
+                        if count > 0 {
+                            let badge_color = self.settings.theme.btn_negative();
+                            let badge_text = format!("{}", count);
+                            let font = egui::FontId::proportional(9.0);
+                            let text_galley = ui.painter().layout_no_wrap(badge_text, font, egui::Color32::WHITE);
+                            let text_w = text_galley.size().x;
+                            let text_h = text_galley.size().y;
+                            let radius = (text_w / 2.0 + 3.0).max(7.0);
+                            let badge_center = egui::pos2(av_rect.right() + 2.0, av_rect.top() - 2.0);
+                            ui.painter().circle_filled(badge_center, radius, badge_color);
+                            ui.painter().galley(
+                                egui::pos2(badge_center.x - text_w / 2.0, badge_center.y - text_h / 2.0),
+                                text_galley,
+                                egui::Color32::WHITE,
+                            );
+                        }
+                    }
+
                     // Tooltip with group name
                     row_resp.clone().on_hover_text(&grp.name);
 
-                    // Right-click: Leave Group
+                    // Right-click: Leave Group + Mute/Unmute
+                    let is_muted = self.settings.muted_groups.contains(&grp.group_id);
+                    let grp_id_ctx = grp.group_id.clone();
                     row_resp.context_menu(|ui| {
+                        let mute_label = if is_muted { "Unmute" } else { "Mute" };
+                        if ui.button(mute_label).clicked() {
+                            if is_muted {
+                                self.settings.muted_groups.retain(|g| g != &grp_id_ctx);
+                            } else {
+                                self.settings.muted_groups.push(grp_id_ctx.clone());
+                                // Clear existing unread when muting
+                                self.group_unread.remove(&grp_id_ctx);
+                            }
+                            self.settings.save();
+                            ui.close_menu();
+                        }
                         if ui.button("Leave Group").clicked() {
                             leave_group_idx = Some(idx);
                             ui.close_menu();
