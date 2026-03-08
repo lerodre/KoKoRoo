@@ -314,9 +314,12 @@ impl HostelApp {
                 GroupSettingsAction::Kick(member_idx) => {
                     if member_idx < self.groups[idx].members.len() {
                         let kicked_nick = self.groups[idx].members[member_idx].nickname.clone();
-                        log_fmt!("[gui] member removed from group {}: {}", self.groups[idx].group_id, kicked_nick);
                         let kicked_pubkey = self.groups[idx].members[member_idx].pubkey;
+                        log_fmt!("[gui] kicking '{}' from group '{}' — rotating group key",
+                            kicked_nick, self.groups[idx].name);
                         group::remove_member(&mut self.groups[idx], &kicked_pubkey);
+                        log_fmt!("[gui] group key rotated to v{}, broadcasting update to {} members",
+                            self.groups[idx].key_version, self.groups[idx].members.len());
                         self.broadcast_group_update(idx);
                     }
                 }

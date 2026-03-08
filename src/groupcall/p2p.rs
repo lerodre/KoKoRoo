@@ -58,6 +58,7 @@ pub fn start(
     socket.set_read_timeout(Some(std::time::Duration::from_millis(50))).ok();
 
     let group_key = group.group_key;
+    let previous_key = group.previous_key;
     let send_counter = Arc::new(AtomicU32::new(0));
 
     // Chat channels (GUI <-> engine)
@@ -123,6 +124,7 @@ pub fn start(
     let recv_running = running.clone();
     let recv_audio = audio_frames.clone();
     let recv_cipher = crypto::grp_cipher_from_key(&group_key);
+    let recv_prev_cipher = previous_key.map(|k| crypto::grp_cipher_from_key(&k));
     let recv_group = group.clone();
     let recv_peers = peers.clone();
     let recv_screen_viewer = screen_viewer.clone();
@@ -200,7 +202,16 @@ pub fn start(
 
                     match pkt_type {
                         PKT_GRP_VOICE => {
-                            if let Some((_, si, opus_data)) = crypto::grp_decrypt(&recv_cipher, &recv_buf[..n]) {
+                            // Try current key, then fallback to previous key
+                            let decrypted = crypto::grp_decrypt(&recv_cipher, &recv_buf[..n])
+                                .or_else(|| recv_prev_cipher.as_ref().and_then(|c| {
+                                    let r = crypto::grp_decrypt(c, &recv_buf[..n]);
+                                    if r.is_some() {
+                                        log_fmt!("[p2p] decrypted voice with previous key (peer needs rotation)");
+                                    }
+                                    r
+                                }));
+                            if let Some((_, si, opus_data)) = decrypted {
                                 let decoder = decoders.entry(si).or_insert_with(|| {
                                     log_fmt!("[p2p] created decoder for peer idx={}", si);
                                     Decoder::new(SampleRate::Hz48000, Channels::Mono)

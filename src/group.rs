@@ -156,6 +156,8 @@ impl GroupInviteLite {
             text_channels: Vec::new(),
             voice_channels: Vec::new(),
             call_mode: self.call_mode,
+            key_version: 0,
+            previous_key: None,
         })
     }
 }
@@ -207,6 +209,12 @@ pub struct Group {
     pub voice_channels: Vec<VoiceChannel>,
     #[serde(default)]
     pub call_mode: CallMode,
+    /// Incremented on each key rotation (member kicked).
+    #[serde(default)]
+    pub key_version: u32,
+    /// Previous group key for decrypting messages from peers that haven't received the rotation yet.
+    #[serde(default)]
+    pub previous_key: Option<[u8; 32]>,
 }
 
 /// Generate a random 16-byte group ID (hex-encoded = 32 chars).
@@ -285,12 +293,23 @@ pub fn delete_group(group_id: &str) {
     crate::avatar::delete_group_avatar(group_id);
 }
 
-/// Remove a member from a group by pubkey. Saves the group if a member was removed.
+/// Remove a member from a group by pubkey.
+/// Rotates the group key so the removed member can no longer decrypt future traffic.
 /// Returns true if a member was actually removed.
 pub fn remove_member(group: &mut Group, pubkey: &[u8; 32]) -> bool {
     let before = group.members.len();
+    let kicked_nick = group.members.iter()
+        .find(|m| &m.pubkey == pubkey)
+        .map(|m| m.nickname.clone())
+        .unwrap_or_default();
     group.members.retain(|m| &m.pubkey != pubkey);
     if group.members.len() != before {
+        // Rotate the group key
+        group.previous_key = Some(group.group_key);
+        group.group_key = generate_group_key();
+        group.key_version += 1;
+        log_fmt!("[group] key rotated to v{} after removing '{}' from '{}'",
+            group.key_version, kicked_nick, group.name);
         save_group(group);
         true
     } else {

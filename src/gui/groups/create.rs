@@ -118,6 +118,8 @@ impl HostelApp {
             text_channels: Vec::new(),
             voice_channels: Vec::new(),
             call_mode: group::CallMode::default(),
+            key_version: 0,
+            previous_key: None,
         };
         group::ensure_general_channel(&mut grp);
         group::ensure_fallback_channel(&mut grp);

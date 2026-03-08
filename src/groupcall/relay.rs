@@ -54,6 +54,7 @@ pub fn start_as_leader(
     socket.set_read_timeout(Some(std::time::Duration::from_millis(50))).ok();
 
     let group_key = group.group_key;
+    let previous_key = group.previous_key;
     let _cipher = crypto::grp_cipher_from_key(&group_key);
     let send_counter = Arc::new(AtomicU32::new(0));
 
@@ -99,6 +100,7 @@ pub fn start_as_leader(
     let relay_chat_in = chat_in_tx.clone();
     let relay_group = group.clone();
     let relay_cipher = crypto::grp_cipher_from_key(&group_key);
+    let relay_prev_cipher = previous_key.map(|k| crypto::grp_cipher_from_key(&k));
     let relay_counter = send_counter.clone();
     let relay_screen_viewer = screen_viewer.clone();
     let relay_screen_sharer = screen_sharer.clone();
@@ -186,8 +188,16 @@ pub fn start_as_leader(
 
                     match pkt_type {
                         PKT_GRP_VOICE => {
-                            // Decode for leader's own playback
-                            if let Some((_, _, opus_data)) = crypto::grp_decrypt(&relay_cipher, &recv_buf[..n]) {
+                            // Decode for leader's own playback (try current key, then previous)
+                            let decrypted = crypto::grp_decrypt(&relay_cipher, &recv_buf[..n])
+                                .or_else(|| relay_prev_cipher.as_ref().and_then(|c| {
+                                    let r = crypto::grp_decrypt(c, &recv_buf[..n]);
+                                    if r.is_some() {
+                                        log_fmt!("[relay] decrypted voice with previous key (peer needs rotation)");
+                                    }
+                                    r
+                                }));
+                            if let Some((_, _, opus_data)) = decrypted {
                                 let decoder = decoders.entry(sender_index).or_insert_with(|| {
                                     Decoder::new(SampleRate::Hz48000, Channels::Mono)
                                         .expect("opus decoder")
@@ -600,6 +610,7 @@ pub fn start_as_member(
     socket.set_read_timeout(Some(std::time::Duration::from_millis(100))).ok();
 
     let group_key = group.group_key;
+    let previous_key = group.previous_key;
     let send_counter = Arc::new(AtomicU32::new(0));
 
     // Shared leader address (updated by failover)
@@ -652,6 +663,7 @@ pub fn start_as_member(
     let recv_running = running.clone();
     let recv_audio = audio_frames.clone();
     let recv_cipher = crypto::grp_cipher_from_key(&group_key);
+    let recv_prev_cipher = previous_key.map(|k| crypto::grp_cipher_from_key(&k));
     let recv_group = group.clone();
     let recv_leader_addr = leader_addr_shared.clone();
     let recv_screen_viewer = screen_viewer.clone();
@@ -684,7 +696,16 @@ pub fn start_as_member(
 
                     match pkt_type {
                         PKT_GRP_VOICE => {
-                            if let Some((_, si, opus_data)) = crypto::grp_decrypt(&recv_cipher, &recv_buf[..n]) {
+                            // Try current key, then fallback to previous key
+                            let decrypted = crypto::grp_decrypt(&recv_cipher, &recv_buf[..n])
+                                .or_else(|| recv_prev_cipher.as_ref().and_then(|c| {
+                                    let r = crypto::grp_decrypt(c, &recv_buf[..n]);
+                                    if r.is_some() {
+                                        log_fmt!("[relay-member] decrypted voice with previous key (peer needs rotation)");
+                                    }
+                                    r
+                                }));
+                            if let Some((_, si, opus_data)) = decrypted {
                                 let decoder = decoders.entry(si).or_insert_with(|| {
                                     Decoder::new(SampleRate::Hz48000, Channels::Mono)
                                         .expect("opus decoder")

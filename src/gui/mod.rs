@@ -1316,6 +1316,15 @@ impl eframe::App for HostelApp {
                                     grp.members = received_group.members.clone();
                                     grp.avatar_sha256 = received_group.avatar_sha256;
 
+                                    // Accept key rotation if version is newer
+                                    if received_group.key_version > grp.key_version {
+                                        log_fmt!("[gui] group key rotated: '{}' v{} -> v{}",
+                                            grp.name, grp.key_version, received_group.key_version);
+                                        grp.previous_key = Some(grp.group_key);
+                                        grp.group_key = received_group.group_key;
+                                        grp.key_version = received_group.key_version;
+                                    }
+
                                     // Merge text channels ("fallbackfix" protocol)
                                     let local_channels = std::mem::take(&mut grp.text_channels);
                                     let mut merged: std::collections::HashMap<String, group::TextChannel> = std::collections::HashMap::new();
