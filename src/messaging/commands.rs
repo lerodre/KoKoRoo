@@ -127,10 +127,27 @@ impl MsgDaemon {
                         if let Some(peer) = self.peers.get(addr) {
                             if peer.is_connected() {
                                 if let Some(ref socket) = self.socket {
-                                    protocol::send_group_chat(peer, socket, &group_id, &channel_id, &text).ok();
+                                    match protocol::send_group_chat(peer, socket, &group_id, &channel_id, &text) {
+                                        Ok(_) => log_fmt!("[daemon] group-chat sent to {} (grp={} ch={})",
+                                            &contact_id[..8.min(contact_id.len())], &group_id[..8.min(group_id.len())], channel_id),
+                                        Err(e) => log_fmt!("[daemon] group-chat send FAILED to {}: {}",
+                                            &contact_id[..8.min(contact_id.len())], e),
+                                    }
+                                } else {
+                                    log_fmt!("[daemon] group-chat DROP {} — no socket (yielded for call?)",
+                                        &contact_id[..8.min(contact_id.len())]);
                                 }
+                            } else {
+                                log_fmt!("[daemon] group-chat DROP {} — peer not connected",
+                                    &contact_id[..8.min(contact_id.len())]);
                             }
+                        } else {
+                            log_fmt!("[daemon] group-chat DROP {} — no peer at addr {}",
+                                &contact_id[..8.min(contact_id.len())], addr);
                         }
+                    } else {
+                        log_fmt!("[daemon] group-chat DROP {} — no addr mapping",
+                            &contact_id[..8.min(contact_id.len())]);
                     }
                 }
 

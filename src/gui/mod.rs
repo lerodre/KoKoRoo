@@ -67,6 +67,7 @@ pub(crate) enum LogFilter {
     All,
     Daemon,
     Groups,
+    Chat,
     Voice,
     Gui,
     Network,
@@ -1438,6 +1439,8 @@ impl eframe::App for HostelApp {
                         self.group_avatar_textures.remove(&group_id);
                     }
                     MsgEvent::IncomingGroupChat { group_id, channel_id, sender_fingerprint, sender_nickname, text } => {
+                        log_fmt!("[group-chat] recv from '{}' in grp={} ch={}: '{}' ({} bytes)",
+                            sender_nickname, &group_id[..8.min(group_id.len())], channel_id, text, text.len());
                         // If channel is deleted in our local group, redirect to fallback
                         let effective_channel = if let Some(grp) = self.groups.iter().find(|g| g.group_id == group_id) {
                             if grp.text_channels.iter().any(|ch| ch.channel_id == channel_id && !ch.deleted) {

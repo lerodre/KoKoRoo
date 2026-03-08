@@ -464,11 +464,26 @@ impl HostelApp {
             if !text.is_empty() {
                 let my_nickname = self.settings.nickname.clone();
                 let my_fingerprint = self.identity.fingerprint.clone();
+                log_fmt!("[group-chat] sending text in group '{}' channel '{}': '{}' ({} bytes)",
+                    grp_name, selected_channel_id, text, text.len());
                 {
                     let mut history = GroupChatHistory::load(&grp_id, &selected_channel_id, &self.identity.secret);
                     history.add_message(my_fingerprint, my_nickname.clone(), text.clone());
                 }
-                if let Some(tx) = &self.msg_cmd_tx {
+                // During a group call the daemon socket is yielded, so route through
+                // the call's chat channel instead (group-encrypted, reaches all peers).
+                let in_call_for_this_group = self.group_call_group.as_ref()
+                    .map_or(false, |g| g.group_id == grp_id);
+                if in_call_for_this_group {
+                    if let Some(tx) = &self.group_call_chat_tx {
+                        log_fmt!("[group-chat] routed via call socket (daemon socket yielded)");
+                        tx.send(text.clone()).ok();
+                    } else {
+                        log_fmt!("[group-chat] FAILED — in call but no group_call_chat_tx");
+                    }
+                } else if let Some(tx) = &self.msg_cmd_tx {
+                    let mut sent_count = 0u32;
+                    let mut skip_count = 0u32;
                     for member in &members {
                         if member.pubkey == my_pubkey {
                             continue;
@@ -481,6 +496,9 @@ impl HostelApp {
                             .map(|c| (c.last_address.clone(), c.last_port.clone()))
                             .unwrap_or_else(|| (member.address.clone(), member.port.clone()));
                         if addr_ip.is_empty() || addr_port.is_empty() {
+                            log_fmt!("[group-chat] SKIP '{}' — no address (ip='{}' port='{}')",
+                                member.nickname, addr_ip, addr_port);
+                            skip_count += 1;
                             continue;
                         }
                         let addr_str = format!("[{}]:{}", addr_ip, addr_port);
@@ -493,8 +511,15 @@ impl HostelApp {
                                 channel_id: selected_channel_id.clone(),
                                 text: text.clone(),
                             }).ok();
+                            sent_count += 1;
+                        } else {
+                            log_fmt!("[group-chat] SKIP '{}' — bad address: {}", member.nickname, addr_str);
+                            skip_count += 1;
                         }
                     }
+                    log_fmt!("[group-chat] dispatched to {} members ({} skipped)", sent_count, skip_count);
+                } else {
+                    log_fmt!("[group-chat] FAILED — msg_cmd_tx is None (daemon not running?)");
                 }
             }
             self.group_detail_chat_input.clear();

@@ -22,6 +22,11 @@ fn matches_log_filter(line: &str, filter: LogFilter) -> bool {
                 || line.contains("] [screen]")
                 || line.contains("] [wayland]")
         }
+        LogFilter::Chat => {
+            line.contains("] [group-chat]")
+                || line.contains("] [chat]")
+                || (line.contains("] [daemon]") && line.contains("group-chat"))
+        }
         LogFilter::Gui => line.contains("] [gui]"),
         LogFilter::Network => line.contains("] [firewall]") || line.contains("] [settings]"),
     }
@@ -55,6 +60,7 @@ impl HostelApp {
                 (LogFilter::All, "All"),
                 (LogFilter::Daemon, "Daemon"),
                 (LogFilter::Groups, "Groups"),
+                (LogFilter::Chat, "Chat"),
                 (LogFilter::Voice, "Voice"),
                 (LogFilter::Gui, "GUI"),
                 (LogFilter::Network, "Network"),
