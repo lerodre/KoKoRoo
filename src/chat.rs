@@ -89,7 +89,7 @@ impl ChatHistory {
             }
         }
 
-        let mut history = ChatHistory {
+        let history = ChatHistory {
             contact_id: contact_id.to_string(),
             messages,
             storage_cipher,
