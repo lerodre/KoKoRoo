@@ -1219,6 +1219,8 @@ impl eframe::App for HostelApp {
                         }
                     }
                     MsgEvent::FileTransferComplete { contact_id, transfer_id, saved_path } => {
+                        log_fmt!("[gui] FileTransferComplete: cid={} tid={} path='{}'",
+                            &contact_id[..8.min(contact_id.len())], transfer_id, saved_path);
                         self.file_transfer_progress.remove(&(contact_id.clone(), transfer_id));
                         let history = self.msg_chat_histories.entry(contact_id.clone())
                             .or_insert_with(|| ChatHistory::load(&contact_id, &self.identity.secret));

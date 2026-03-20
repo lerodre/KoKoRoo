@@ -584,10 +584,13 @@ impl MsgDaemon {
                             peer.touch();
                             let contact_id = peer.contact_id.clone();
                             let key = (contact_id.clone(), transfer_id);
+                            let had_transfer = self.file_transfers.contains_key(&key);
                             if let Some(FileTransfer::Sending(ref mut sender)) = self.file_transfers.get_mut(&key) {
                                 sender.on_ack();
                             }
                             self.file_transfers.remove(&key);
+                            log_fmt!("[daemon] file transfer complete (sender ACK): tid={} cid={} had_state={}",
+                                transfer_id, &contact_id[..8.min(contact_id.len())], had_transfer);
                             self.event_tx.send(MsgEvent::FileTransferComplete {
                                 contact_id,
                                 transfer_id,
