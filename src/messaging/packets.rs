@@ -40,7 +40,10 @@ impl MsgDaemon {
             let data = &buf[..len];
             let pkt_type = data[0];
 
-            log_fmt!("[daemon] recv pkt type=0x{:02x} len={} from={}", pkt_type, len, from);
+            // Skip verbose log for keepalives (ACK seq=0)
+            if pkt_type != PKT_MSG_ACK {
+                log_fmt!("[daemon] recv pkt type=0x{:02x} len={} from={}", pkt_type, len, from);
+            }
 
             match pkt_type {
                 PKT_MSG_HELLO => {
@@ -260,11 +263,17 @@ impl MsgDaemon {
                     if let Some(peer) = self.peers.get_mut(&from) {
                         if let Some(seq) = protocol::handle_ack(data, peer) {
                             peer.touch();
-                            let cid = peer.contact_id.clone();
-                            if let Some(outbox) = self.outboxes.get_mut(&cid) {
-                                outbox.remove_acked(seq);
+                            if seq == 0 {
+                                // Keepalive — just log briefly
+                                let nick = if peer.peer_nickname.is_empty() { "?" } else { &peer.peer_nickname };
+                                log_fmt!("[daemon] keepalive from {} ({})", nick, from);
+                            } else {
+                                let cid = peer.contact_id.clone();
+                                if let Some(outbox) = self.outboxes.get_mut(&cid) {
+                                    outbox.remove_acked(seq);
+                                }
+                                self.event_tx.send(MsgEvent::MessageDelivered).ok();
                             }
-                            self.event_tx.send(MsgEvent::MessageDelivered).ok();
                         }
                     }
                 }
