@@ -59,7 +59,7 @@ impl ChatHistory {
         fs::create_dir_all(&dir).ok();
 
         let path = dir.join(format!("{contact_id}.enc"));
-        let messages = if path.exists() {
+        let mut messages: Vec<ChatMessage> = if path.exists() {
             match fs::read(&path) {
                 Ok(encrypted) => {
                     match crypto::decrypt_local(&storage_cipher, &encrypted) {
@@ -78,11 +78,26 @@ impl ChatHistory {
             Vec::new()
         };
 
-        ChatHistory {
+        // Clean up stale file transfers (Offered/Accepted that never completed)
+        let mut cleaned = false;
+        for msg in &mut messages {
+            if let Some(ref mut ft) = msg.file_transfer {
+                if matches!(ft.status, FileTransferStatus::Offered | FileTransferStatus::Accepted) {
+                    ft.status = FileTransferStatus::Failed("Interrupted".to_string());
+                    cleaned = true;
+                }
+            }
+        }
+
+        let mut history = ChatHistory {
             contact_id: contact_id.to_string(),
             messages,
             storage_cipher,
+        };
+        if cleaned {
+            history.save();
         }
+        history
     }
 
     /// Add a message and save to disk.
