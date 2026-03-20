@@ -173,6 +173,8 @@ impl MsgDaemon {
         command_rx: mpsc::Receiver<MsgCommand>,
         event_tx: mpsc::Sender<MsgEvent>,
     ) -> Self {
+        let settings = Settings::load();
+        let initial_ip = crate::gui::get_best_ipv6(&settings.network_adapter);
         MsgDaemon {
             socket: None,
             local_port,
@@ -190,12 +192,12 @@ impl MsgDaemon {
             saved_peers: Vec::new(),
             pending_requests: HashMap::new(),
             outgoing_requests: HashMap::new(),
-            settings: Settings::load(),
+            settings,
             notified_calls: HashMap::new(),
             rejected_ips: HashMap::new(),
             ip_announces: HashMap::new(),
             last_ip_check: Instant::now().checked_sub(IP_CHECK_INTERVAL).unwrap_or_else(Instant::now), // trigger check on first housekeep
-            last_announced_ip: String::new(),
+            last_announced_ip: initial_ip,
             peer_query_cooldowns: HashMap::new(),
             query_counts: HashMap::new(),
             connect_queue: VecDeque::new(),
