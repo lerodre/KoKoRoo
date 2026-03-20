@@ -1,6 +1,33 @@
+# Rust build artifacts
 /target
+
+# Per-platform Cargo.toml (managed per-OS, see CLAUDE.md)
 Cargo.toml
 Cargo.lock
+
+# Logs
 hostelD_log.txt
+*.log
+
+# macOS
 .DS_Store
 hostelD.app/
+
+# Windows
+*.exe
+*.pdb
+*.dll
+Thumbs.db
+
+# Linux
+*.so
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Local hostelD data (identity, chats, settings)
+.hostelD/

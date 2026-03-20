@@ -136,3 +136,8 @@ Contact files are keyed by full public key hex (not fingerprint) to avoid collis
 ### Audio pipeline
 
 Opus codec: 48kHz mono, 960-sample frames (20ms), 64kbps bitrate, VOIP application mode.
+
+## Git conventions
+
+- **No credits/co-author lines** in commit messages. Never add `Co-Authored-By` or similar attribution tags.
+- Commit messages should be concise and describe what changed and why.
