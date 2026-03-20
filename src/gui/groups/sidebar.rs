@@ -161,6 +161,7 @@ impl HostelApp {
                                 self.settings.muted_groups.push(grp_id_ctx.clone());
                                 // Clear existing unread when muting
                                 self.group_unread.remove(&grp_id_ctx);
+                                self.group_channel_unread.retain(|(gid, _), _| gid != &grp_id_ctx);
                             }
                             self.settings.save();
                             ui.close_menu();
@@ -327,8 +328,31 @@ impl HostelApp {
                 egui::FontId::proportional(12.0),
                 text_color,
             );
+            // Per-channel unread badge
+            let ch_unread = self.group_channel_unread
+                .get(&(_group_id.clone(), ch.channel_id.clone()))
+                .copied()
+                .unwrap_or(0);
+            if ch_unread > 0 {
+                let badge_color = self.settings.theme.btn_negative();
+                let badge_text = format!("{}", ch_unread);
+                let badge_font = egui::FontId::proportional(9.0);
+                let badge_galley = ui.painter().layout_no_wrap(badge_text, badge_font, egui::Color32::WHITE);
+                let bw = badge_galley.size().x;
+                let bh = badge_galley.size().y;
+                let radius = (bw / 2.0 + 3.0).max(7.0);
+                let badge_center = egui::pos2(row_rect.max.x - radius - 4.0, row_rect.center().y);
+                ui.painter().circle_filled(badge_center, radius, badge_color);
+                ui.painter().galley(
+                    egui::pos2(badge_center.x - bw / 2.0, badge_center.y - bh / 2.0),
+                    badge_galley,
+                    egui::Color32::WHITE,
+                );
+            }
             if row_resp.clicked() {
                 self.group_selected_channel = ch.channel_id.clone();
+                // Clear per-channel unread
+                self.group_channel_unread.remove(&(_group_id.clone(), ch.channel_id.clone()));
             }
             // Right-click context menu for delete (admin only, not general/fallback)
             if is_admin && ch.channel_id != "general" && ch.channel_id != "fallback" {

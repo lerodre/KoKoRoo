@@ -187,6 +187,8 @@ pub struct HostelApp {
     pub(crate) msg_chat_histories: HashMap<String, ChatHistory>,
     pub(crate) msg_unread: HashMap<String, u32>,
     pub(crate) group_unread: HashMap<String, u32>,
+    /// Per-channel unread count: (group_id, channel_id) -> count
+    pub(crate) group_channel_unread: HashMap<(String, String), u32>,
     pub(crate) msg_peer_online: HashMap<String, bool>,
     pub(crate) msg_peer_presence: HashMap<String, crate::messaging::PresenceStatus>,
     pub(crate) msg_confirm_delete_chat: Option<String>,
@@ -455,6 +457,7 @@ impl HostelApp {
             msg_chat_histories: HashMap::new(),
             msg_unread: HashMap::new(),
             group_unread: HashMap::new(),
+            group_channel_unread: HashMap::new(),
             msg_peer_online: HashMap::new(),
             msg_peer_presence: HashMap::new(),
             msg_confirm_delete_chat: None,
@@ -1459,13 +1462,20 @@ impl eframe::App for HostelApp {
                         let mut history = GroupChatHistory::load(&group_id, &effective_channel, &self.identity.secret);
                         history.add_message(sender_fingerprint, sender_nickname.clone(), text.clone());
 
-                        // Track unread: increment if not currently viewing this group and not muted
-                        let currently_viewing = self.active_tab == SidebarTab::Groups
+                        // Track unread: increment if not currently viewing this group+channel and not muted
+                        let currently_viewing_group = self.active_tab == SidebarTab::Groups
                             && self.group_detail_idx.map_or(false, |idx| {
                                 idx < self.groups.len() && self.groups[idx].group_id == group_id
                             });
-                        if !currently_viewing && !self.settings.muted_groups.contains(&group_id) {
-                            *self.group_unread.entry(group_id.clone()).or_insert(0) += 1;
+                        let currently_viewing_channel = currently_viewing_group
+                            && self.group_selected_channel == effective_channel;
+                        if !currently_viewing_channel && !self.settings.muted_groups.contains(&group_id) {
+                            // Per-group badge (for icon strip)
+                            if !currently_viewing_group {
+                                *self.group_unread.entry(group_id.clone()).or_insert(0) += 1;
+                            }
+                            // Per-channel badge (for channels sidebar)
+                            *self.group_channel_unread.entry((group_id.clone(), effective_channel.clone())).or_insert(0) += 1;
                         }
                         // If in a group call for this group, push to live messages
                         if let Some(ref g) = self.group_call_group {

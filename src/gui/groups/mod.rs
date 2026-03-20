@@ -21,6 +21,14 @@ pub(crate) enum GroupView {
 
 impl HostelApp {
     pub(crate) fn draw_groups_tab(&mut self, ui: &mut egui::Ui) {
+        // Auto-clear unread for the currently viewed group+channel
+        if let Some(idx) = self.group_detail_idx {
+            if let Some(grp) = self.groups.get(idx) {
+                self.group_unread.remove(&grp.group_id);
+                self.group_channel_unread.remove(&(grp.group_id.clone(), self.group_selected_channel.clone()));
+            }
+        }
+
         match self.group_view {
             GroupView::List | GroupView::Detail | GroupView::Settings | GroupView::InCall | GroupView::Connecting => {
                 // Always 3-column: icon strip (48px) + channels (140px) + detail/placeholder
@@ -115,9 +123,11 @@ impl HostelApp {
                     self.group_channel_creating = false;
                     self.group_channel_create_name.clear();
                     self.group_view = GroupView::Detail;
-                    // Clear unread badge for this group
+                    // Clear unread badges for this group
                     if let Some(grp) = self.groups.get(idx) {
                         self.group_unread.remove(&grp.group_id);
+                        // Clear the "general" channel unread since we auto-select it
+                        self.group_channel_unread.remove(&(grp.group_id.clone(), "general".to_string()));
                     }
                 }
                 if go_create {
