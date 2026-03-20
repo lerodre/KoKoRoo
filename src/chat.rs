@@ -144,6 +144,14 @@ impl ChatHistory {
     pub fn update_file_status(&mut self, transfer_id: u32, status: FileTransferStatus, saved_path: Option<String>) {
         // Find index: exact transfer_id match first, then fallback to
         // outgoing Offered with transfer_id=0 (GUI placeholder before daemon assigns real ID).
+        let status_name = match &status {
+            FileTransferStatus::Offered => "Offered",
+            FileTransferStatus::Accepted => "Accepted",
+            FileTransferStatus::Completed => "Completed",
+            FileTransferStatus::Rejected => "Rejected",
+            FileTransferStatus::Cancelled => "Cancelled",
+            FileTransferStatus::Failed(_) => "Failed",
+        };
         let mut idx = None;
         for i in (0..self.messages.len()).rev() {
             if let Some(ref ft) = self.messages[i].file_transfer {
@@ -171,6 +179,8 @@ impl ChatHistory {
         }
         if let Some(i) = idx {
             if let Some(ref mut ft) = self.messages[i].file_transfer {
+                log_fmt!("[chat] update_file_status: tid={} old_status={:?} -> {} (msg idx={})",
+                    transfer_id, ft.transfer_id, status_name, i);
                 ft.transfer_id = transfer_id;
                 ft.status = status;
                 if saved_path.is_some() {
@@ -178,6 +188,21 @@ impl ChatHistory {
                 }
             }
             self.save();
+        } else {
+            // Debug: dump all file messages to find why we couldn't match
+            let file_msgs: Vec<String> = self.messages.iter().enumerate()
+                .filter_map(|(i, m)| m.file_transfer.as_ref().map(|ft| {
+                    format!("  [{}] tid={} from_me={} status={:?}", i, ft.transfer_id, m.from_me,
+                        match &ft.status {
+                            FileTransferStatus::Offered => "Offered",
+                            FileTransferStatus::Accepted => "Accepted",
+                            FileTransferStatus::Completed => "Completed",
+                            _ => "Other",
+                        })
+                }))
+                .collect();
+            log_fmt!("[chat] update_file_status FAILED: tid={} new_status={} — {} file msgs in history:\n{}",
+                transfer_id, status_name, file_msgs.len(), file_msgs.join("\n"));
         }
     }
 
