@@ -170,7 +170,13 @@ impl ChatHistory {
         let mut idx = None;
         for i in (0..self.messages.len()).rev() {
             if let Some(ref ft) = self.messages[i].file_transfer {
-                if ft.transfer_id == transfer_id {
+                // Only match active transfers (not terminal states)
+                if ft.transfer_id == transfer_id
+                    && !matches!(ft.status, FileTransferStatus::Completed
+                        | FileTransferStatus::Failed(_)
+                        | FileTransferStatus::Cancelled
+                        | FileTransferStatus::Rejected)
+                {
                     idx = Some(i);
                     break;
                 }
