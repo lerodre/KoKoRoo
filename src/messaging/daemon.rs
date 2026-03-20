@@ -63,6 +63,7 @@ pub(super) const QUERY_RATE_WINDOW: Duration = Duration::from_secs(60);       //
 pub(super) const QUERY_RATE_MAX: u32 = 6;                                     // max 6 queries per window per peer
 pub(super) const ANNOUNCE_MAX_AGE: Duration = Duration::from_secs(2 * 60 * 60); // 2 hours
 pub(super) const BEACON_INTERVAL: Duration = Duration::from_secs(10 * 60);     // 10 minutes — reconnect disconnected contacts
+pub(super) const FAILED_CONTACT_COOLDOWN: Duration = Duration::from_secs(60 * 60); // 1 hour — don't retry contacts that failed recently
 
 /// Retry backoff tiers: 10s, 30s, 1m, 5m, 15m cap
 pub(super) const RETRY_BACKOFFS: &[Duration] = &[
@@ -163,6 +164,8 @@ pub struct MsgDaemon {
     pub(super) group_avatar_sends: HashMap<(String, String), GroupAvatarSendState>,
     /// Members to sync when a group invite ACK is received: (contact_id, group_id) -> members.
     pub(super) pending_member_syncs: HashMap<(String, String), Vec<crate::group::GroupMember>>,
+    /// Contacts that failed to connect (max HELLO retries). Cooldown before retrying.
+    pub(super) failed_contacts: HashMap<String, Instant>,
 }
 
 impl MsgDaemon {
@@ -213,6 +216,7 @@ impl MsgDaemon {
             group_avatar_recvs: HashMap::new(),
             group_avatar_sends: HashMap::new(),
             pending_member_syncs: HashMap::new(),
+            failed_contacts: HashMap::new(),
         }
     }
 

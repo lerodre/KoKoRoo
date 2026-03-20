@@ -10,7 +10,7 @@ use super::daemon::{
     MsgDaemon, FileTransfer,
     KEEPALIVE_INTERVAL, PEER_TIMEOUT, HELLO_RETRY_INTERVAL, HELLO_MAX_RETRIES,
     IP_CHECK_INTERVAL, PEER_QUERY_COOLDOWN, QUERY_RATE_WINDOW,
-    BEACON_INTERVAL, RETRY_BACKOFFS,
+    BEACON_INTERVAL, RETRY_BACKOFFS, FAILED_CONTACT_COOLDOWN,
     AVATAR_RECV_TIMEOUT, AVATAR_SEND_RETRY_INTERVAL, AVATAR_MAX_RETRIES,
 };
 
@@ -95,15 +95,23 @@ impl MsgDaemon {
                     Some((c.contact_id.clone(), addr, c.pubkey))
                 })
                 .collect();
+            // Clean up expired cooldowns
+            self.failed_contacts.retain(|_, t| t.elapsed() < FAILED_CONTACT_COOLDOWN);
+
             let mut queued = 0;
+            let mut skipped = 0;
             for (cid, addr, pk) in &self.all_contacts {
                 if !self.contact_addrs.contains_key(cid) {
+                    if self.failed_contacts.contains_key(cid) {
+                        skipped += 1;
+                        continue;
+                    }
                     self.connect_queue.push_back((cid.clone(), *addr, *pk));
                     queued += 1;
                 }
             }
-            if queued > 0 {
-                log_fmt!("[daemon] beacon: re-queued {} disconnected contacts (refreshed from disk)", queued);
+            if queued > 0 || skipped > 0 {
+                log_fmt!("[daemon] beacon: re-queued {} disconnected contacts, {} skipped (cooldown)", queued, skipped);
             }
         }
 
@@ -381,7 +389,8 @@ impl MsgDaemon {
                     if sent_at.elapsed() > HELLO_RETRY_INTERVAL {
                         let retries = self.hello_retries.get(addr).copied().unwrap_or(0);
                         if retries >= HELLO_MAX_RETRIES {
-                            log_fmt!("[daemon] HELLO max retries reached for {} (cid={}) — giving up", addr, peer.contact_id);
+                            log_fmt!("[daemon] HELLO max retries reached for {} (cid={}) — giving up (1h cooldown)", addr, peer.contact_id);
+                            self.failed_contacts.insert(peer.contact_id.clone(), Instant::now());
                             to_remove.push(*addr);
                         } else {
                             let hello = crate::crypto::build_msg_hello(our_pubkey);

@@ -398,6 +398,8 @@ impl MsgDaemon {
                                     identity::save_contact(&contact);
                                 }
                                 if !contact_id.is_empty() {
+                                    // Clear failed cooldown — new IP means worth retrying
+                                    self.failed_contacts.remove(&contact_id);
                                     self.event_tx.send(MsgEvent::PeerAddressUpdate {
                                         contact_id,
                                         ip,
@@ -460,6 +462,8 @@ impl MsgDaemon {
                                 identity::save_contact(&contact);
                                 // Also cache the announce
                                 self.ip_announces.insert(target_pubkey, (ip.clone(), port.clone(), timestamp));
+                                // Clear failed cooldown — new IP means worth retrying
+                                self.failed_contacts.remove(&contact.contact_id);
                                 self.event_tx.send(MsgEvent::PeerAddressUpdate {
                                     contact_id: contact.contact_id,
                                     ip,
