@@ -46,7 +46,6 @@ pub(crate) enum Screen {
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum SidebarTab {
     Profile,
-    Friends,
     Messages,
     Groups,
     Call,
@@ -208,6 +207,8 @@ pub struct HostelApp {
 
     // Friends tab sub-tab
     pub(crate) friends_sub_tab: FriendsSubTab,
+    /// Whether the "Add Friend" panel is expanded inside Messages tab.
+    pub(crate) show_add_friend: bool,
 
     // Logs tab filter
     pub(crate) log_filter: LogFilter,
@@ -467,6 +468,7 @@ impl HostelApp {
             req_port_input: String::new(),
             req_status: String::new(),
             friends_sub_tab: FriendsSubTab::List,
+            show_add_friend: false,
             log_filter: LogFilter::All,
             show_ips: false,
             incoming_call: None,
@@ -1565,7 +1567,6 @@ impl eframe::App for HostelApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             match self.active_tab {
                 SidebarTab::Profile => self.draw_profile_tab(ui),
-                SidebarTab::Friends => self.draw_friends_tab(ui),
                 SidebarTab::Messages => self.draw_messages_tab(ui),
                 SidebarTab::Groups => self.draw_groups_tab(ui),
                 SidebarTab::Call => {

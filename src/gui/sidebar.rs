@@ -30,15 +30,15 @@ impl HostelApp {
 
         ui.vertical_centered(|ui| {
             let total_unread: u32 = self.msg_unread.values().sum();
-            let incoming_count = self.req_incoming.len();
+            let incoming_count = self.req_incoming.len() as u32;
 
             let icon_h = 30.0; // icon height in sidebar buttons
 
-            let friends_badge = incoming_count as u32;
+            // Messages badge includes unread messages + incoming friend requests
+            let messages_badge = total_unread + incoming_count;
             let tabs: Vec<(SidebarTab, String, u32)> = vec![
                 (SidebarTab::Profile, "Profile".to_string(), 0),
-                (SidebarTab::Friends, "Friends".to_string(), friends_badge),
-                (SidebarTab::Messages, "Messages".to_string(), total_unread),
+                (SidebarTab::Messages, "Messages".to_string(), messages_badge),
                 (SidebarTab::Groups, "Groups".to_string(), self.group_unread.values().sum()),
                 (SidebarTab::Call, "Call".to_string(), 0),
                 (SidebarTab::Settings, "Settings".to_string(), 0),
