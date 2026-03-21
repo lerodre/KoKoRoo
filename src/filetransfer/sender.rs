@@ -43,12 +43,12 @@ pub fn sender_thread_run(
         let mut last_progress = Instant::now();
 
         while !sender.all_sent {
-            let batch = sender.next_chunks(super::CHUNKS_PER_TICK);
+            // Send 50 chunks per batch (~200KB), sleep 5ms → ~40MB/s max
+            let batch = sender.next_chunks(50);
             if batch.is_empty() {
                 break;
             }
             for (chunk_idx, chunk_data) in &batch {
-                // Build payload: [4B transfer_id LE][4B chunk_index LE][chunk_data]
                 let mut payload = Vec::with_capacity(8 + chunk_data.len());
                 payload.extend_from_slice(&transfer_id.to_le_bytes());
                 payload.extend_from_slice(&chunk_idx.to_le_bytes());
@@ -57,8 +57,8 @@ pub fn sender_thread_run(
                 let pkt = session.encrypt_packet(crate::crypto::PKT_MSG_FILE_CHUNK, &payload);
                 socket.send_to(&pkt, peer_addr).ok();
             }
-            // Pace: sleep after each batch
-            std::thread::sleep(Duration::from_millis(1));
+            // Pace: 5ms between batches to avoid saturating UDP buffers
+            std::thread::sleep(Duration::from_millis(5));
 
             // Report progress every 500ms
             if last_progress.elapsed() >= Duration::from_millis(500) {

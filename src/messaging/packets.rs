@@ -40,8 +40,8 @@ impl MsgDaemon {
             let data = &buf[..len];
             let pkt_type = data[0];
 
-            // Skip verbose log for keepalives (ACK seq=0)
-            if pkt_type != PKT_MSG_ACK {
+            // Skip verbose log for keepalives and file chunks (too noisy)
+            if pkt_type != PKT_MSG_ACK && pkt_type != PKT_MSG_FILE_CHUNK {
                 log_fmt!("[daemon] recv pkt type=0x{:02x} len={} from={}", pkt_type, len, from);
             }
 
