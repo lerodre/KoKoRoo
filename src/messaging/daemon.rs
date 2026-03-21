@@ -95,8 +95,9 @@ pub(super) const RETRY_BACKOFFS: &[Duration] = &[
 ];
 
 /// Active file transfer (either sending or receiving).
+#[allow(dead_code)]
 pub enum FileTransfer {
-    Sending(SenderState),
+    Sending(SenderState), // legacy fallback, kept for compatibility
     Receiving(ReceiverState),
     /// Waiting for the peer to accept/reject our offer.
     OfferedWaiting {

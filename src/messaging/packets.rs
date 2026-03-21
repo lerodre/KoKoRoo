@@ -32,7 +32,8 @@ impl MsgDaemon {
             None => return,
         };
 
-        let mut buf = [0u8; 4096];
+        let mut buf = [0u8; 8192];
+        let mut packets_processed = 0u32;
         while let Ok((len, from)) = socket.recv_from(&mut buf) {
             if len == 0 {
                 continue;
@@ -1188,8 +1189,13 @@ impl MsgDaemon {
                 _ => {} // Ignore unknown packet types
             }
 
-            // Only process one packet per frame to keep latency low
-            break;
+            // Process up to 5000 packets per call to keep socket buffer drained,
+            // then yield to housekeep/commands. Without this, file transfers
+            // overflow the socket buffer because only 1 packet was processed per loop.
+            packets_processed += 1;
+            if packets_processed >= 5000 {
+                break;
+            }
         }
     }
 }

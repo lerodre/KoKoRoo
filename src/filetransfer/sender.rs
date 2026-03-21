@@ -18,11 +18,12 @@ pub struct SenderThreadEvent {
     pub kind: SenderEventKind,
 }
 
+#[allow(dead_code)]
 pub enum SenderEventKind {
     Progress { bytes_sent: u64, total: u64 },
     AllChunksSent,
     Done,
-    Error(String),
+    Error(String), // available for sender thread to report errors
 }
 
 /// AIMD congestion control constants.

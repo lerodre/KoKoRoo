@@ -15,7 +15,8 @@ pub const CHUNKS_PER_TICK: usize = 400;
 pub const OFFER_TIMEOUT_SECS: u64 = 30;
 
 /// Stale transfer timeout: cancel if no progress for this many seconds.
-pub const STALE_TIMEOUT_SECS: u64 = 30;
+/// Large files may have gaps during NACK/retransmit cycles, so be generous.
+pub const STALE_TIMEOUT_SECS: u64 = 120;
 
 /// How often to emit progress events to the GUI (milliseconds).
 pub const PROGRESS_INTERVAL_MS: u64 = 500;
