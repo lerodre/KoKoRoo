@@ -25,7 +25,17 @@ pub enum SenderEventKind {
     Error(String),
 }
 
+/// AIMD congestion control constants.
+const INITIAL_BATCH: usize = 10;     // start conservative
+const MIN_BATCH: usize = 2;          // never go below this
+const MAX_BATCH: usize = 500;        // cap to avoid buffer overflow
+const BATCH_SLEEP_MS: u64 = 3;       // sleep between batches
+
 /// Run a sender thread that reads chunks from file, encrypts, and sends via UDP.
+/// Uses AIMD (additive increase, multiplicative decrease) congestion control:
+/// - No packet loss (0 NACKs) → double batch size (slow start / exponential growth)
+/// - Low loss (<5%) → increase batch by 10 (additive increase)
+/// - High loss (≥5%) → halve batch size (multiplicative decrease)
 pub fn sender_thread_run(
     mut sender: SenderState,
     socket: UdpSocket,
@@ -37,14 +47,21 @@ pub fn sender_thread_run(
 ) {
     let transfer_id = sender.transfer_id;
     let file_size = sender.file_size;
+    let total_chunks = sender.total_chunks;
+
+    // Congestion window: how many chunks per batch
+    let mut cwnd: usize = INITIAL_BATCH;
+
+    log_fmt!("[sender_thread] start tid={} size={} chunks={} cwnd={}",
+        transfer_id, file_size, total_chunks, cwnd);
 
     loop {
-        // Send all queued chunks
         let mut last_progress = Instant::now();
+        let round_start = Instant::now();
+        let chunks_this_round = sender.send_queue.len();
 
         while !sender.all_sent {
-            // Send 50 chunks per batch (~200KB), sleep 5ms → ~40MB/s max
-            let batch = sender.next_chunks(50);
+            let batch = sender.next_chunks(cwnd);
             if batch.is_empty() {
                 break;
             }
@@ -57,12 +74,11 @@ pub fn sender_thread_run(
                 let pkt = session.encrypt_packet(crate::crypto::PKT_MSG_FILE_CHUNK, &payload);
                 socket.send_to(&pkt, peer_addr).ok();
             }
-            // Pace: 5ms between batches to avoid saturating UDP buffers
-            std::thread::sleep(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(BATCH_SLEEP_MS));
 
             // Report progress every 500ms
             if last_progress.elapsed() >= Duration::from_millis(500) {
-                let bytes_sent = (sender.progress_bytes_from_queue()).min(file_size);
+                let bytes_sent = sender.progress_bytes_from_queue().min(file_size);
                 event_tx.send(SenderThreadEvent {
                     contact_id: contact_id.clone(),
                     transfer_id,
@@ -72,7 +88,15 @@ pub fn sender_thread_run(
             }
         }
 
-        // All chunks sent — notify daemon
+        let elapsed_ms = round_start.elapsed().as_millis();
+        let throughput_mbps = if elapsed_ms > 0 {
+            (chunks_this_round as u64 * CHUNK_DATA_SIZE as u64 * 8) / (elapsed_ms as u64 * 1000)
+        } else { 0 };
+
+        log_fmt!("[sender_thread] round done: sent {} chunks in {}ms (~{}Mbps) cwnd={}",
+            chunks_this_round, elapsed_ms, throughput_mbps, cwnd);
+
+        // All chunks sent — notify daemon to send FILE_COMPLETE
         event_tx.send(SenderThreadEvent {
             contact_id: contact_id.clone(),
             transfer_id,
@@ -82,13 +106,32 @@ pub fn sender_thread_run(
         // Wait for Nack/Ack/Cancel from daemon
         match cmd_rx.recv() {
             Ok(SenderThreadCmd::Nack(missing)) => {
-                log_fmt!("[sender_thread] NACK received: {} missing chunks for tid={}", missing.len(), transfer_id);
+                let loss_pct = if chunks_this_round > 0 {
+                    (missing.len() * 100) / chunks_this_round
+                } else { 0 };
+
+                // AIMD congestion control
+                let old_cwnd = cwnd;
+                if missing.is_empty() {
+                    // Perfect round — shouldn't happen (we got NACK with 0 missing?)
+                    cwnd = (cwnd * 2).min(MAX_BATCH);
+                } else if loss_pct < 5 {
+                    // Low loss — additive increase
+                    cwnd = (cwnd + 10).min(MAX_BATCH);
+                } else {
+                    // High loss — multiplicative decrease
+                    cwnd = (cwnd / 2).max(MIN_BATCH);
+                }
+
+                log_fmt!("[sender_thread] NACK: {} missing / {} sent ({}% loss) — cwnd {} -> {}",
+                    missing.len(), chunks_this_round, loss_pct, old_cwnd, cwnd);
+
                 sender.on_nack(missing);
-                // Re-enter the sending loop
                 continue;
             }
             Ok(SenderThreadCmd::Ack) => {
-                log_fmt!("[sender_thread] ACK received for tid={}", transfer_id);
+                // Perfect transfer — increase cwnd for next transfer
+                log_fmt!("[sender_thread] ACK — transfer complete tid={}", transfer_id);
                 event_tx.send(SenderThreadEvent {
                     contact_id: contact_id.clone(),
                     transfer_id,
@@ -97,13 +140,10 @@ pub fn sender_thread_run(
                 return;
             }
             Ok(SenderThreadCmd::Cancel) => {
-                log_fmt!("[sender_thread] Cancel received for tid={}", transfer_id);
+                log_fmt!("[sender_thread] cancelled tid={}", transfer_id);
                 return;
             }
-            Err(_) => {
-                // Channel closed — daemon shut down
-                return;
-            }
+            Err(_) => return,
         }
     }
 }
