@@ -155,8 +155,14 @@ impl MsgDaemon {
                     log_fmt!("[daemon] YieldSocket — releasing socket for voice call");
                     // Cancel all active file transfers
                     for ((cid, tid), mut ft) in self.file_transfers.drain() {
-                        if let FileTransfer::Receiving(ref mut recv) = ft {
-                            recv.cleanup();
+                        match ft {
+                            FileTransfer::Receiving(ref mut recv) => {
+                                recv.cleanup();
+                            }
+                            FileTransfer::SendingThreaded { ref cmd_tx, .. } => {
+                                cmd_tx.send(crate::filetransfer::sender::SenderThreadCmd::Cancel).ok();
+                            }
+                            _ => {}
                         }
                         self.event_tx.send(MsgEvent::FileTransferFailed {
                             contact_id: cid,
@@ -392,11 +398,11 @@ impl MsgDaemon {
                 }
 
                 MsgCommand::SendFileOffer { contact_id, peer_addr, peer_pubkey, file_path } => {
-                    let filename_log = std::path::Path::new(&file_path)
+                    let filename = std::path::Path::new(&file_path)
                         .file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_else(|| "file".to_string());
-                    // Compute SHA-256 and file size
+                    // Get file metadata (synchronous - fast)
                     let metadata = match std::fs::metadata(&file_path) {
                         Ok(m) => m,
                         Err(e) => {
@@ -409,62 +415,41 @@ impl MsgDaemon {
                         }
                     };
                     let file_size = metadata.len();
-                    log_fmt!("[daemon] SendFileOffer: file='{}' size={} to={}", filename_log, file_size, contact_id);
-                    let filename = std::path::Path::new(&file_path)
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "file".to_string());
-
-                    // Compute SHA-256
-                    let sha256 = match compute_file_sha256(&file_path) {
-                        Some(h) => h,
-                        None => {
-                            self.event_tx.send(MsgEvent::FileTransferFailed {
-                                contact_id: contact_id.clone(),
-                                transfer_id: 0,
-                                reason: "Failed to hash file".into(),
-                            }).ok();
-                            continue;
-                        }
-                    };
+                    log_fmt!("[daemon] SendFileOffer: file='{}' size={} to={}", filename, file_size, contact_id);
 
                     let transfer_id = self.next_transfer_id;
                     self.next_transfer_id += 1;
 
-                    // Ensure connected
-                    if let Some(addr) = self.contact_addrs.get(&contact_id) {
-                        if let Some(peer) = self.peers.get(addr) {
-                            if peer.is_connected() {
-                                if let Some(ref socket) = self.socket {
-                                    filetransfer::protocol::send_file_offer(
-                                        peer, socket, transfer_id, file_size, &sha256, &filename,
-                                    );
-                                }
-                            }
-                        }
-                    } else {
-                        // Try to connect first
-                        if let Some(ref socket) = self.socket {
-                            if let Some(session) = protocol::initiate_handshake(
-                                socket, &contact_id, peer_addr, peer_pubkey,
-                            ) {
-                                self.contact_addrs.insert(contact_id.clone(), peer_addr);
-                                self.hello_retries.insert(peer_addr, 0);
-                                self.peers.insert(peer_addr, session);
-                            }
-                        }
-                    }
-
-                    // Store as waiting for accept
+                    // Insert as Hashing — SHA-256 will be computed in background
                     self.file_transfers.insert(
                         (contact_id.clone(), transfer_id),
-                        FileTransfer::OfferedWaiting {
-                            file_path,
+                        FileTransfer::Hashing {
+                            file_path: file_path.clone(),
                             file_size,
-                            sha256,
-                            offered_at: Instant::now(),
+                            filename: filename.clone(),
+                            peer_addr,
+                            peer_pubkey,
                         },
                     );
+
+                    // Spawn background thread for SHA-256 computation
+                    let tx = self.hash_results_tx.clone();
+                    let fp = file_path.clone();
+                    let cid = contact_id.clone();
+                    let fname = filename.clone();
+                    std::thread::spawn(move || {
+                        let sha256 = compute_file_sha256(&fp);
+                        tx.send(super::daemon::HashResult {
+                            contact_id: cid,
+                            transfer_id,
+                            file_path: fp,
+                            file_size,
+                            filename: fname,
+                            peer_addr,
+                            peer_pubkey,
+                            sha256,
+                        }).ok();
+                    });
                 }
 
                 MsgCommand::AcceptFileTransfer { contact_id, transfer_id } => {
@@ -522,9 +507,15 @@ impl MsgDaemon {
                                 }
                             }
                         }
-                        // Clean up receiver temp file if applicable
-                        if let FileTransfer::Receiving(ref mut recv) = ft {
-                            recv.cleanup();
+                        // Clean up based on transfer type
+                        match ft {
+                            FileTransfer::Receiving(ref mut recv) => {
+                                recv.cleanup();
+                            }
+                            FileTransfer::SendingThreaded { ref cmd_tx, .. } => {
+                                cmd_tx.send(crate::filetransfer::sender::SenderThreadCmd::Cancel).ok();
+                            }
+                            _ => {}
                         }
                         self.event_tx.send(MsgEvent::FileTransferFailed {
                             contact_id,
@@ -670,7 +661,7 @@ impl MsgDaemon {
 }
 
 /// Compute SHA-256 hash of a file.
-pub(super) fn compute_file_sha256(path: &str) -> Option<[u8; 32]> {
+pub(crate) fn compute_file_sha256(path: &str) -> Option<[u8; 32]> {
     use sha2::{Digest, Sha256};
     let mut file = std::fs::File::open(path).ok()?;
     let mut hasher = Sha256::new();

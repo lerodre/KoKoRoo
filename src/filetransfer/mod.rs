@@ -3,13 +3,13 @@ pub mod sender;
 pub mod receiver;
 
 /// Maximum data bytes per FILE_CHUNK packet.
-/// UDP-safe size: 1200 payload + headers stays well under typical 1280 IPv6 MTU.
-pub const CHUNK_DATA_SIZE: usize = 1200;
+/// 4000 bytes + encryption overhead ≈ 4029 bytes on wire.
+/// May IP-fragment on strict 1280-MTU links, but UDP reassembly handles it.
+pub const CHUNK_DATA_SIZE: usize = 4000;
 
 /// Max chunks to send per daemon tick.
-/// 1300 × 1200 ≈ 1.5 MB per tick. At 20 ticks/s ≈ 30 MB/s.
-/// Combined with 16 MB socket buffers this avoids packet loss.
-pub const CHUNKS_PER_TICK: usize = 1300;
+/// 400 × 4000 ≈ 1.6 MB per tick. At 20 ticks/s ≈ 32 MB/s.
+pub const CHUNKS_PER_TICK: usize = 400;
 
 /// Offer timeout: cancel if no accept/reject within 30 seconds.
 pub const OFFER_TIMEOUT_SECS: u64 = 30;

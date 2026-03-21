@@ -525,12 +525,37 @@ impl MsgDaemon {
                             peer.touch();
                             let contact_id = peer.contact_id.clone();
                             let key = (contact_id.clone(), transfer_id);
-                            // Transition OfferedWaiting → Sending
+                            // Transition OfferedWaiting → SendingThreaded
                             if let Some(ft) = self.file_transfers.remove(&key) {
                                 if let FileTransfer::OfferedWaiting { file_path, file_size, sha256, .. } = ft {
                                     let sender = SenderState::new(transfer_id, file_path, file_size, sha256);
-                                    self.file_transfers.insert(key, FileTransfer::Sending(sender));
-                                    // Notify GUI that transfer started (transitions Offered → Accepted)
+                                    // Clone socket and session for the sender thread
+                                    let sock_clone = self.socket.as_ref().unwrap().try_clone().unwrap();
+                                    let session_clone = peer.session.as_ref().unwrap().clone_for_sending();
+                                    let peer_addr = peer.peer_addr;
+
+                                    // Create channels
+                                    let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
+                                    let event_tx = self.sender_events_tx.clone();
+                                    let cid = contact_id.clone();
+
+                                    // Spawn sender thread
+                                    std::thread::spawn(move || {
+                                        crate::filetransfer::sender::sender_thread_run(
+                                            sender, sock_clone, session_clone,
+                                            peer_addr, cmd_rx, event_tx, cid,
+                                        );
+                                    });
+
+                                    self.file_transfers.insert(key, FileTransfer::SendingThreaded {
+                                        cmd_tx,
+                                        sha256,
+                                        file_size,
+                                        complete_sent: false,
+                                        complete_sent_at: Instant::now(),
+                                    });
+
+                                    // Notify GUI that transfer started
                                     self.event_tx.send(MsgEvent::FileTransferProgress {
                                         contact_id,
                                         transfer_id,
@@ -585,8 +610,16 @@ impl MsgDaemon {
                             let contact_id = peer.contact_id.clone();
                             let key = (contact_id.clone(), transfer_id);
                             let had_transfer = self.file_transfers.contains_key(&key);
-                            if let Some(FileTransfer::Sending(ref mut sender)) = self.file_transfers.get_mut(&key) {
-                                sender.on_ack();
+                            if let Some(ft) = self.file_transfers.get_mut(&key) {
+                                match ft {
+                                    FileTransfer::SendingThreaded { cmd_tx, .. } => {
+                                        cmd_tx.send(crate::filetransfer::sender::SenderThreadCmd::Ack).ok();
+                                    }
+                                    FileTransfer::Sending(ref mut sender) => {
+                                        sender.on_ack();
+                                    }
+                                    _ => {}
+                                }
                             }
                             self.file_transfers.remove(&key);
                             log_fmt!("[daemon] file transfer complete (sender ACK): tid={} cid={} had_state={}",
@@ -609,8 +642,17 @@ impl MsgDaemon {
                             peer.touch();
                             let contact_id = peer.contact_id.clone();
                             let key = (contact_id, transfer_id);
-                            if let Some(FileTransfer::Sending(ref mut sender)) = self.file_transfers.get_mut(&key) {
-                                sender.on_nack(missing);
+                            if let Some(ft) = self.file_transfers.get_mut(&key) {
+                                match ft {
+                                    FileTransfer::SendingThreaded { cmd_tx, complete_sent, .. } => {
+                                        cmd_tx.send(crate::filetransfer::sender::SenderThreadCmd::Nack(missing)).ok();
+                                        *complete_sent = false;
+                                    }
+                                    FileTransfer::Sending(ref mut sender) => {
+                                        sender.on_nack(missing);
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
                     }
@@ -647,37 +689,31 @@ impl MsgDaemon {
                                         );
                                     }
                                 } else {
-                                    // All received — verify and finalize
+                                    // All received — send ACK immediately to stop sender retrying
                                     if let Some(ref socket) = self.socket {
                                         filetransfer::protocol::send_file_ack(peer, socket, transfer_id);
                                     }
+                                    // Take the ReceiverState and verify async
                                     if let Some(ft) = self.file_transfers.remove(&key) {
                                         if let FileTransfer::Receiving(mut recv) = ft {
-                                            recv.flush();
-                                            if recv.verify_hash() {
-                                                if let Some(saved_path) = recv.finalize() {
-                                                    log_fmt!("[daemon] file transfer complete: id={}", transfer_id);
-                                                    self.event_tx.send(MsgEvent::FileTransferComplete {
-                                                        contact_id,
-                                                        transfer_id,
-                                                        saved_path,
-                                                    }).ok();
+                                            let verify_tx = self.verify_results_tx.clone();
+                                            let cid = contact_id.clone();
+                                            std::thread::spawn(move || {
+                                                recv.flush();
+                                                let success = recv.verify_hash();
+                                                let saved_path = if success {
+                                                    recv.finalize()
                                                 } else {
                                                     recv.cleanup();
-                                                    log_fmt!("[daemon] file transfer failed: id={}", transfer_id);
-                                                    self.event_tx.send(MsgEvent::FileTransferFailed {
-                                                        contact_id, transfer_id,
-                                                        reason: "Failed to save file".into(),
-                                                    }).ok();
-                                                }
-                                            } else {
-                                                recv.cleanup();
-                                                log_fmt!("[daemon] file transfer failed: id={}", transfer_id);
-                                                self.event_tx.send(MsgEvent::FileTransferFailed {
-                                                    contact_id, transfer_id,
-                                                    reason: "Hash verification failed".into(),
+                                                    None
+                                                };
+                                                verify_tx.send(super::daemon::VerifyResult {
+                                                    contact_id: cid,
+                                                    transfer_id,
+                                                    success: success && saved_path.is_some(),
+                                                    saved_path,
                                                 }).ok();
-                                            }
+                                            });
                                         }
                                     }
                                 }
@@ -695,8 +731,14 @@ impl MsgDaemon {
                             let contact_id = peer.contact_id.clone();
                             let key = (contact_id.clone(), transfer_id);
                             if let Some(mut ft) = self.file_transfers.remove(&key) {
-                                if let FileTransfer::Receiving(ref mut recv) = ft {
-                                    recv.cleanup();
+                                match ft {
+                                    FileTransfer::Receiving(ref mut recv) => {
+                                        recv.cleanup();
+                                    }
+                                    FileTransfer::SendingThreaded { ref cmd_tx, .. } => {
+                                        cmd_tx.send(crate::filetransfer::sender::SenderThreadCmd::Cancel).ok();
+                                    }
+                                    _ => {}
                                 }
                                 log_fmt!("[daemon] file transfer failed: id={}", transfer_id);
                                 self.event_tx.send(MsgEvent::FileTransferFailed {

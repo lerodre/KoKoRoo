@@ -1,8 +1,112 @@
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
-use std::time::Instant;
+use std::net::{SocketAddr, UdpSocket};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use super::CHUNK_DATA_SIZE;
+
+pub enum SenderThreadCmd {
+    Nack(Vec<u32>),
+    Ack,
+    Cancel,
+}
+
+pub struct SenderThreadEvent {
+    pub contact_id: String,
+    pub transfer_id: u32,
+    pub kind: SenderEventKind,
+}
+
+pub enum SenderEventKind {
+    Progress { bytes_sent: u64, total: u64 },
+    AllChunksSent,
+    Done,
+    Error(String),
+}
+
+/// Run a sender thread that reads chunks from file, encrypts, and sends via UDP.
+pub fn sender_thread_run(
+    mut sender: SenderState,
+    socket: UdpSocket,
+    session: crate::crypto::Session,
+    peer_addr: SocketAddr,
+    cmd_rx: mpsc::Receiver<SenderThreadCmd>,
+    event_tx: mpsc::Sender<SenderThreadEvent>,
+    contact_id: String,
+) {
+    let transfer_id = sender.transfer_id;
+    let file_size = sender.file_size;
+
+    loop {
+        // Send all queued chunks
+        let mut last_progress = Instant::now();
+
+        while !sender.all_sent {
+            let batch = sender.next_chunks(super::CHUNKS_PER_TICK);
+            if batch.is_empty() {
+                break;
+            }
+            for (chunk_idx, chunk_data) in &batch {
+                // Build payload: [4B transfer_id LE][4B chunk_index LE][chunk_data]
+                let mut payload = Vec::with_capacity(8 + chunk_data.len());
+                payload.extend_from_slice(&transfer_id.to_le_bytes());
+                payload.extend_from_slice(&chunk_idx.to_le_bytes());
+                payload.extend_from_slice(chunk_data);
+
+                let pkt = session.encrypt_packet(crate::crypto::PKT_MSG_FILE_CHUNK, &payload);
+                socket.send_to(&pkt, peer_addr).ok();
+            }
+            // Pace: sleep after each batch
+            std::thread::sleep(Duration::from_millis(1));
+
+            // Report progress every 500ms
+            if last_progress.elapsed() >= Duration::from_millis(500) {
+                let bytes_sent = (sender.progress_bytes_from_queue()).min(file_size);
+                event_tx.send(SenderThreadEvent {
+                    contact_id: contact_id.clone(),
+                    transfer_id,
+                    kind: SenderEventKind::Progress { bytes_sent, total: file_size },
+                }).ok();
+                last_progress = Instant::now();
+            }
+        }
+
+        // All chunks sent — notify daemon
+        event_tx.send(SenderThreadEvent {
+            contact_id: contact_id.clone(),
+            transfer_id,
+            kind: SenderEventKind::AllChunksSent,
+        }).ok();
+
+        // Wait for Nack/Ack/Cancel from daemon
+        match cmd_rx.recv() {
+            Ok(SenderThreadCmd::Nack(missing)) => {
+                log_fmt!("[sender_thread] NACK received: {} missing chunks for tid={}", missing.len(), transfer_id);
+                sender.on_nack(missing);
+                // Re-enter the sending loop
+                continue;
+            }
+            Ok(SenderThreadCmd::Ack) => {
+                log_fmt!("[sender_thread] ACK received for tid={}", transfer_id);
+                event_tx.send(SenderThreadEvent {
+                    contact_id: contact_id.clone(),
+                    transfer_id,
+                    kind: SenderEventKind::Done,
+                }).ok();
+                return;
+            }
+            Ok(SenderThreadCmd::Cancel) => {
+                log_fmt!("[sender_thread] Cancel received for tid={}", transfer_id);
+                return;
+            }
+            Err(_) => {
+                // Channel closed — daemon shut down
+                return;
+            }
+        }
+    }
+}
 
 /// ACK-on-Error sender state.
 ///
@@ -68,6 +172,12 @@ impl SenderState {
         } else {
             (self.chunks_confirmed as u64 * CHUNK_DATA_SIZE as u64).min(self.file_size)
         }
+    }
+
+    /// Progress bytes based on how far through the send queue we are.
+    /// Used by the sender thread for progress reporting.
+    pub fn progress_bytes_from_queue(&self) -> u64 {
+        (self.queue_pos as u64 * CHUNK_DATA_SIZE as u64).min(self.file_size)
     }
 
     /// Read a chunk from the file at the given index using a cached reader.

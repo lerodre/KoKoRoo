@@ -169,6 +169,28 @@ impl MsgDaemon {
                 }
             }
 
+            // Resend FILE_COMPLETE for SendingThreaded transfers
+            {
+                let mut resend_completes: Vec<(String, u32, [u8; 32])> = Vec::new();
+                for ((cid, tid), ft) in &mut self.file_transfers {
+                    if let FileTransfer::SendingThreaded { sha256, complete_sent, complete_sent_at, .. } = ft {
+                        if *complete_sent && complete_sent_at.elapsed() >= std::time::Duration::from_secs(2) {
+                            resend_completes.push((cid.clone(), *tid, *sha256));
+                            *complete_sent_at = Instant::now();
+                        }
+                    }
+                }
+                for (cid, tid, sha256) in resend_completes {
+                    if let Some(addr) = self.contact_addrs.get(&cid) {
+                        if let Some(peer) = self.peers.get(addr) {
+                            filetransfer::protocol::send_file_complete(
+                                peer, socket, tid, &sha256,
+                            );
+                        }
+                    }
+                }
+            }
+
             // Emit progress events periodically
             if self.last_progress_emit.elapsed().as_millis() >= filetransfer::PROGRESS_INTERVAL_MS as u128 {
                 self.last_progress_emit = now;
@@ -190,6 +212,7 @@ impl MsgDaemon {
                                 total_bytes: recv.file_size,
                             }).ok();
                         }
+                        // SendingThreaded progress is reported via sender_events_rx
                         _ => {}
                     }
                 }
@@ -224,7 +247,11 @@ impl MsgDaemon {
                     FileTransfer::Receiving(recv) => {
                         recv.last_chunk_time.elapsed().as_secs() >= filetransfer::STALE_TIMEOUT_SECS && !recv.is_complete()
                     }
+                    FileTransfer::SendingThreaded { complete_sent, complete_sent_at, .. } => {
+                        *complete_sent && complete_sent_at.elapsed().as_secs() >= filetransfer::STALE_TIMEOUT_SECS
+                    }
                     FileTransfer::IncomingWaiting { .. } => false,
+                    FileTransfer::Hashing { .. } => false,
                     _ => false,
                 };
                 if is_stale {
@@ -233,8 +260,14 @@ impl MsgDaemon {
             }
             for (cid, tid) in stale_transfers {
                 if let Some(mut ft) = self.file_transfers.remove(&(cid.clone(), tid)) {
-                    if let FileTransfer::Receiving(ref mut recv) = ft {
-                        recv.cleanup();
+                    match ft {
+                        FileTransfer::Receiving(ref mut recv) => {
+                            recv.cleanup();
+                        }
+                        FileTransfer::SendingThreaded { ref cmd_tx, .. } => {
+                            cmd_tx.send(crate::filetransfer::sender::SenderThreadCmd::Cancel).ok();
+                        }
+                        _ => {}
                     }
                     self.event_tx.send(MsgEvent::FileTransferFailed {
                         contact_id: cid,
@@ -371,8 +404,32 @@ impl MsgDaemon {
         for addr in timed_out {
             if let Some(peer) = self.peers.remove(&addr) {
                 if peer.is_connected() {
+                    // Cancel any active SendingThreaded transfers for this contact
+                    let cid = peer.contact_id.clone();
+                    if !cid.is_empty() {
+                        let mut to_cancel = Vec::new();
+                        for ((c, tid), ft) in &self.file_transfers {
+                            if c == &cid {
+                                if let FileTransfer::SendingThreaded { .. } = ft {
+                                    to_cancel.push((c.clone(), *tid));
+                                }
+                            }
+                        }
+                        for key in to_cancel {
+                            if let Some(ft) = self.file_transfers.remove(&key) {
+                                if let FileTransfer::SendingThreaded { cmd_tx, .. } = ft {
+                                    cmd_tx.send(crate::filetransfer::sender::SenderThreadCmd::Cancel).ok();
+                                }
+                                self.event_tx.send(MsgEvent::FileTransferFailed {
+                                    contact_id: key.0,
+                                    transfer_id: key.1,
+                                    reason: "Peer disconnected".into(),
+                                }).ok();
+                            }
+                        }
+                    }
                     self.event_tx.send(MsgEvent::PeerStatus {
-                        contact_id: peer.contact_id.clone(),
+                        contact_id: cid,
                         online: false,
                     }).ok();
                 }

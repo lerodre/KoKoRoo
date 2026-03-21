@@ -45,6 +45,26 @@ pub struct GroupAvatarSendState {
     pub retries: u8,
 }
 
+/// Result of async SHA-256 hashing (pre-send or post-receive verification).
+pub struct HashResult {
+    pub contact_id: String,
+    pub transfer_id: u32,
+    pub file_path: String,
+    pub file_size: u64,
+    pub filename: String,
+    pub peer_addr: std::net::SocketAddr,
+    pub peer_pubkey: [u8; 32],
+    pub sha256: Option<[u8; 32]>,
+}
+
+/// Result of async post-receive verification.
+pub struct VerifyResult {
+    pub contact_id: String,
+    pub transfer_id: u32,
+    pub success: bool,
+    pub saved_path: Option<String>,
+}
+
 pub(super) const AVATAR_CHUNK_SIZE: usize = 1200;
 pub(super) const AVATAR_RECV_TIMEOUT: Duration = Duration::from_secs(30);
 pub(super) const AVATAR_SEND_RETRY_INTERVAL: Duration = Duration::from_secs(5);
@@ -92,6 +112,22 @@ pub enum FileTransfer {
         filename: String,
         file_size: u64,
         sha256: [u8; 32],
+    },
+    /// SHA-256 being computed in background thread before sending offer.
+    Hashing {
+        file_path: String,
+        file_size: u64,
+        filename: String,
+        peer_addr: std::net::SocketAddr,
+        peer_pubkey: [u8; 32],
+    },
+    /// File being sent by a dedicated thread.
+    SendingThreaded {
+        cmd_tx: mpsc::Sender<crate::filetransfer::sender::SenderThreadCmd>,
+        sha256: [u8; 32],
+        file_size: u64,
+        complete_sent: bool,
+        complete_sent_at: Instant,
     },
 }
 
@@ -166,6 +202,12 @@ pub struct MsgDaemon {
     pub(super) pending_member_syncs: HashMap<(String, String), Vec<crate::group::GroupMember>>,
     /// Contacts that failed to connect (max HELLO retries). Cooldown before retrying.
     pub(super) failed_contacts: HashMap<String, Instant>,
+    pub(super) hash_results_tx: mpsc::Sender<HashResult>,
+    pub(super) hash_results_rx: mpsc::Receiver<HashResult>,
+    pub(super) verify_results_tx: mpsc::Sender<VerifyResult>,
+    pub(super) verify_results_rx: mpsc::Receiver<VerifyResult>,
+    pub(super) sender_events_tx: mpsc::Sender<crate::filetransfer::sender::SenderThreadEvent>,
+    pub(super) sender_events_rx: mpsc::Receiver<crate::filetransfer::sender::SenderThreadEvent>,
 }
 
 impl MsgDaemon {
@@ -178,6 +220,9 @@ impl MsgDaemon {
     ) -> Self {
         let settings = Settings::load();
         let initial_ip = crate::gui::get_best_ipv6(&settings.network_adapter);
+        let (hash_results_tx, hash_results_rx) = mpsc::channel();
+        let (verify_results_tx, verify_results_rx) = mpsc::channel();
+        let (sender_events_tx, sender_events_rx) = mpsc::channel();
         MsgDaemon {
             socket: None,
             local_port,
@@ -217,6 +262,12 @@ impl MsgDaemon {
             group_avatar_sends: HashMap::new(),
             pending_member_syncs: HashMap::new(),
             failed_contacts: HashMap::new(),
+            hash_results_tx,
+            hash_results_rx,
+            verify_results_tx,
+            verify_results_rx,
+            sender_events_tx,
+            sender_events_rx,
         }
     }
 
@@ -234,9 +285,16 @@ impl MsgDaemon {
                 continue;
             }
             self.receive_packets();
+            self.drain_background_results();
             self.housekeep();
         }
 
+        // Cancel all active sender threads
+        for (_, ft) in &self.file_transfers {
+            if let FileTransfer::SendingThreaded { cmd_tx, .. } = ft {
+                cmd_tx.send(crate::filetransfer::sender::SenderThreadCmd::Cancel).ok();
+            }
+        }
         // Disconnect all peers
         if let Some(ref socket) = self.socket {
             for peer in self.peers.values() {
@@ -273,6 +331,125 @@ impl MsgDaemon {
                     } else {
                         log_fmt!("[daemon] bind_socket FAILED after 20 attempts: {}", e);
                     }
+                }
+            }
+        }
+    }
+
+    /// Drain results from background threads (hash, verify, sender).
+    pub(crate) fn drain_background_results(&mut self) {
+        use crate::filetransfer;
+
+        // Drain hash results
+        while let Ok(result) = self.hash_results_rx.try_recv() {
+            let key = (result.contact_id.clone(), result.transfer_id);
+            if let Some(sha256) = result.sha256 {
+                // Hash succeeded — send FILE_OFFER and transition to OfferedWaiting
+                if let Some(FileTransfer::Hashing { .. }) = self.file_transfers.get(&key) {
+                    // Ensure connected and send offer
+                    if let Some(addr) = self.contact_addrs.get(&result.contact_id) {
+                        if let Some(peer) = self.peers.get(addr) {
+                            if peer.is_connected() {
+                                if let Some(ref socket) = self.socket {
+                                    filetransfer::protocol::send_file_offer(
+                                        peer, socket, result.transfer_id,
+                                        result.file_size, &sha256, &result.filename,
+                                    );
+                                }
+                            }
+                        }
+                    } else {
+                        // Try to connect
+                        if let Some(ref socket) = self.socket {
+                            if let Some(session) = super::protocol::initiate_handshake(
+                                socket, &result.contact_id, result.peer_addr, result.peer_pubkey,
+                            ) {
+                                self.contact_addrs.insert(result.contact_id.clone(), result.peer_addr);
+                                self.hello_retries.insert(result.peer_addr, 0);
+                                self.peers.insert(result.peer_addr, session);
+                            }
+                        }
+                    }
+                    self.file_transfers.insert(key, FileTransfer::OfferedWaiting {
+                        file_path: result.file_path,
+                        file_size: result.file_size,
+                        sha256,
+                        offered_at: Instant::now(),
+                    });
+                }
+            } else {
+                // Hash failed
+                self.file_transfers.remove(&key);
+                self.event_tx.send(super::MsgEvent::FileTransferFailed {
+                    contact_id: result.contact_id,
+                    transfer_id: result.transfer_id,
+                    reason: "Failed to hash file".into(),
+                }).ok();
+            }
+        }
+
+        // Drain verify results
+        while let Ok(result) = self.verify_results_rx.try_recv() {
+            if result.success {
+                self.event_tx.send(super::MsgEvent::FileTransferComplete {
+                    contact_id: result.contact_id,
+                    transfer_id: result.transfer_id,
+                    saved_path: result.saved_path.unwrap_or_default(),
+                }).ok();
+            } else {
+                self.event_tx.send(super::MsgEvent::FileTransferFailed {
+                    contact_id: result.contact_id,
+                    transfer_id: result.transfer_id,
+                    reason: "Hash verification failed".into(),
+                }).ok();
+            }
+        }
+
+        // Drain sender thread events
+        while let Ok(event) = self.sender_events_rx.try_recv() {
+            let key = (event.contact_id.clone(), event.transfer_id);
+            match event.kind {
+                crate::filetransfer::sender::SenderEventKind::Progress { bytes_sent, total } => {
+                    self.event_tx.send(super::MsgEvent::FileTransferProgress {
+                        contact_id: event.contact_id,
+                        transfer_id: event.transfer_id,
+                        bytes_transferred: bytes_sent,
+                        total_bytes: total,
+                    }).ok();
+                }
+                crate::filetransfer::sender::SenderEventKind::AllChunksSent => {
+                    // Send FILE_COMPLETE via the peer session
+                    if let Some(FileTransfer::SendingThreaded { sha256, complete_sent, complete_sent_at, .. }) = self.file_transfers.get_mut(&key) {
+                        if !*complete_sent {
+                            if let Some(addr) = self.contact_addrs.get(&event.contact_id) {
+                                if let Some(peer) = self.peers.get(addr) {
+                                    if let Some(ref socket) = self.socket {
+                                        filetransfer::protocol::send_file_complete(
+                                            peer, socket, event.transfer_id, sha256,
+                                        );
+                                    }
+                                }
+                            }
+                            *complete_sent = true;
+                            *complete_sent_at = Instant::now();
+                        }
+                    }
+                }
+                crate::filetransfer::sender::SenderEventKind::Done => {
+                    self.file_transfers.remove(&key);
+                    self.event_tx.send(super::MsgEvent::FileTransferComplete {
+                        contact_id: event.contact_id,
+                        transfer_id: event.transfer_id,
+                        saved_path: String::new(),
+                    }).ok();
+                }
+                crate::filetransfer::sender::SenderEventKind::Error(reason) => {
+                    self.file_transfers.remove(&key);
+                    self.event_tx.send(super::MsgEvent::FileTransferFailed {
+                        contact_id: event.contact_id,
+                        transfer_id: event.transfer_id,
+                        reason,
+                    }).ok();
                 }
             }
         }

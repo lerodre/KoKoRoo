@@ -2,11 +2,18 @@ use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::time::Instant;
 
 use sha2::{Digest, Sha256};
 
 use super::CHUNK_DATA_SIZE;
+
+pub enum WriterCmd {
+    Chunk(u32, Vec<u8>),
+    Flush,
+    Done,
+}
 
 /// ACK-on-Error receiver state.
 ///
@@ -27,8 +34,8 @@ pub struct ReceiverState {
     pub bytes_received: u64,
     /// Time of last chunk received.
     pub last_chunk_time: Instant,
-    /// Cached file writer (kept open for the entire transfer).
-    file_writer: Option<BufWriter<File>>,
+    /// Channel to the writer thread.
+    write_tx: Option<mpsc::SyncSender<WriterCmd>>,
 }
 
 impl ReceiverState {
@@ -54,12 +61,35 @@ impl ReceiverState {
             f.set_len(file_size).ok();
         }
 
-        // Open the file writer once and keep it open
-        let file_writer = OpenOptions::new()
-            .write(true)
-            .open(&temp_path)
-            .ok()
-            .map(|f| BufWriter::with_capacity(256 * 1024, f));
+        // Spawn writer thread that owns the BufWriter
+        let (write_tx, write_rx) = mpsc::sync_channel::<WriterCmd>(4096);
+        let temp_path_clone = temp_path.clone();
+        std::thread::spawn(move || {
+            let file_writer = OpenOptions::new()
+                .write(true)
+                .open(&temp_path_clone)
+                .ok()
+                .map(|f| BufWriter::with_capacity(256 * 1024, f));
+            if let Some(mut writer) = file_writer {
+                while let Ok(cmd) = write_rx.recv() {
+                    match cmd {
+                        WriterCmd::Chunk(chunk_index, data) => {
+                            let offset = chunk_index as u64 * CHUNK_DATA_SIZE as u64;
+                            if writer.seek(SeekFrom::Start(offset)).is_ok() {
+                                writer.write_all(&data).ok();
+                            }
+                        }
+                        WriterCmd::Flush => {
+                            writer.flush().ok();
+                        }
+                        WriterCmd::Done => {
+                            writer.flush().ok();
+                            break;
+                        }
+                    }
+                }
+            }
+        });
 
         ReceiverState {
             filename,
@@ -71,21 +101,18 @@ impl ReceiverState {
             contact_id,
             bytes_received: 0,
             last_chunk_time: Instant::now(),
-            file_writer,
+            write_tx: Some(write_tx),
         }
     }
 
-    /// Write a chunk to the temp file.
+    /// Write a chunk to the temp file via the writer thread.
     pub fn on_chunk(&mut self, chunk_index: u32, data: &[u8]) {
         if chunk_index >= self.total_chunks {
             return;
         }
 
-        if let Some(ref mut writer) = self.file_writer {
-            let offset = chunk_index as u64 * CHUNK_DATA_SIZE as u64;
-            if writer.seek(SeekFrom::Start(offset)).is_ok() {
-                writer.write_all(data).ok();
-            }
+        if let Some(ref tx) = self.write_tx {
+            tx.send(WriterCmd::Chunk(chunk_index, data.to_vec())).ok();
         }
 
         if self.received.insert(chunk_index) {
@@ -96,8 +123,8 @@ impl ReceiverState {
 
     /// Flush the writer before verification or finalization.
     pub fn flush(&mut self) {
-        if let Some(ref mut writer) = self.file_writer {
-            writer.flush().ok();
+        if let Some(ref tx) = self.write_tx {
+            tx.send(WriterCmd::Flush).ok();
         }
     }
 
@@ -119,8 +146,12 @@ impl ReceiverState {
 
     /// Verify the SHA-256 hash of the received file. Returns true if it matches.
     pub fn verify_hash(&mut self) -> bool {
-        // Flush and close the writer before reading back
-        self.file_writer.take();
+        // Close the writer thread before reading back
+        if let Some(tx) = self.write_tx.take() {
+            tx.send(WriterCmd::Done).ok();
+            // Give the writer thread a moment to finish
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
 
         let mut hasher = Sha256::new();
         if let Ok(mut file) = File::open(&self.temp_path) {
@@ -141,8 +172,11 @@ impl ReceiverState {
 
     /// Move the temp file to its final destination.
     pub fn finalize(&mut self) -> Option<String> {
-        // Ensure writer is closed before renaming
-        self.file_writer.take();
+        // Ensure writer thread is closed before renaming
+        if let Some(tx) = self.write_tx.take() {
+            tx.send(WriterCmd::Done).ok();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
 
         let dest_dir = files_dir().join(&self.contact_id);
         fs::create_dir_all(&dest_dir).ok()?;
@@ -177,7 +211,11 @@ impl ReceiverState {
 
     /// Clean up temp file on cancel/failure.
     pub fn cleanup(&mut self) {
-        self.file_writer.take(); // close handle first
+        // Close writer thread first
+        if let Some(tx) = self.write_tx.take() {
+            tx.send(WriterCmd::Done).ok();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         fs::remove_file(&self.temp_path).ok();
     }
 }
