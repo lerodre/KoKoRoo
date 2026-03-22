@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build & Run Commands
 
 ```bash
-cargo build --release          # Production build → ./target/release/hostelD
+cargo build --release          # Production build → ./target/release/kokoroo
 cargo build                    # Debug build
 cargo run                      # Run GUI (default mode)
 cargo run -- tui               # Terminal UI
@@ -73,7 +73,7 @@ The `Cargo.toml` file is `.gitignore`d and managed per-OS. Copy the right varian
 
 ## Architecture
 
-hostelD is a P2P encrypted voice + chat application over IPv6 UDP with no central server. Rust, ~2k LoC across 9 modules.
+KoKoRoo is a P2P encrypted voice + chat application over IPv6 UDP with no central server. Rust, ~2k LoC across 9 modules.
 
 ### Module responsibilities
 
@@ -81,8 +81,8 @@ hostelD is a P2P encrypted voice + chat application over IPv6 UDP with no centra
 - **`voice.rs`** — Core engine orchestrating the entire session: handshake, identity exchange, sender/receiver threads, audio streams, and chat message handling. All other modules are driven from here.
 - **`crypto.rs`** — E2E encryption: X25519 key exchange → shared secret → ChaCha20-Poly1305 session cipher. Also handles local-storage encryption for chat history at rest.
 - **`audio.rs`** — Cross-platform audio via cpal (ALSA/PipeWire on Linux, CoreAudio on macOS, WASAPI on Windows). Mono 48kHz f32 samples through a lock-free ring buffer.
-- **`identity.rs`** — Persistent X25519 keypair (`~/.hostelD/identity.key`), fingerprints (`hD-XXXXXXXX`), and JSON contact management.
-- **`chat.rs`** — Encrypted chat history stored per-contact at `~/.hostelD/chats/{contact_id}.enc`.
+- **`identity.rs`** — Persistent X25519 keypair (`~/.kokoroo/identity.key`), fingerprints (`KR-XXXXXXXX`), and JSON contact management.
+- **`chat.rs`** — Encrypted chat history stored per-contact at `~/.kokoroo/chats/{contact_id}.enc`.
 - **`firewall.rs`** — Per-IP rate limiting (>200 pkt/sec = strike) and auto-blacklist (5 strikes).
 - **`gui.rs`** — Desktop GUI with eframe/egui. State machine: Setup → Connecting → InCall → Error.
 - **`ui.rs`** — Terminal UI with crossterm. Arrow-key menus, text input, live call screen.
@@ -110,13 +110,13 @@ A call spawns 4 concurrent paths:
 1. Both peers generate ephemeral X25519 keypairs
 2. Exchange HELLO packets (retry up to 60×500ms)
 3. X25519 DH → shared secret
-4. Session key = SHA-256(shared_secret ‖ "hostelD-voice-key")
-5. Verification code = SHA-256(shared_secret ‖ "hostelD-verify") → formatted XXXX-XXXX
+4. Session key = SHA-256(shared_secret ‖ "kokoroo-voice-key")
+5. Verification code = SHA-256(shared_secret ‖ "kokoroo-verify") → formatted XXXX-XXXX
 
 ### Local data layout
 
 ```
-~/.hostelD/
+~/.kokoroo/
 ├── identity.key              # 64 bytes: 32 secret + 32 public (0600 perms on Unix)
 ├── settings.json             # Nickname, mic, speakers, port preferences
 ├── contacts/{pubkey_hex}.json  # One file per peer (64-char hex = collision-proof)

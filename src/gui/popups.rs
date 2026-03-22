@@ -123,7 +123,7 @@ impl HostelApp {
                     } else {
                         ui.label(
                             egui::RichText::new(format!(
-                                "hostelD needs to open UDP port {} in the firewall", port
+                                "KoKoRoo needs to open UDP port {} in the firewall", port
                             ))
                             .size(15.0),
                         );

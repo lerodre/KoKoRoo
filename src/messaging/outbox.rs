@@ -22,7 +22,7 @@ pub struct Outbox {
 
 fn outbox_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".hostelD").join("outbox")
+    PathBuf::from(home).join(".kokoroo").join("outbox")
 }
 
 impl Outbox {

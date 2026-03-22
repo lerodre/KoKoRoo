@@ -1,7 +1,7 @@
 //! Windows WASAPI process-excluded audio loopback capture.
 //!
 //! Uses the Application Loopback API (Windows 10 Build 20348+) to capture
-//! all system audio EXCEPT hostelD's own output, preventing voice echo loops
+//! all system audio EXCEPT KoKoRoo's own output, preventing voice echo loops
 //! when sharing system audio during calls.
 
 use ringbuf::traits::Producer;

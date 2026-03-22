@@ -17,7 +17,7 @@ fn data_dir() -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".hostelD")
+    PathBuf::from(home).join(".kokoroo")
 }
 
 /// Path to our own avatar.
@@ -81,14 +81,14 @@ pub fn validate_received_avatar(data: &[u8]) -> bool {
     }
 }
 
-/// Save our own avatar PNG to ~/.hostelD/avatar.png.
+/// Save our own avatar PNG to ~/.kokoroo/avatar.png.
 pub fn save_own_avatar(data: &[u8]) -> Result<(), String> {
     let dir = data_dir();
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
     fs::write(own_avatar_path(), data).map_err(|e| format!("write: {e}"))
 }
 
-/// Save a contact's avatar PNG to ~/.hostelD/avatars/{contact_id}.png.
+/// Save a contact's avatar PNG to ~/.kokoroo/avatars/{contact_id}.png.
 pub fn save_contact_avatar(contact_id: &str, data: &[u8]) -> Result<(), String> {
     let dir = data_dir().join("avatars");
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
@@ -122,7 +122,7 @@ pub fn group_avatar_path(group_id: &str) -> PathBuf {
     data_dir().join("groups").join("avatars").join(format!("{group_id}.png"))
 }
 
-/// Save a group's avatar PNG to ~/.hostelD/groups/avatars/{group_id}.png.
+/// Save a group's avatar PNG to ~/.kokoroo/groups/avatars/{group_id}.png.
 pub fn save_group_avatar(group_id: &str, data: &[u8]) -> Result<(), String> {
     let dir = data_dir().join("groups").join("avatars");
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;

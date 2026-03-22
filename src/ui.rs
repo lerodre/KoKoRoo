@@ -48,7 +48,7 @@ fn select_menu(title: &str, items: &[String]) -> usize {
 
     loop {
         print!("\x1b[2J\x1b[H");
-        println!("\x1b[1;36m=== hostelD — Secure P2P Voice ===\x1b[0m\r");
+        println!("\x1b[1;36m=== KoKoRoo — Secure P2P Voice ===\x1b[0m\r");
         println!("\r");
         println!("\x1b[1m{title}\x1b[0m\r");
         println!("\x1b[90m(Arrow keys to move, Enter to select, Q to quit)\x1b[0m\r");
@@ -157,7 +157,7 @@ pub fn run() {
 
     // ── Step 5: Connection Details ──
     print!("\x1b[2J\x1b[H");
-    println!("\x1b[1;36m=== hostelD — Connection Setup ===\x1b[0m");
+    println!("\x1b[1;36m=== KoKoRoo — Connection Setup ===\x1b[0m");
     println!();
     if is_internet {
         println!("\x1b[1;33m! Internet mode: make sure port is open in your firewall\x1b[0m");
@@ -205,7 +205,7 @@ pub fn run() {
         }
         Err(e) => {
             eprintln!("\x1b[1;31mFailed: {e}\x1b[0m");
-            eprintln!("Make sure your peer is also running hostelD.");
+            eprintln!("Make sure your peer is also running KoKoRoo.");
             return;
         }
     };
@@ -254,7 +254,7 @@ fn draw_call_screen(peer: &str, port: &str, internet: bool, verify_code: &str, m
     let lock = "\x1b[1;32mENCRYPTED\x1b[0m";
 
     println!("\x1b[1;36m╔════════════════════════════════════════════╗\x1b[0m\r");
-    println!("\x1b[1;36m║        hostelD — Secure Voice Call         ║\x1b[0m\r");
+    println!("\x1b[1;36m║        KoKoRoo — Secure Voice Call         ║\x1b[0m\r");
     println!("\x1b[1;36m╠════════════════════════════════════════════╣\x1b[0m\r");
     println!("\x1b[1;36m║\x1b[0m  Peer:   {:<33}\x1b[1;36m║\x1b[0m\r", peer);
     println!("\x1b[1;36m║\x1b[0m  Port:   {:<33}\x1b[1;36m║\x1b[0m\r", port);

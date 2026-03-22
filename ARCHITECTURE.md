@@ -1,4 +1,4 @@
-# hostelD — Architecture
+# KoKoRoo — Architecture
 
 ~23K LoC Rust. 9 core modules + GUI + messaging daemon + group call engine + file transfer system.
 
@@ -129,18 +129,18 @@ Background threads spawned per-transfer:
 ```
 Ephemeral X25519 keypair (per session)
     DH(secret, peer_public) → shared_secret
-    SHA-256(secret || "hostelD-voice-key") → session key
-    SHA-256(secret || "hostelD-verify")    → XXXX-XXXX verification code
+    SHA-256(secret || "kokoroo-voice-key") → session key
+    SHA-256(secret || "kokoroo-verify")    → XXXX-XXXX verification code
 
 Known contacts: upgrade with identity DH
-    SHA-256(ephemeral_DH || identity_DH || "hostelD-msg-key") → upgraded key
+    SHA-256(ephemeral_DH || identity_DH || "kokoroo-msg-key") → upgraded key
     Both send CONFIRM encrypted with upgraded key to prove identity
 ```
 
 ## Data Storage
 
 ```
-~/.hostelD/
+~/.kokoroo/
 ├── identity.key                    # 64B: 32 secret + 32 public (0600 perms)
 ├── settings.json                   # Nickname, devices, port, theme, bans
 ├── contacts/{pubkey_hex}.json      # One file per contact

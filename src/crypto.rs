@@ -143,20 +143,20 @@ pub fn complete_handshake(our_secret: EphemeralSecret, peer_pubkey: &[u8; 32]) -
     let shared: SharedSecret = our_secret.diffie_hellman(&peer_public);
     let ephemeral_shared = *shared.as_bytes();
 
-    // Derive encryption key: SHA-256(shared_secret || "hostelD-voice-key")
+    // Derive encryption key: SHA-256(shared_secret || "kokoroo-voice-key")
     let mut hasher = Sha256::new();
     hasher.update(shared.as_bytes());
-    hasher.update(b"hostelD-voice-key");
+    hasher.update(b"kokoroo-voice-key");
     let key_bytes = hasher.finalize();
 
     let cipher = ChaCha20Poly1305::new_from_slice(&key_bytes)
         .expect("key size mismatch");
 
-    // Verification code: SHA-256(shared_secret || "hostelD-verify")
+    // Verification code: SHA-256(shared_secret || "kokoroo-verify")
     // Display as XXXX-XXXX so users can compare verbally.
     let mut verify_hasher = Sha256::new();
     verify_hasher.update(shared.as_bytes());
-    verify_hasher.update(b"hostelD-verify");
+    verify_hasher.update(b"kokoroo-verify");
     let verify_hash = verify_hasher.finalize();
     let code = format!(
         "{:02X}{:02X}-{:02X}{:02X}",
@@ -181,21 +181,21 @@ pub fn upgrade_session_with_identity(
     let peer_identity_public = PublicKey::from(*peer_identity_pubkey);
     let identity_dh = identity_secret.diffie_hellman(&peer_identity_public);
 
-    // Derive upgraded key: SHA-256(ephemeral_shared || identity_DH || "hostelD-msg-key")
+    // Derive upgraded key: SHA-256(ephemeral_shared || identity_DH || "kokoroo-msg-key")
     let mut hasher = Sha256::new();
     hasher.update(ephemeral_shared);
     hasher.update(identity_dh.as_bytes());
-    hasher.update(b"hostelD-msg-key");
+    hasher.update(b"kokoroo-msg-key");
     let key_bytes = hasher.finalize();
 
     let cipher = ChaCha20Poly1305::new_from_slice(&key_bytes)
         .expect("key size mismatch");
 
-    // Upgraded verification: SHA-256(ephemeral_shared || identity_DH || "hostelD-verify")
+    // Upgraded verification: SHA-256(ephemeral_shared || identity_DH || "kokoroo-verify")
     let mut verify_hasher = Sha256::new();
     verify_hasher.update(ephemeral_shared);
     verify_hasher.update(identity_dh.as_bytes());
-    verify_hasher.update(b"hostelD-verify");
+    verify_hasher.update(b"kokoroo-verify");
     let verify_hash = verify_hasher.finalize();
     let code = format!(
         "{:02X}{:02X}-{:02X}{:02X}",
@@ -267,7 +267,7 @@ impl Session {
 pub fn derive_storage_key(identity_secret: &[u8; 32]) -> ChaCha20Poly1305 {
     let mut hasher = Sha256::new();
     hasher.update(identity_secret);
-    hasher.update(b"hostelD-local-storage");
+    hasher.update(b"kokoroo-local-storage");
     let key = hasher.finalize();
     ChaCha20Poly1305::new_from_slice(&key).expect("key size mismatch")
 }
@@ -297,13 +297,13 @@ pub fn decrypt_local(cipher: &ChaCha20Poly1305, data: &[u8]) -> Option<Vec<u8>> 
     cipher.decrypt(nonce, ciphertext).ok()
 }
 
-/// Derive a short fingerprint from a public key: "hD-XXXXXXXX"
+/// Derive a short fingerprint from a public key: "KR-XXXXXXXX"
 pub fn fingerprint(pubkey: &[u8; 32]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(pubkey);
-    hasher.update(b"hostelD-fingerprint");
+    hasher.update(b"kokoroo-fingerprint");
     let hash = hasher.finalize();
-    format!("hD-{:02X}{:02X}{:02X}{:02X}", hash[0], hash[1], hash[2], hash[3])
+    format!("KR-{:02X}{:02X}{:02X}{:02X}", hash[0], hash[1], hash[2], hash[3])
 }
 
 // ── Group encryption (shared key with sender_index-based nonces) ──

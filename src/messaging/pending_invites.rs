@@ -21,7 +21,7 @@ pub struct PendingInviteStore {
 
 fn pending_invites_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".hostelD").join("pending_invites")
+    PathBuf::from(home).join(".kokoroo").join("pending_invites")
 }
 
 impl PendingInviteStore {

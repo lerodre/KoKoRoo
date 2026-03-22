@@ -40,7 +40,7 @@ pub fn call(peer_ip: &str, peer_port: &str, local_port: &str) {
 
     let identity = Identity::load_or_create();
     let settings = identity::Settings::load();
-    println!("=== hostelD Secure Voice Call ===");
+    println!("=== KoKoRoo Secure Voice Call ===");
     println!("Identity: {}", identity.fingerprint);
     if !settings.nickname.is_empty() {
         println!("Nickname: {}", settings.nickname);

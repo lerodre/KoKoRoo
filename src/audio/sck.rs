@@ -98,7 +98,7 @@ struct AudioOutputIvars {
 define_class!(
     #[unsafe(super(NSObject))]
     #[ivars = AudioOutputIvars]
-    #[name = "HostelDAudioOutput"]
+    #[name = "KoKoRooAudioOutput"]
     struct AudioOutputHandler;
 
     unsafe impl NSObjectProtocol for AudioOutputHandler {}

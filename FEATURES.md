@@ -1,4 +1,4 @@
-# hostelD — Features
+# KoKoRoo — Features
 
 P2P encrypted voice + chat + file transfer + screen sharing. No servers. No accounts. Direct IPv6 UDP.
 
@@ -8,7 +8,7 @@ P2P encrypted voice + chat + file transfer + screen sharing. No servers. No acco
 
 - **E2E encryption on everything** — Voice, chat, files, screen sharing encrypted with ChaCha20-Poly1305. Nothing travels in plaintext.
 - **X25519 key exchange** — Ephemeral keypairs per session. Shared secret derived via Diffie-Hellman.
-- **Identity-bound authentication** — For known contacts, session key upgraded with identity DH: `SHA-256(ephemeral_DH || identity_DH || "hostelD-msg-key")`. Proves private key ownership. Prevents impersonation even if attacker knows a contact's public key.
+- **Identity-bound authentication** — For known contacts, session key upgraded with identity DH: `SHA-256(ephemeral_DH || identity_DH || "kokoroo-msg-key")`. Proves private key ownership. Prevents impersonation even if attacker knows a contact's public key.
 - **PKT_MSG_CONFIRM handshake** — After IDENTITY exchange, both peers send CONFIRM encrypted with the upgraded key. Successful decrypt = identity verified. New contacts (TOFU) stay on ephemeral-only key.
 - **Per-packet counter nonce** — Each packet gets a unique nonce. Prevents replay attacks.
 - **TOFU trust model** — Trust peer on first contact. If their key changes later, show a warning.
@@ -16,9 +16,9 @@ P2P encrypted voice + chat + file transfer + screen sharing. No servers. No acco
 - **Nickname spoofing detection** — If a new key claims a known nickname, warn the user.
 - **Same-address impersonation detection** — Unknown key from known contact's IP triggers warning.
 - **Verification code** — 8-hex-digit code (XXXX-XXXX) derived from shared secret. Both peers see the same code. Verify verbally to detect MITM.
-- **Encrypted chat history on disk** — Saved chats encrypted with key derived from identity secret. Stored at `~/.hostelD/chats/{id}.enc`.
-- **Identity key stored locally** — 64-byte file at `~/.hostelD/identity.key`. Permissions 0600 (user-only). Never leaves the device.
-- **Fingerprint** — Short identifier (hD-XXXXXXXX) derived from public key. Used to recognize contacts.
+- **Encrypted chat history on disk** — Saved chats encrypted with key derived from identity secret. Stored at `~/.kokoroo/chats/{id}.enc`.
+- **Identity key stored locally** — 64-byte file at `~/.kokoroo/identity.key`. Permissions 0600 (user-only). Never leaves the device.
+- **Fingerprint** — Short identifier (KR-XXXXXXXX) derived from public key. Used to recognize contacts.
 
 ## Firewall & Rate Limiting
 
@@ -116,7 +116,7 @@ P2P encrypted voice + chat + file transfer + screen sharing. No servers. No acco
 
 ## Contacts
 
-- **Contact list** — Saved per-peer as JSON in `~/.hostelD/contacts/`. Keyed by full pubkey hex (no collisions).
+- **Contact list** — Saved per-peer as JSON in `~/.kokoroo/contacts/`. Keyed by full pubkey hex (no collisions).
 - **Contact info** — Stores fingerprint, nickname, pubkey, last IP, last port, first seen, last seen, call count.
 - **Contact search/filter** — Search by nickname or fingerprint in contact list.
 - **Contact blocking** — Block a contact's pubkey + IP. Appears with strikethrough in list.
@@ -132,7 +132,7 @@ P2P encrypted voice + chat + file transfer + screen sharing. No servers. No acco
 - **No accounts** — No registration, login, email, or phone number. Identity is a local keypair.
 - **IP censoring in UI** — IPs hidden by default (e.g., "2803:****"). Toggle to reveal.
 - **No telemetry** — No analytics, metrics, or tracking of any kind.
-- **Local-only logging** — Debug logs written to `~/.hostelD/hostelD_log.txt`. Never sent anywhere.
+- **Local-only logging** — Debug logs written to `~/.kokoroo/kokoroo_log.txt`. Never sent anywhere.
 
 ## UI
 
@@ -158,13 +158,13 @@ P2P encrypted voice + chat + file transfer + screen sharing. No servers. No acco
 
 ## CLI Modes
 
-- `hostelD` — Launch GUI (default).
-- `hostelD tui` — Launch terminal UI.
-- `hostelD call <ip> <port> <local-port>` — Direct voice call without GUI.
-- `hostelD devices` — List available audio devices.
-- `hostelD mic-test` — Mic loopback test (hear yourself).
-- `hostelD listen <port>` — UDP echo server (network debug).
-- `hostelD send <ip> <port> <msg>` — Send UDP packet and wait for reply (network debug).
+- `kokoroo` — Launch GUI (default).
+- `kokoroo tui` — Launch terminal UI.
+- `kokoroo call <ip> <port> <local-port>` — Direct voice call without GUI.
+- `kokoroo devices` — List available audio devices.
+- `kokoroo mic-test` — Mic loopback test (hear yourself).
+- `kokoroo listen <port>` — UDP echo server (network debug).
+- `kokoroo send <ip> <port> <msg>` — Send UDP packet and wait for reply (network debug).
 
 ## Packet Protocol
 
@@ -203,7 +203,7 @@ P2P encrypted voice + chat + file transfer + screen sharing. No servers. No acco
 ## Data Layout
 
 ```
-~/.hostelD/
+~/.kokoroo/
   identity.key                      # 64 bytes: 32 secret + 32 public (0600)
   settings.json                     # Nickname, devices, port, theme, banned IPs
   contacts/{pubkey_hex}.json        # One file per contact
@@ -215,5 +215,5 @@ P2P encrypted voice + chat + file transfer + screen sharing. No servers. No acco
   avatars/group_{group_id}.png      # Group avatars
   files/{contact_id}/               # Received files
   files_tmp/                        # In-progress transfers
-  hostelD_log.txt                   # Debug log
+  kokoroo_log.txt                   # Debug log
 ```

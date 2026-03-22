@@ -396,7 +396,7 @@ impl HostelApp {
 
         let needs_firewall_prompt = settings.firewall_port != local_port;
 
-        // Write embedded notification sound to ~/.hostelD/ if missing
+        // Write embedded notification sound to ~/.kokoroo/ if missing
         notifications::ensure_notification_sound();
 
         Self {
@@ -1274,7 +1274,7 @@ impl eframe::App for HostelApp {
                         if matches!(self.screen, Screen::Setup) {
                             // OS-level desktop notification
                             send_desktop_notification(
-                                "hostelD — Incoming Call",
+                                "KoKoRoo — Incoming Call",
                                 &format_peer_display(&nickname, &fingerprint),
                             );
 
@@ -1296,7 +1296,7 @@ impl eframe::App for HostelApp {
                                 log_fmt!("[gui] group invite from {}: '{}' ({} members)",
                                     from_nickname, lite.name, lite.member_count);
                                 send_desktop_notification(
-                                    "hostelD — Group Invitation",
+                                    "KoKoRoo — Group Invitation",
                                     &format!("{} invited you to '{}'", from_nickname, lite.name),
                                 );
                                 self.incoming_group_invite = Some(IncomingGroupInviteInfo {
@@ -1674,24 +1674,24 @@ pub fn run() {
             .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share")))
         {
             let icon_dir = data_home.join("icons/hicolor/512x512/apps");
-            let icon_path = icon_dir.join("hostelD.png");
+            let icon_path = icon_dir.join("kokoroo.png");
             if !icon_path.exists() {
                 let _ = std::fs::create_dir_all(&icon_dir);
                 let _ = std::fs::write(&icon_path, logo_bytes);
             }
             let desktop_dir = data_home.join("applications");
-            let desktop_path = desktop_dir.join("hostelD.desktop");
+            let desktop_path = desktop_dir.join("kokoroo.desktop");
             if !desktop_path.exists() {
                 let _ = std::fs::create_dir_all(&desktop_dir);
                 let desktop_entry = "[Desktop Entry]\n\
                     Type=Application\n\
-                    Name=hostelD\n\
+                    Name=KoKoRoo\n\
                     Comment=Secure P2P Voice + Chat + Screen\n\
-                    Icon=hostelD\n\
-                    Exec=hostelD\n\
+                    Icon=kokoroo\n\
+                    Exec=kokoroo\n\
                     Terminal=false\n\
                     Categories=Network;InstantMessaging;\n\
-                    StartupWMClass=hostelD\n";
+                    StartupWMClass=kokoroo\n";
                 let _ = std::fs::write(&desktop_path, desktop_entry);
             }
         }
@@ -1705,14 +1705,14 @@ pub fn run() {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([884.0, 750.0])
             .with_min_inner_size([484.0, 600.0])
-            .with_title("hostelD — Secure P2P Voice + Chat + Screen")
+            .with_title("KoKoRoo — Secure P2P Voice + Chat + Screen")
             .with_icon(std::sync::Arc::new(icon))
             .with_drag_and_drop(true)
-            .with_app_id("hostelD".to_string()),
+            .with_app_id("kokoroo".to_string()),
         ..Default::default()
     };
     eframe::run_native(
-        "hostelD",
+        "KoKoRoo",
         options,
         Box::new(|cc| Ok(Box::new(HostelApp::new(cc)))),
     ).expect("Failed to start GUI");

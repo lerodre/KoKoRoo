@@ -248,7 +248,7 @@ impl HostelApp {
 
         // ── Top bar: status ──
         ui.horizontal(|ui| {
-            ui.heading("hostelD");
+            ui.heading("KoKoRoo");
             ui.separator();
             ui.colored_label(self.settings.theme.accent(), "ENCRYPTED");
             ui.separator();

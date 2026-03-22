@@ -224,12 +224,12 @@ fn files_dir() -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".hostelD").join("files")
+    PathBuf::from(home).join(".kokoroo").join("files")
 }
 
 fn files_tmp_dir() -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".hostelD").join("files_tmp")
+    PathBuf::from(home).join(".kokoroo").join("files_tmp")
 }

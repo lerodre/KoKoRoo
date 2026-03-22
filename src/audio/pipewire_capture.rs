@@ -1,13 +1,13 @@
 //! Linux PipeWire system audio capture with process exclusion.
 //!
-//! Captures all system audio EXCEPT hostelD's own playback, preventing
+//! Captures all system audio EXCEPT KoKoRoo's own playback, preventing
 //! the peer's voice from being echoed back during screen sharing.
 //!
 //! Architecture:
 //!   1. Create a virtual null-audio-sink ("capture mixer")
 //!   2. Create a capture stream that AUTOCONNECTS to the mixer's monitor
 //!   3. Monitor the registry for audio output nodes AND their ports
-//!   4. Link non-hostelD output ports → mixer input ports (explicit port IDs)
+//!   4. Link non-KoKoRoo output ports → mixer input ports (explicit port IDs)
 //!   5. Process callback downmixes stereo f32 → mono → ring buffer
 
 use ringbuf::traits::Producer;
@@ -85,7 +85,7 @@ pub fn start_capture(
     )
 }
 
-const MIXER_NODE_NAME: &str = "hostelD-capture-mixer";
+const MIXER_NODE_NAME: &str = "kokoroo-capture-mixer";
 
 /// Port info tracked from the registry.
 #[derive(Clone, Debug)]
@@ -197,7 +197,7 @@ fn capture_thread(
             &pipewire::properties::properties! {
                 "factory.name" => "support.null-audio-sink",
                 "node.name" => MIXER_NODE_NAME,
-                "node.description" => "hostelD Capture Mixer",
+                "node.description" => "KoKoRoo Capture Mixer",
                 "media.class" => "Audio/Sink",
                 "audio.channels" => "2",
                 "audio.rate" => "48000",
@@ -211,12 +211,12 @@ fn capture_thread(
     // ── Step 2: Create capture stream targeting the mixer ──
     let stream = pw::stream::StreamBox::new(
         &core,
-        "hostelD-audio-capture",
+        "kokoroo-audio-capture",
         pipewire::properties::properties! {
             *pw::keys::MEDIA_TYPE => "Audio",
             *pw::keys::MEDIA_CATEGORY => "Capture",
             *pw::keys::MEDIA_ROLE => "Communication",
-            *pw::keys::NODE_NAME => "hostelD-system-capture",
+            *pw::keys::NODE_NAME => "kokoroo-system-capture",
             "media.class" => "Stream/Input/Audio",
             "stream.capture.sink" => "true",
             "node.target" => MIXER_NODE_NAME,
@@ -372,10 +372,10 @@ fn capture_thread(
                         .get("application.name")
                         .unwrap_or("unknown");
 
-                    // Also check node.name for hostelD
+                    // Also check node.name for KoKoRoo
                     let node_name = props.get("node.name").unwrap_or("");
                     let is_self = node_pid == our_pid
-                        || (node_pid == 0 && node_name.contains("hostelD"));
+                        || (node_pid == 0 && node_name.contains("KoKoRoo"));
 
                     if is_self {
                         log_fmt!(

@@ -1,4 +1,4 @@
-# hostelD
+# KoKoRoo
 
 > **Alpha software.** Built with [Claude Code](https://claude.ai/code). Functional but under active development. Expect bugs and breaking changes.
 
@@ -15,7 +15,7 @@ P2P encrypted voice, chat, groups, file transfer, and screen sharing over IPv6 U
 
 ## Networking
 
-hostelD requires IPv6 between peers. If your ISP doesn't provide IPv6 or you want a private network, use an overlay like [ZeroTier](https://zerotier.com) or [Tailscale](https://tailscale.com). Both provide IPv6 addresses that work with hostelD out of the box and give you control over who can reach your node.
+KoKoRoo requires IPv6 between peers. If your ISP doesn't provide IPv6 or you want a private network, use an overlay like [ZeroTier](https://zerotier.com) or [Tailscale](https://tailscale.com). Both provide IPv6 addresses that work with KoKoRoo out of the box and give you control over who can reach your node.
 
 Without an overlay, anyone with your IPv6 address and port can attempt to connect. **Be careful who you add as a contact.**
 
@@ -39,10 +39,10 @@ Without an overlay, anyone with your IPv6 address and port can attempt to connec
 
 ```powershell
 # Prerequisites: Visual Studio Build Tools ("Desktop dev with C++"), CMake, Rust
-git clone https://github.com/lerodre/hostelD.git && cd hostelD
+git clone https://github.com/lerodre/KoKoRoo.git && cd KoKoRoo
 copy Cargo.toml.windows Cargo.toml
 cargo build --release
-.\target\release\hostelD.exe
+.\target\release\kokoroo.exe
 ```
 
 For screen sharing, install libvpx via vcpkg and set `VPX_LIB_DIR`, `VPX_INCLUDE_DIR`, `VPX_VERSION` env vars. See [ARCHITECTURE.md](ARCHITECTURE.md) for details.
@@ -53,10 +53,10 @@ For screen sharing, install libvpx via vcpkg and set `VPX_LIB_DIR`, `VPX_INCLUDE
 # Prerequisites: Xcode CLI tools, Homebrew
 brew install cmake opus libvpx pkg-config
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-git clone https://github.com/lerodre/hostelD.git && cd hostelD
+git clone https://github.com/lerodre/KoKoRoo.git && cd KoKoRoo
 cp Cargo.toml.macos Cargo.toml
 cargo build --release
-./target/release/hostelD
+./target/release/kokoroo
 ```
 
 ### Linux
@@ -65,10 +65,10 @@ cargo build --release
 sudo apt install build-essential pkg-config cmake libasound2-dev libopus-dev \
     libvpx-dev libxkbcommon-dev libgtk-3-dev libgl1-mesa-dev libegl1-mesa-dev
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-git clone https://github.com/lerodre/hostelD.git && cd hostelD
+git clone https://github.com/lerodre/KoKoRoo.git && cd KoKoRoo
 cp Cargo.toml.linux Cargo.toml
 cargo build --release
-./target/release/hostelD
+./target/release/kokoroo
 ```
 
 > **Note:** `Cargo.toml` is per-platform (`.gitignore`d). Always copy the right variant before building.
@@ -76,11 +76,11 @@ cargo build --release
 ## CLI
 
 ```
-hostelD              # GUI (default)
-hostelD tui          # Terminal UI
-hostelD call <ip> <port> <local-port>
-hostelD devices      # List audio devices
-hostelD mic-test     # Audio loopback test
+kokoroo              # GUI (default)
+kokoroo tui          # Terminal UI
+kokoroo call <ip> <port> <local-port>
+kokoroo devices      # List audio devices
+kokoroo mic-test     # Audio loopback test
 ```
 
 ## Security

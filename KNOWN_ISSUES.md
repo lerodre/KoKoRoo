@@ -1,6 +1,6 @@
 # Known Issues & Security Weaknesses
 
-Known issues, platform bugs, and security weaknesses in hostelD.
+Known issues, platform bugs, and security weaknesses in KoKoRoo.
 
 ---
 
@@ -20,7 +20,7 @@ Video frames arrive corrupted on the receiver side when sharing screen or webcam
 
 **Risk: HIGH**
 
-The file `~/.hostelD/identity.key` (64 bytes: 32 secret + 32 public) controls everything:
+The file `~/.kokoroo/identity.key` (64 bytes: 32 secret + 32 public) controls everything:
 - Decrypts all locally stored chats (`.enc` files)
 - Allows impersonating the user in calls and messages (X25519 keypair)
 - Derives the local storage encryption key via `crypto::derive_storage_key`
@@ -127,7 +127,7 @@ The `group_key` travels in a `PKT_GRP_INVITE` packet encrypted with the 1:1 E2E 
 
 **Risk: LOW (non-technical)**
 
-An active group member could copy the `group_key` and share it outside hostelD with unauthorized people. This is a human trust problem, not a technical one.
+An active group member could copy the `group_key` and share it outside KoKoRoo with unauthorized people. This is a human trust problem, not a technical one.
 
 **Mitigation:** Only invite trusted people. Kick and rotate key if leakage is suspected.
 
@@ -137,7 +137,7 @@ An active group member could copy the `group_key` and share it outside hostelD w
 
 **Risk: MEDIUM**
 
-The `.enc` files in `~/.hostelD/chats/` are encrypted with ChaCha20-Poly1305, but the key is derived from `identity.key` which is in the same directory.
+The `.enc` files in `~/.kokoroo/chats/` are encrypted with ChaCha20-Poly1305, but the key is derived from `identity.key` which is in the same directory.
 
 **Impact:** Any process running as the user can read `identity.key`, derive the storage key, and decrypt all chats.
 
@@ -149,13 +149,13 @@ The `.enc` files in `~/.hostelD/chats/` are encrypted with ChaCha20-Poly1305, bu
 
 **Risk: LOW**
 
-hostelD uses UDP over IPv6. Although content is encrypted, a network observer can see:
+KoKoRoo uses UDP over IPv6. Although content is encrypted, a network observer can see:
 - That two IPs are communicating
 - When a call starts and ends (from packet patterns)
 - Approximate group size (from packet volume)
 - That screen sharing is active (larger and more frequent packets)
 
-**Mitigation:** Use a VPN or overlay network (like Tailscale/ZeroTier, which hostelD already supports for IPv6).
+**Mitigation:** Use a VPN or overlay network (like Tailscale/ZeroTier, which KoKoRoo already supports for IPv6).
 
 ---
 
@@ -185,7 +185,7 @@ Currently `group_key` rotation only happens when an admin **kicks** a member. If
 
 **Risk: MEDIUM**
 
-Group files (`~/.hostelD/groups/{id}.json`) are stored as plaintext JSON. They contain:
+Group files (`~/.kokoroo/groups/{id}.json`) are stored as plaintext JSON. They contain:
 - The `group_key` in hex format
 - Member list with pubkeys, nicknames, IPs
 - Channel configuration

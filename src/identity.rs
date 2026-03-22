@@ -6,10 +6,10 @@ use std::path::PathBuf;
 use crate::crypto;
 use crate::theme::Theme;
 
-/// Where hostelD stores its data.
+/// Where KoKoRoo stores its data.
 fn data_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".hostelD")
+    PathBuf::from(home).join(".kokoroo")
 }
 
 /// Our persistent identity: a static X25519 keypair stored on disk.
@@ -51,7 +51,7 @@ impl Identity {
             let fingerprint = crypto::fingerprint(&pubkey);
 
             // Save to disk
-            fs::create_dir_all(&dir).expect("Failed to create ~/.hostelD");
+            fs::create_dir_all(&dir).expect("Failed to create ~/.kokoroo");
             let mut data = Vec::with_capacity(64);
             data.extend_from_slice(&secret);
             data.extend_from_slice(&pubkey);
@@ -102,7 +102,7 @@ pub fn derive_contact_id(pubkey_a: &[u8; 32], pubkey_b: &[u8; 32]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(first);
     hasher.update(second);
-    hasher.update(b"hostelD-contact-id");
+    hasher.update(b"kokoroo-contact-id");
     let hash = hasher.finalize();
     format!("{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
         hash[0], hash[1], hash[2], hash[3],
@@ -197,7 +197,7 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// Load settings from `~/.hostelD/settings.json`, returning defaults if missing.
+    /// Load settings from `~/.kokoroo/settings.json`, returning defaults if missing.
     pub fn load() -> Self {
         let path = data_dir().join("settings.json");
         if path.exists() {
@@ -210,7 +210,7 @@ impl Settings {
         Settings::default()
     }
 
-    /// Save settings to `~/.hostelD/settings.json`.
+    /// Save settings to `~/.kokoroo/settings.json`.
     pub fn save(&self) {
         let dir = data_dir();
         fs::create_dir_all(&dir).ok();
@@ -261,7 +261,7 @@ impl Settings {
     }
 }
 
-/// Load all contacts from `~/.hostelD/contacts/`, sorted by `last_seen` descending.
+/// Load all contacts from `~/.kokoroo/contacts/`, sorted by `last_seen` descending.
 pub fn load_all_contacts() -> Vec<Contact> {
     let dir = data_dir().join("contacts");
     if !dir.exists() {

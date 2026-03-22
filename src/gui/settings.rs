@@ -406,7 +406,7 @@ use std::os::windows::process::CommandExt;
 
 /// Apply an OS-level firewall block for an IP address (best-effort, no error on failure).
 fn apply_os_firewall_block(ip: &str) {
-    let rule_name = format!("hostelD-ban-{}", ip.replace(':', "-"));
+    let rule_name = format!("kokoroo-ban-{}", ip.replace(':', "-"));
     log_fmt!("[settings] applying OS firewall block for {} (rule={})", ip, rule_name);
 
     #[cfg(target_os = "windows")]
@@ -453,7 +453,7 @@ fn apply_os_firewall_block(ip: &str) {
 
 /// Remove an OS-level firewall block for an IP address.
 fn remove_os_firewall_block(ip: &str) {
-    let rule_name = format!("hostelD-ban-{}", ip.replace(':', "-"));
+    let rule_name = format!("kokoroo-ban-{}", ip.replace(':', "-"));
     log_fmt!("[settings] removing OS firewall block for {} (rule={})", ip, rule_name);
 
     #[cfg(target_os = "windows")]

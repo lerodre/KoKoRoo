@@ -47,7 +47,7 @@ pub struct ChatHistory {
 
 fn chats_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".hostelD").join("chats")
+    PathBuf::from(home).join(".kokoroo").join("chats")
 }
 
 impl ChatHistory {
@@ -260,7 +260,7 @@ pub fn decode_chat_text(data: &[u8]) -> Option<String> {
 
 fn group_chats_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".hostelD").join("groups").join("chats")
+    PathBuf::from(home).join(".kokoroo").join("groups").join("chats")
 }
 
 /// A single group chat message for persistent storage.

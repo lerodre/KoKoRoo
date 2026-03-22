@@ -16,23 +16,23 @@ fn init() -> &'static Mutex<std::fs::File> {
         let home = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
-        let dir = std::path::PathBuf::from(home).join(".hostelD");
+        let dir = std::path::PathBuf::from(home).join(".kokoroo");
         let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("hostelD_log.txt");
+        let path = dir.join("kokoroo_log.txt");
         let file = OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
             .open(&path)
             .unwrap_or_else(|_| {
-                // Fallback to temp dir if ~/.hostelD is also not writable
-                let tmp = std::env::temp_dir().join("hostelD_log.txt");
+                // Fallback to temp dir if ~/.kokoroo is also not writable
+                let tmp = std::env::temp_dir().join("kokoroo_log.txt");
                 OpenOptions::new()
                     .create(true)
                     .write(true)
                     .truncate(true)
                     .open(tmp)
-                    .expect("Failed to create hostelD_log.txt")
+                    .expect("Failed to create kokoroo_log.txt")
             });
         Mutex::new(file)
     })

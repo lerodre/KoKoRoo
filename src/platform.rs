@@ -3,7 +3,7 @@ use std::process::Command;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
-/// Remove the hostelD UDP firewall rule for the given port.
+/// Remove the KoKoRoo UDP firewall rule for the given port.
 /// Returns `Ok(true)` if a rule was removed, `Ok(false)` if none existed,
 /// or `Err` if the operation failed.
 pub fn remove_udp_port_rule(port: u16) -> Result<bool, String> {
@@ -55,7 +55,7 @@ pub fn ensure_udp_port_open(port: u16) -> Result<bool, String> {
 
 #[cfg(target_os = "windows")]
 fn ensure_windows(port: u16) -> Result<bool, String> {
-    let rule_name = format!("hostelD UDP {port}");
+    let rule_name = format!("KoKoRoo UDP {port}");
 
     // Check if rule already exists
     let check = Command::new("netsh")
@@ -69,7 +69,7 @@ fn ensure_windows(port: u16) -> Result<bool, String> {
         return Ok(false); // already exists
     }
 
-    // Get the path to this executable so the rule only applies to hostelD
+    // Get the path to this executable so the rule only applies to KoKoRoo
     let exe_path = std::env::current_exe()
         .map_err(|e| format!("Failed to get exe path: {e}"))?;
     let exe_str = exe_path.to_string_lossy().replace('\\', "\\\\");
@@ -136,7 +136,7 @@ fn ensure_linux(port: u16) -> Result<bool, String> {
     // Add rule via pkexec — IPv6 only, inbound UDP, with comment for identification
     let add = Command::new("pkexec")
         .args(["ufw", "allow", "in", "proto", "udp", "to", "any", "port", &port.to_string(),
-               "comment", &format!("hostelD UDP {port}")])
+               "comment", &format!("KoKoRoo UDP {port}")])
         .output()
         .map_err(|e| format!("Failed to run pkexec ufw: {e}"))?;
 
@@ -150,7 +150,7 @@ fn ensure_linux(port: u16) -> Result<bool, String> {
 
 #[cfg(target_os = "windows")]
 fn remove_windows(port: u16) -> Result<bool, String> {
-    let rule_name = format!("hostelD UDP {port}");
+    let rule_name = format!("KoKoRoo UDP {port}");
 
     // Check if rule exists
     let check = Command::new("netsh")

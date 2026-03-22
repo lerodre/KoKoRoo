@@ -6,12 +6,12 @@ Cargo.toml
 Cargo.lock
 
 # Logs
-hostelD_log.txt
+kokoroo_log.txt
 *.log
 
 # macOS
 .DS_Store
-hostelD.app/
+KoKoRoo.app/
 
 # Windows
 *.exe
@@ -29,5 +29,5 @@ Thumbs.db
 *.swo
 *~
 
-# Local hostelD data (identity, chats, settings)
-.hostelD/
+# Local KoKoRoo data (identity, chats, settings)
+.kokoroo/

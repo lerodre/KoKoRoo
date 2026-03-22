@@ -45,8 +45,8 @@ fn main() {
         }
         "call" => {
             if args.len() < 5 {
-                eprintln!("Usage: hostelD call <peer-ip> <peer-port> <local-port>");
-                eprintln!("Example: hostelD call ::1 9000 9001");
+                eprintln!("Usage: kokoroo call <peer-ip> <peer-port> <local-port>");
+                eprintln!("Example: kokoroo call ::1 9000 9001");
                 return;
             }
             voice::call(&args[2], &args[3], &args[4]);
@@ -57,7 +57,7 @@ fn main() {
         }
         "send" => {
             if args.len() < 5 {
-                eprintln!("Usage: hostelD send <ip> <port> <message>");
+                eprintln!("Usage: kokoroo send <ip> <port> <message>");
                 return;
             }
             send(&args[2], &args[3], &args[4]);

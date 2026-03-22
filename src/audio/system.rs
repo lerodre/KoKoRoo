@@ -81,7 +81,7 @@ pub fn list_loopback_devices() -> Vec<String> {
 /// Start capturing system/desktop audio into a ring buffer.
 ///
 /// On Windows and Linux, first attempts process-excluded capture (which filters
-/// out hostelD's own audio to prevent echo loops). Falls back to the legacy
+/// out KoKoRoo's own audio to prevent echo loops). Falls back to the legacy
 /// full-system capture if the platform API is unavailable.
 ///
 /// - **Windows**: WASAPI process loopback → fallback to cpal WASAPI loopback.
@@ -101,7 +101,7 @@ pub fn start_system_audio_capture(
 ) -> (Option<SysAudioStream>, Option<HeapProd<f32>>) {
     #[cfg(windows)]
     {
-        // Try process-excluded capture first (excludes hostelD's own audio)
+        // Try process-excluded capture first (excludes KoKoRoo's own audio)
         let (stream, leftover) = super::process_loopback::start_capture(producer, active.clone());
         if let Some(s) = stream {
             return (Some(SysAudioStream::Wasapi(s)), None);
@@ -115,7 +115,7 @@ pub fn start_system_audio_capture(
     }
     #[cfg(target_os = "linux")]
     {
-        // Try PipeWire selective capture first (excludes hostelD's own audio)
+        // Try PipeWire selective capture first (excludes KoKoRoo's own audio)
         let (stream, leftover) = super::pipewire_capture::start_capture(producer, active.clone());
         if let Some(s) = stream {
             return (Some(SysAudioStream::PipeWire(s)), None);

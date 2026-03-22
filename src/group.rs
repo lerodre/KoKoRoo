@@ -2,18 +2,18 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-/// Where hostelD stores its data.
+/// Where KoKoRoo stores its data.
 fn data_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".hostelD")
+    PathBuf::from(home).join(".kokoroo")
 }
 
-/// Groups directory: ~/.hostelD/groups/
+/// Groups directory: ~/.kokoroo/groups/
 fn groups_dir() -> PathBuf {
     data_dir().join("groups")
 }
 
-/// Group chat history directory: ~/.hostelD/groups/chats/
+/// Group chat history directory: ~/.kokoroo/groups/chats/
 fn group_chats_dir() -> PathBuf {
     groups_dir().join("chats")
 }
@@ -233,7 +233,7 @@ pub fn generate_group_key() -> [u8; 32] {
     key
 }
 
-/// Save a group to disk at ~/.hostelD/groups/{group_id}.json
+/// Save a group to disk at ~/.kokoroo/groups/{group_id}.json
 pub fn save_group(group: &Group) {
     let dir = groups_dir();
     fs::create_dir_all(&dir).ok();

@@ -1,34 +1,34 @@
 #!/bin/bash
-# Builds and creates hostelD.app bundle for macOS with icon and proper Info.plist.
+# Builds and creates KoKoRoo.app bundle for macOS with icon and proper Info.plist.
 # Usage: ./bundle-macos.sh [--release|--debug]
 
 set -e
 
 MODE="${1:---release}"
 if [ "$MODE" = "--debug" ]; then
-    BINARY="target/debug/hostelD"
+    BINARY="target/debug/kokoroo"
     CARGO_FLAG=""
 else
-    BINARY="target/release/hostelD"
+    BINARY="target/release/kokoroo"
     CARGO_FLAG="--release"
 fi
 
-echo "Building hostelD ($MODE)..."
+echo "Building KoKoRoo ($MODE)..."
 cargo build $CARGO_FLAG
 
-APP="hostelD.app"
+APP="KoKoRoo.app"
 rm -rf "$APP"
 
 mkdir -p "$APP/Contents/MacOS"
 mkdir -p "$APP/Contents/Resources"
 
-cp "$BINARY" "$APP/Contents/MacOS/hostelD"
+cp "$BINARY" "$APP/Contents/MacOS/kokoroo"
 
 # Copy icon
-if [ -f "assets/hostelD.icns" ]; then
-    cp "assets/hostelD.icns" "$APP/Contents/Resources/hostelD.icns"
+if [ -f "assets/kokoroo.icns" ]; then
+    cp "assets/kokoroo.icns" "$APP/Contents/Resources/kokoroo.icns"
 else
-    echo "Warning: assets/hostelD.icns not found. App will have no icon."
+    echo "Warning: assets/kokoroo.icns not found. App will have no icon."
 fi
 
 # Create Info.plist
@@ -38,11 +38,11 @@ cat > "$APP/Contents/Info.plist" << 'PLIST'
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>hostelD</string>
+    <string>KoKoRoo</string>
     <key>CFBundleDisplayName</key>
-    <string>hostelD</string>
+    <string>KoKoRoo</string>
     <key>CFBundleIdentifier</key>
-    <string>com.hosteld.app</string>
+    <string>com.kokoroo.app</string>
     <key>CFBundleVersion</key>
     <string>0.1.0</string>
     <key>CFBundleShortVersionString</key>
@@ -50,26 +50,26 @@ cat > "$APP/Contents/Info.plist" << 'PLIST'
     <key>CFBundlePackagetype</key>
     <string>APPL</string>
     <key>CFBundleExecutable</key>
-    <string>hostelD</string>
+    <string>kokoroo</string>
     <key>CFBundleIconFile</key>
-    <string>hostelD</string>
+    <string>kokoroo</string>
     <key>LSMinimumSystemVersion</key>
     <string>12.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSMicrophoneUsageDescription</key>
-    <string>hostelD needs microphone access for voice calls.</string>
+    <string>KoKoRoo needs microphone access for voice calls.</string>
     <key>NSCameraUsageDescription</key>
-    <string>hostelD needs camera access for webcam sharing.</string>
+    <string>KoKoRoo needs camera access for webcam sharing.</string>
     <key>NSScreenCaptureUsageDescription</key>
-    <string>hostelD needs screen recording access for screen sharing.</string>
+    <string>KoKoRoo needs screen recording access for screen sharing.</string>
 </dict>
 </plist>
 PLIST
 
 echo "Created $APP"
-echo "  Binary: $APP/Contents/MacOS/hostelD"
-echo "  Icon:   $APP/Contents/Resources/hostelD.icns"
+echo "  Binary: $APP/Contents/MacOS/kokoroo"
+echo "  Icon:   $APP/Contents/Resources/kokoroo.icns"
 echo ""
 echo "To run: open $APP"
 echo "To install: cp -r $APP /Applications/"

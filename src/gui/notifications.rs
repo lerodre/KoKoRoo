@@ -11,9 +11,9 @@ pub(crate) fn start_ringtone() -> Arc<AtomicBool> {
     let stop_clone = stop.clone();
     std::thread::spawn(move || {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let path = format!("{}/.hostelD/ringtone.mp3", std::env::var("HOME").unwrap_or_default());
+        let path = format!("{}/.kokoroo/ringtone.mp3", std::env::var("HOME").unwrap_or_default());
         #[cfg(target_os = "windows")]
-        let path = format!("{}\\.hostelD\\ringtone.mp3", std::env::var("USERPROFILE").unwrap_or_default());
+        let path = format!("{}\\.kokoroo\\ringtone.mp3", std::env::var("USERPROFILE").unwrap_or_default());
 
         if !std::path::Path::new(&path).exists() {
             return;
@@ -93,7 +93,7 @@ pub(crate) fn play_notification_sound() {
         let home = std::env::var("HOME").unwrap_or_default();
 
         let sep = if cfg!(windows) { "\\" } else { "/" };
-        let path = format!("{home}{sep}.hostelD{sep}notification.mp3");
+        let path = format!("{home}{sep}.kokoroo{sep}notification.mp3");
 
         if !std::path::Path::new(&path).exists() {
             return;
@@ -140,7 +140,7 @@ pub(crate) fn play_notification_sound() {
     });
 }
 
-/// Write the embedded notification sound to ~/.hostelD/ if it doesn't exist yet.
+/// Write the embedded notification sound to ~/.kokoroo/ if it doesn't exist yet.
 pub(crate) fn ensure_notification_sound() {
     #[cfg(target_os = "linux")]
     let home = std::env::var("HOME").unwrap_or_default();
@@ -150,7 +150,7 @@ pub(crate) fn ensure_notification_sound() {
     let home = std::env::var("HOME").unwrap_or_default();
 
     let sep = if cfg!(windows) { "\\" } else { "/" };
-    let path = format!("{home}{sep}.hostelD{sep}notification.mp3");
+    let path = format!("{home}{sep}.kokoroo{sep}notification.mp3");
 
     if !std::path::Path::new(&path).exists() {
         let bytes = include_bytes!("../../assets/notification.mp3");
@@ -166,7 +166,7 @@ pub(crate) fn send_desktop_notification(title: &str, body: &str) {
         #[cfg(target_os = "linux")]
         {
             std::process::Command::new("notify-send")
-                .args(["-u", "critical", "-a", "hostelD", &t, &b])
+                .args(["-u", "critical", "-a", "KoKoRoo", &t, &b])
                 .spawn()
                 .ok();
         }
