@@ -112,6 +112,12 @@ impl HostelApp {
                 .show(ui, |ui| ui.add(nick_edit)).inner;
             if resp.changed() {
                 self.settings.save();
+                // Broadcast nickname update to all connected peers
+                if let Some(tx) = &self.msg_cmd_tx {
+                    tx.send(crate::messaging::MsgCommand::UpdateNickname {
+                        nickname: self.settings.nickname.clone(),
+                    }).ok();
+                }
             }
         });
 

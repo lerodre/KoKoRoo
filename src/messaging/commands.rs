@@ -151,6 +151,26 @@ impl MsgDaemon {
                     }
                 }
 
+                MsgCommand::UpdateNickname { nickname } => {
+                    log_fmt!("[daemon] UpdateNickname: '{}'", nickname);
+                    self.nickname = nickname.clone();
+                    // Re-send IDENTITY to all connected peers so they update our name
+                    if let Some(ref socket) = self.socket {
+                        let mut id_payload = Vec::with_capacity(32 + nickname.len());
+                        id_payload.extend_from_slice(&self.identity.pubkey);
+                        id_payload.extend_from_slice(nickname.as_bytes());
+                        for peer in self.peers.values() {
+                            if peer.is_connected() {
+                                if let Some(pkt) = peer.encrypt_packet(
+                                    crate::crypto::PKT_MSG_IDENTITY, &id_payload,
+                                ) {
+                                    socket.send_to(&pkt, peer.peer_addr).ok();
+                                }
+                            }
+                        }
+                    }
+                }
+
                 MsgCommand::YieldSocket => {
                     log_fmt!("[daemon] YieldSocket — releasing socket for voice call");
                     // Cancel all active file transfers

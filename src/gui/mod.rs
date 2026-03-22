@@ -1246,6 +1246,11 @@ impl eframe::App for HostelApp {
                             None,
                         );
                     }
+                    MsgEvent::NicknameUpdated { contact_id, nickname } => {
+                        log_fmt!("[gui] NicknameUpdated: {} -> '{}'", &contact_id[..8.min(contact_id.len())], nickname);
+                        // Reload contacts from disk to pick up the new name
+                        self.contacts = identity::load_all_contacts();
+                    }
                     MsgEvent::AvatarReceived { contact_id } => {
                         // Invalidate cached texture so it reloads from disk next frame
                         self.contact_avatar_textures.remove(&contact_id);

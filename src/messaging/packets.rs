@@ -139,6 +139,35 @@ impl MsgDaemon {
 
                 PKT_MSG_IDENTITY => {
                     log_fmt!("[daemon] MSG_IDENTITY from {}", from);
+                    // If peer is already Connected, treat as a nickname update
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if peer.is_connected() && !peer.contact_id.is_empty() {
+                            // Decrypt and extract nickname without full handshake
+                            if let Some(session) = peer.session.as_ref() {
+                                if let Some((pkt_type, plain)) = session.decrypt_packet(data) {
+                                    if pkt_type == crate::crypto::PKT_MSG_IDENTITY && plain.len() >= 32 {
+                                        let new_nick = String::from_utf8_lossy(&plain[32..]).to_string();
+                                        if new_nick != peer.peer_nickname {
+                                            log_fmt!("[daemon]   nickname update: '{}' -> '{}' for {}", peer.peer_nickname, new_nick, peer.contact_id);
+                                            peer.peer_nickname = new_nick.clone();
+                                            peer.touch();
+                                            // Update on disk
+                                            if let Some(mut contact) = identity::load_contact(&peer.peer_pubkey) {
+                                                contact.nickname = new_nick.clone();
+                                                identity::save_contact(&contact);
+                                            }
+                                            self.event_tx.send(MsgEvent::NicknameUpdated {
+                                                contact_id: peer.contact_id.clone(),
+                                                nickname: new_nick,
+                                            }).ok();
+                                        }
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                    }
+
                     let mut stale_addr_to_remove: Option<SocketAddr> = None;
                     if let Some(peer) = self.peers.get_mut(&from) {
                         match protocol::handle_identity(data, peer, &self.identity, socket) {

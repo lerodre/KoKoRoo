@@ -69,6 +69,8 @@ pub enum MsgCommand {
     SendGroupAvatar { group_id: String, avatar_data: Vec<u8>, sha256: [u8; 32], member_contacts: Vec<(String, std::net::SocketAddr, [u8; 32])> },
     /// Broadcast group call presence signal to all group members.
     SendCallSignal { group_id: String, channel_id: String, active: bool, call_mode: u8, member_contacts: Vec<(String, std::net::SocketAddr, [u8; 32])> },
+    /// Broadcast updated nickname to all connected peers.
+    UpdateNickname { nickname: String },
     /// Voice call starting — daemon must release the UDP socket.
     YieldSocket,
     /// Voice call ended — daemon can reclaim the UDP socket.
@@ -103,6 +105,8 @@ pub enum MsgEvent {
     FileTransferComplete { contact_id: String, transfer_id: u32, saved_path: String },
     /// A file transfer failed or was cancelled.
     FileTransferFailed { contact_id: String, transfer_id: u32, reason: String },
+    /// A contact's nickname was updated.
+    NicknameUpdated { contact_id: String, nickname: String },
     /// A contact's avatar was received and saved.
     AvatarReceived { contact_id: String },
     /// Incoming group invite from a contact (lite invite JSON).
