@@ -13,19 +13,25 @@ P2P encrypted voice, chat, groups, file transfer, and screen sharing over IPv6 U
  └──────────┘                       └──────────┘
 ```
 
+## Networking
+
+hostelD requires IPv6 between peers. If your ISP doesn't provide IPv6 or you want a private network, use an overlay like [ZeroTier](https://zerotier.com) or [Tailscale](https://tailscale.com). Both provide IPv6 addresses that work with hostelD out of the box and give you control over who can reach your node.
+
+Without an overlay, anyone with your IPv6 address and port can attempt to connect. Be careful who you add as a contact.
+
 ## Features
 
-- **Voice calls** — Opus 64kbps, RNNoise suppression, full duplex
-- **Group calls** — P2P mesh or relay mode, multi-peer voice + chat
-- **E2E encryption** — X25519 + ChaCha20-Poly1305 (same primitives as Signal/WireGuard)
-- **Messaging** — 1:1 and group text chat, encrypted in transit and at rest
-- **File transfer** — Drag & drop, chunked UDP with AIMD congestion control
-- **Screen & webcam sharing** — VP8 encoded, multi-monitor, system audio capture
-- **Avatars** — Profile and group avatars with offer-wait protocol
-- **Contact system** — Friend requests, TOFU trust, presence (online/away/offline)
-- **Anti-spam** — Per-IP rate limiting, auto-blacklist, OS firewall integration
-- **Themes** — 18 customizable colors with smart randomize
-- **Cross-platform** — Windows, macOS, Linux (GUI + TUI)
+- **Voice calls** - Opus 64kbps, RNNoise suppression, full duplex
+- **Group calls** - P2P mesh or relay mode, multi-peer voice + chat
+- **E2E encryption** - X25519 + ChaCha20-Poly1305 (same primitives as Signal/WireGuard)
+- **Messaging** - 1:1 and group text chat, encrypted in transit and at rest
+- **File transfer** - Drag & drop, chunked UDP with AIMD congestion control
+- **Screen & webcam sharing** - VP8 encoded, multi-monitor, system audio capture
+- **Avatars** - Profile and group avatars with offer-wait protocol
+- **Contact system** - Friend requests, TOFU trust, presence (online/away/offline)
+- **Anti-spam** - Per-IP rate limiting, auto-blacklist, OS firewall integration
+- **Themes** - 18 customizable colors with smart randomize
+- **Cross-platform** - Windows, macOS, Linux (GUI + TUI)
 
 ## Quick Start
 
@@ -89,15 +95,9 @@ hostelD mic-test     # Audio loopback test
 | Chat storage | Encrypted at rest (ChaCha20-Poly1305) |
 | Anti-spam | Rate limiting (1000 pkt/s) + auto-blacklist |
 
-## Networking
-
-hostelD requires IPv6 connectivity between peers. If your ISP doesn't provide IPv6 or you want a private network, use an overlay like [ZeroTier](https://zerotier.com) or [Tailscale](https://tailscale.com) — both provide IPv6 addresses that work with hostelD out of the box.
-
-Using an overlay also gives you control over who can reach your node. Without one, anyone with your IPv6 address and port can attempt to connect. Be careful who you add as a contact.
-
 ## Documentation
 
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** — Protocol, threading, packet types, data layout, code structure
-- **[FEATURES.md](FEATURES.md)** — Complete feature list with details
-- **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)** — Known bugs, platform issues, and security weaknesses
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Protocol, threading, packet types, data layout, code structure
+- **[FEATURES.md](FEATURES.md)** - Complete feature list with details
+- **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)** - Known bugs, platform issues, and security weaknesses
 
