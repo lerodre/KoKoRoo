@@ -18,13 +18,14 @@ Cargo.lock
 *.dylib
 *.app/
 
-# Audio/video files
+# Audio/video files (except embedded app sounds)
 *.mp3
 *.wav
 *.ogg
 *.mp4
 *.avi
 *.mkv
+!assets/notification.mp3
 
 # macOS
 .DS_Store
