@@ -8,7 +8,7 @@ Known issues, platform bugs, and security weaknesses in hostelD.
 
 ### macOS: Screen/webcam video transmission is corrupted
 
-Video frames arrive corrupted on the receiver side when sharing screen or webcam from macOS. Likely related to the BGRA→I420 color conversion or frame stride differences on Apple Silicon. Needs investigation.
+Video frames arrive corrupted on the receiver side when sharing screen or webcam from macOS. Likely related to the BGRA->I420 color conversion or frame stride differences on Apple Silicon. Needs investigation.
 
 **Status:** Open
 
@@ -16,210 +16,210 @@ Video frames arrive corrupted on the receiver side when sharing screen or webcam
 
 ## Security Weaknesses
 
-## 1. identity.key es la llave maestra local
+### 1. identity.key is the local master key
 
-**Riesgo: ALTO**
+**Risk: HIGH**
 
-El archivo `~/.hostelD/identity.key` (64 bytes: 32 secreto + 32 publico) controla todo:
-- Descifra todos los chats almacenados localmente (archivos `.enc`)
-- Permite hacerse pasar por el usuario en llamadas y mensajes (keypair X25519)
-- Deriva la clave de almacenamiento local via `crypto::derive_storage_key`
+The file `~/.hostelD/identity.key` (64 bytes: 32 secret + 32 public) controls everything:
+- Decrypts all locally stored chats (`.enc` files)
+- Allows impersonating the user in calls and messages (X25519 keypair)
+- Derives the local storage encryption key via `crypto::derive_storage_key`
 
-**Impacto:** Si alguien copia este archivo, tiene acceso completo a la identidad del usuario y puede leer todo el historial de chats.
+**Impact:** If someone copies this file, they have full access to the user's identity and can read all chat history.
 
-**Mitigacion:**
-- En Unix tiene permisos `0600` (solo el usuario propietario)
-- En Windows depende de los permisos NTFS de la carpeta del usuario
-- Cifrado de disco completo (BitLocker/LUKS) protege contra acceso fisico
+**Mitigation:**
+- Unix: file permissions `0600` (owner-only)
+- Windows: depends on NTFS folder permissions
+- Full disk encryption (BitLocker/LUKS) protects against physical access
 
-**Limitacion:** No es posible restringir el acceso por aplicacion en escritorio (Windows/Linux/macOS). Cualquier proceso ejecutandose como el usuario puede leer el archivo. Solo iOS/Android proveen aislamiento por app real.
-
----
-
-## 2. Llamadas 1:1 — MITM sin verificacion
-
-**Riesgo: MEDIO**
-
-El handshake de llamada usa X25519 efimero sin autenticacion de identidad. Un atacante en la red puede hacer MITM si los usuarios no verifican el codigo `XXXX-XXXX`.
-
-**Flujo de ataque:**
-1. Atacante intercepta los paquetes `HELLO` de ambos peers
-2. Establece dos sesiones separadas (una con cada peer)
-3. Retransmite el audio entre ambas sesiones
-4. Cada peer tiene un shared secret diferente, pero si no comparan el codigo, no lo detectan
-
-**Mitigacion:** Verificar el codigo `XXXX-XXXX` en voz al inicio de la llamada. Si coincide, no hay MITM posible (los shared secrets serian diferentes con un atacante en medio).
-
-**Limitacion:** La verificacion es manual y opcional. Muchos usuarios no la realizan.
+**Limitation:** Desktop OSes (Windows/Linux/macOS) cannot restrict per-app file access. Any process running as the user can read the file. Only iOS/Android provide real app isolation.
 
 ---
 
-## 3. Grupos — Clave simetrica compartida
+### 2. 1:1 calls — MITM without verification
 
-**Riesgo: MEDIO**
+**Risk: MEDIUM**
 
-Todos los miembros del grupo comparten la misma `group_key` (256-bit ChaCha20-Poly1305). Cualquier miembro puede:
-- Descifrar todo el audio de las llamadas del grupo
-- Leer todos los mensajes de chat del grupo
-- Ver screen share y webcam de otros miembros
+The call handshake uses ephemeral X25519 without identity authentication. A network attacker can MITM if users don't verify the `XXXX-XXXX` code.
 
-**Impacto:** La seguridad del grupo es tan fuerte como su miembro mas debil.
+**Attack flow:**
+1. Attacker intercepts `HELLO` packets from both peers
+2. Establishes two separate sessions (one with each peer)
+3. Relays audio between both sessions
+4. Each peer has a different shared secret, but if they don't compare the code, they won't detect it
 
-**Mitigacion:** Seleccionar cuidadosamente a los miembros del grupo.
+**Mitigation:** Verify the `XXXX-XXXX` code verbally at the start of the call. If it matches, MITM is impossible (shared secrets would differ with an attacker in the middle).
 
----
-
-## 4. Rotacion de clave al expulsar miembro
-
-**Riesgo: MEDIO**
-
-Cuando un miembro es expulsado, se rota la `group_key`. Sin embargo:
-
-### 4a. Ventana de vulnerabilidad
-Entre el kick y que todos los miembros reciban la nueva clave, el miembro expulsado todavia puede descifrar trafico encriptado con la clave vieja. La `previous_key` se mantiene como fallback para peers desactualizados.
-
-### 4b. Miembros offline
-Si un miembro esta offline cuando ocurre la rotacion:
-- Seguira usando la clave vieja hasta que reciba la actualizacion (via `PKT_GRP_UPDATE`)
-- El sistema intenta descifrar con la clave anterior como fallback
-- La actualizacion se entrega cuando el miembro se conecta y un peer con la nueva clave esta online
-
-### 4c. Solo offline + miembro expulsado online
-Si el unico peer online es el miembro expulsado y otro miembro desactualizado:
-- Ambos tienen la clave vieja y pueden comunicarse temporalmente
-- No hay forma de evitar esto sin servidor central
-- Cuando un peer con la nueva clave aparezca, el miembro desactualizado recibira la rotacion
-
-### 4d. No hay forward secrecy en grupo
-Si el miembro expulsado grabo paquetes encriptados con la clave vieja, siempre podra descifrarlos. La rotacion solo protege trafico **futuro**.
-
-### 4e. Split-brain con kicks simultaneos
-Si dos admins expulsan a dos miembros diferentes al mismo tiempo, ambos generan rotaciones con `key_version` N+1. Se resuelve parcialmente por `key_version` (la version mas alta gana en la actualizacion), pero si ambos generan la misma version, el ultimo update que llegue sobrescribe al anterior.
+**Limitation:** Verification is manual and optional. Many users skip it.
 
 ---
 
-## 5. GRP_HELLO no autenticado
+### 3. Groups — Shared symmetric key
 
-**Riesgo: BAJO**
+**Risk: MEDIUM**
 
-El paquete `GRP_HELLO` (para unirse a llamadas de grupo) no esta encriptado — contiene un `group_id` y una pubkey dummy. Un atacante que conozca el `group_id` puede enviar HELLOs.
+All group members share the same `group_key` (256-bit ChaCha20-Poly1305). Any member can:
+- Decrypt all group call audio
+- Read all group chat messages
+- View screen share and webcam from other members
 
-**Impacto limitado:**
-- Sin la `group_key`, no puede descifrar paquetes de voz/chat
-- Sin la `group_key`, no puede enviar paquetes validos (se ignoran)
-- El lider puede registrarlo como peer si la IP coincide con un miembro, pero no aparece en la UI
+**Impact:** Group security is only as strong as its weakest member.
 
-**Mitigacion:** El `group_id` es un valor aleatorio de 128 bits, dificil de adivinar.
-
----
-
-## 6. Distribucion de invitaciones
-
-**Riesgo: MEDIO**
-
-La `group_key` viaja en un paquete `PKT_GRP_INVITE` encriptado con la sesion E2E 1:1 entre quien invita y el invitado. Si esa sesion 1:1 fue comprometida por MITM (ver punto 2), el atacante obtiene la `group_key`.
-
-**Mitigacion:** Verificar el contacto (codigo `XXXX-XXXX`) al menos una vez antes de invitarlo al grupo.
+**Mitigation:** Carefully select group members.
 
 ---
 
-## 7. Miembro malicioso re-comparte la clave
+### 4. Key rotation on member kick
 
-**Riesgo: BAJO (no tecnico)**
+**Risk: MEDIUM**
 
-Un miembro activo del grupo podria copiar la `group_key` y compartirla fuera de hostelD con personas no autorizadas. Esto es un problema de confianza humana, no tecnico.
+When a member is kicked, the `group_key` is rotated. However:
 
-**Mitigacion:** Solo invitar personas de confianza. Expulsar y rotar clave si se sospecha filtracion.
+#### 4a. Vulnerability window
+Between the kick and all members receiving the new key, the kicked member can still decrypt traffic encrypted with the old key. The `previous_key` is kept as fallback for peers that haven't updated yet.
 
----
+#### 4b. Offline members
+If a member is offline during rotation:
+- They continue using the old key until they receive the update (via `PKT_GRP_UPDATE`)
+- The system tries to decrypt with the previous key as fallback
+- The update is delivered when the member connects and a peer with the new key is online
 
-## 8. Chats locales sin proteccion contra acceso como usuario
+#### 4c. Only offline + kicked member online
+If the only online peer is the kicked member and another outdated member:
+- Both have the old key and can temporarily communicate
+- There is no way to prevent this without a central server
+- When a peer with the new key appears, the outdated member will receive the rotation
 
-**Riesgo: MEDIO**
+#### 4d. No forward secrecy in groups
+If the kicked member recorded packets encrypted with the old key, they can always decrypt them. Rotation only protects **future** traffic.
 
-Los archivos `.enc` en `~/.hostelD/chats/` y `~/.hostelD/groups/chats/` estan encriptados con ChaCha20-Poly1305, pero la clave se deriva del `identity.key` que esta en el mismo directorio.
-
-**Impacto:** Cualquier proceso corriendo como el usuario puede leer el `identity.key`, derivar la clave de almacenamiento, y descifrar todos los chats.
-
-**Mitigacion:** Cifrado de disco completo + no ejecutar software no confiable.
-
----
-
-## 9. Metadatos de red visibles
-
-**Riesgo: BAJO**
-
-hostelD usa UDP sobre IPv6. Aunque el contenido esta encriptado, un observador de red puede ver:
-- Que dos IPs se estan comunicando
-- Cuando inicia y termina una llamada (por el patron de paquetes)
-- Tamano aproximado del grupo (por la cantidad de paquetes)
-- Que se esta compartiendo pantalla (paquetes mas grandes y frecuentes)
-
-**Mitigacion:** Usar VPN o red overlay (como Tailscale/ZeroTier, que hostelD ya soporta para IPv6).
+#### 4e. Split-brain with simultaneous kicks
+If two admins kick two different members at the same time, both generate rotations with `key_version` N+1. Partially resolved by `key_version` (highest version wins on update), but if both generate the same version, the last update received overwrites the previous one.
 
 ---
 
-## 10. Firewall bypass por rate limiting
+### 5. Unauthenticated GRP_HELLO
 
-**Riesgo: BAJO**
+**Risk: LOW**
 
-El sistema de firewall (`firewall.rs`) implementa rate limiting (>1000 pkt/sec = strike, 5 strikes = ban). Un atacante podria mantenerse justo por debajo del umbral para enviar trafico no deseado sin ser baneado.
+The `GRP_HELLO` packet (to join group calls) is not encrypted — it contains a `group_id` and a dummy pubkey. An attacker who knows the `group_id` can send HELLOs.
 
-**Impacto limitado:** Sin la clave de sesion, los paquetes se descartarian al fallar la desencriptacion.
+**Limited impact:**
+- Without the `group_key`, they cannot decrypt voice/chat packets
+- Without the `group_key`, they cannot send valid packets (ignored)
+- The leader may register them as a peer if the IP matches a member, but they won't appear in the UI
 
----
-
-## 11. Sin rotacion de clave al salir voluntariamente
-
-**Riesgo: BAJO**
-
-Actualmente la rotacion de `group_key` solo ocurre cuando un admin **expulsa** a un miembro. Si un miembro sale voluntariamente del grupo, la clave no se rota.
-
-**Razon:** Un miembro que sale voluntariamente probablemente no tiene intencion maliciosa. Pero podria seguir descifrando trafico si intercepta paquetes.
-
-**Posible mejora futura:** Rotar la clave tambien en salidas voluntarias.
+**Mitigation:** The `group_id` is a random 128-bit value, hard to guess.
 
 ---
 
-## 12. group.json no encriptado en disco
+### 6. Invite distribution
 
-**Riesgo: MEDIO**
+**Risk: MEDIUM**
 
-Los archivos de grupo (`~/.hostelD/groups/{id}.json`) se guardan en texto plano (JSON). Contienen:
-- La `group_key` en formato hex
-- Lista de miembros con pubkeys, nicknames, IPs
-- Configuracion de canales
+The `group_key` travels in a `PKT_GRP_INVITE` packet encrypted with the 1:1 E2E session between inviter and invitee. If that 1:1 session was compromised by MITM (see point 2), the attacker gets the `group_key`.
 
-**Impacto:** Acceso al filesystem del usuario expone las claves de todos los grupos.
-
-**Mitigacion:** Cifrado de disco completo. Posible mejora futura: encriptar los archivos de grupo con la `identity.key`.
+**Mitigation:** Verify the contact (code `XXXX-XXXX`) at least once before inviting them to a group.
 
 ---
 
-## 13. Sin expiracion de previous_key
+### 7. Malicious member re-shares the key
 
-**Riesgo: BAJO**
+**Risk: LOW (non-technical)**
 
-La `previous_key` se mantiene indefinidamente para fallback de peers desactualizados. Un miembro expulsado que obtiene acceso a paquetes encriptados con la clave nueva no puede descifrarlos, pero la `previous_key` permite descifrar trafico de peers lentos en actualizar.
+An active group member could copy the `group_key` and share it outside hostelD with unauthorized people. This is a human trust problem, not a technical one.
 
-**Posible mejora futura:** Expirar `previous_key` despues de un periodo razonable (ej: 24 horas).
+**Mitigation:** Only invite trusted people. Kick and rotate key if leakage is suspected.
 
 ---
 
-## Resumen de prioridades
+### 8. Local chats accessible to any user process
 
-| # | Debilidad | Riesgo | Mitigable por el usuario |
-|---|-----------|--------|--------------------------|
-| 1 | identity.key expuesta | ALTO | Cifrado de disco |
-| 12 | group.json en texto plano | MEDIO | Cifrado de disco |
-| 2 | MITM sin verificacion | MEDIO | Verificar codigo XXXX-XXXX |
-| 3 | Clave simetrica compartida en grupo | MEDIO | Seleccionar miembros |
-| 4 | Ventana de rotacion de clave | MEDIO | Inherente a P2P |
-| 6 | Invitacion comprometida | MEDIO | Verificar contacto primero |
-| 8 | Chats locales accesibles | MEDIO | Cifrado de disco |
-| 9 | Metadatos de red | BAJO | VPN |
-| 5 | GRP_HELLO no autenticado | BAJO | group_id aleatorio |
-| 7 | Re-compartir clave | BAJO | Confianza |
-| 10 | Rate limit bypass | BAJO | Clave requerida |
-| 11 | Sin rotacion en salida voluntaria | BAJO | Mejora futura |
-| 13 | previous_key sin expiracion | BAJO | Mejora futura |
+**Risk: MEDIUM**
+
+The `.enc` files in `~/.hostelD/chats/` are encrypted with ChaCha20-Poly1305, but the key is derived from `identity.key` which is in the same directory.
+
+**Impact:** Any process running as the user can read `identity.key`, derive the storage key, and decrypt all chats.
+
+**Mitigation:** Full disk encryption + don't run untrusted software.
+
+---
+
+### 9. Visible network metadata
+
+**Risk: LOW**
+
+hostelD uses UDP over IPv6. Although content is encrypted, a network observer can see:
+- That two IPs are communicating
+- When a call starts and ends (from packet patterns)
+- Approximate group size (from packet volume)
+- That screen sharing is active (larger and more frequent packets)
+
+**Mitigation:** Use a VPN or overlay network (like Tailscale/ZeroTier, which hostelD already supports for IPv6).
+
+---
+
+### 10. Rate limiting bypass
+
+**Risk: LOW**
+
+The firewall (`firewall.rs`) implements rate limiting (>1000 pkt/sec = strike, 5 strikes = ban). An attacker could stay just below the threshold to send unwanted traffic without being banned.
+
+**Limited impact:** Without the session key, packets are discarded on decryption failure.
+
+---
+
+### 11. No key rotation on voluntary leave
+
+**Risk: LOW**
+
+Currently `group_key` rotation only happens when an admin **kicks** a member. If a member leaves voluntarily, the key is not rotated.
+
+**Reason:** A member who leaves voluntarily is unlikely to be malicious. But they could still decrypt traffic if they intercept packets.
+
+**Possible future improvement:** Also rotate key on voluntary leaves.
+
+---
+
+### 12. group.json not encrypted on disk
+
+**Risk: MEDIUM**
+
+Group files (`~/.hostelD/groups/{id}.json`) are stored as plaintext JSON. They contain:
+- The `group_key` in hex format
+- Member list with pubkeys, nicknames, IPs
+- Channel configuration
+
+**Impact:** Filesystem access exposes all group keys.
+
+**Mitigation:** Full disk encryption. Possible future improvement: encrypt group files with `identity.key`.
+
+---
+
+### 13. No expiration for previous_key
+
+**Risk: LOW**
+
+The `previous_key` is kept indefinitely as fallback for outdated peers. A kicked member who captures packets encrypted with the new key cannot decrypt them, but the `previous_key` allows decrypting traffic from peers that are slow to update.
+
+**Possible future improvement:** Expire `previous_key` after a reasonable period (e.g., 24 hours).
+
+---
+
+## Priority Summary
+
+| # | Issue | Risk | User mitigation |
+|---|-------|------|-----------------|
+| 1 | identity.key exposed | HIGH | Full disk encryption |
+| 12 | group.json plaintext | MEDIUM | Full disk encryption |
+| 2 | MITM without verification | MEDIUM | Verify XXXX-XXXX code |
+| 3 | Shared symmetric group key | MEDIUM | Select members carefully |
+| 4 | Key rotation window | MEDIUM | Inherent to P2P |
+| 6 | Compromised invite | MEDIUM | Verify contact first |
+| 8 | Local chats accessible | MEDIUM | Full disk encryption |
+| 9 | Network metadata | LOW | VPN |
+| 5 | Unauthenticated GRP_HELLO | LOW | Random group_id |
+| 7 | Key re-sharing | LOW | Trust |
+| 10 | Rate limit bypass | LOW | Session key required |
+| 11 | No rotation on voluntary leave | LOW | Future improvement |
+| 13 | previous_key no expiration | LOW | Future improvement |
