@@ -1,8 +1,20 @@
-# Debilidades conocidas / Known Security Weaknesses
+# Known Issues & Security Weaknesses
 
-Este documento lista las debilidades de seguridad conocidas de hostelD, sus riesgos y mitigaciones disponibles.
+Known issues, platform bugs, and security weaknesses in hostelD.
 
 ---
+
+## Platform Issues
+
+### macOS: Screen/webcam video transmission is corrupted
+
+Video frames arrive corrupted on the receiver side when sharing screen or webcam from macOS. Likely related to the BGRA→I420 color conversion or frame stride differences on Apple Silicon. Needs investigation.
+
+**Status:** Open
+
+---
+
+## Security Weaknesses
 
 ## 1. identity.key es la llave maestra local
 
@@ -151,7 +163,7 @@ hostelD usa UDP sobre IPv6. Aunque el contenido esta encriptado, un observador d
 
 **Riesgo: BAJO**
 
-El sistema de firewall (`firewall.rs`) implementa rate limiting (>200 pkt/sec = strike, 5 strikes = ban). Un atacante podria mantenerse justo por debajo del umbral para enviar trafico no deseado sin ser baneado.
+El sistema de firewall (`firewall.rs`) implementa rate limiting (>1000 pkt/sec = strike, 5 strikes = ban). Un atacante podria mantenerse justo por debajo del umbral para enviar trafico no deseado sin ser baneado.
 
 **Impacto limitado:** Sin la clave de sesion, los paquetes se descartarian al fallar la desencriptacion.
 
