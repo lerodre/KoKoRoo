@@ -1154,7 +1154,18 @@ impl eframe::App for HostelApp {
                             }
                         }
                         if !online {
-                            self.msg_peer_presence.insert(contact_id, crate::messaging::PresenceStatus::Offline);
+                            self.msg_peer_presence.insert(contact_id.clone(), crate::messaging::PresenceStatus::Offline);
+                            // Clear voice call presence for this peer (they can't be in a call if offline)
+                            for channels in self.group_call_presence.values_mut() {
+                                for members in channels.values_mut() {
+                                    members.retain(|(cid, _)| *cid != contact_id);
+                                }
+                            }
+                            // Clean up empty entries
+                            for channels in self.group_call_presence.values_mut() {
+                                channels.retain(|_, v| !v.is_empty());
+                            }
+                            self.group_call_presence.retain(|_, v| !v.is_empty());
                         }
                     }
                     MsgEvent::PresenceUpdate { contact_id, status } => {
