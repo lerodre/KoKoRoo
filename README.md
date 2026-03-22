@@ -1,6 +1,6 @@
 # hostelD
 
-> **Alpha software.** Functional but under active development. Expect bugs and breaking changes.
+> **Alpha software.** Built with [Claude Code](https://claude.ai/code). Functional but under active development. Expect bugs and breaking changes.
 
 P2P encrypted voice, chat, groups, file transfer, and screen sharing over IPv6 UDP. No servers, no accounts, no registration.
 
