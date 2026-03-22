@@ -1,5 +1,7 @@
 # hostelD
 
+> **Alpha software.** Functional but under active development. Expect bugs and breaking changes.
+
 P2P encrypted voice, chat, groups, file transfer, and screen sharing over IPv6 UDP. No servers, no accounts, no registration.
 
 ```
@@ -86,6 +88,12 @@ hostelD mic-test     # Audio loopback test
 | MITM detection | Verification code (compare verbally) |
 | Chat storage | Encrypted at rest (ChaCha20-Poly1305) |
 | Anti-spam | Rate limiting (1000 pkt/s) + auto-blacklist |
+
+## Networking
+
+hostelD requires IPv6 connectivity between peers. If your ISP doesn't provide IPv6 or you want a private network, use an overlay like [ZeroTier](https://zerotier.com) or [Tailscale](https://tailscale.com) — both provide IPv6 addresses that work with hostelD out of the box.
+
+Using an overlay also gives you control over who can reach your node. Without one, anyone with your IPv6 address and port can attempt to connect. Be careful who you add as a contact.
 
 ## Documentation
 
