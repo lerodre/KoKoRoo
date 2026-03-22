@@ -1,26 +1,37 @@
 # Rust build artifacts
 /target
-
-# Per-platform Cargo.toml (managed per-OS, see CLAUDE.md)
 Cargo.toml
 Cargo.lock
 
+# Local KoKoRoo data
+.kokoroo/
+
 # Logs
-kokoroo_log.txt
 *.log
+*_log.txt
 
-# macOS
-.DS_Store
-KoKoRoo.app/
-
-# Windows
+# Binaries
 *.exe
 *.pdb
 *.dll
-Thumbs.db
-
-# Linux
 *.so
+*.dylib
+*.app/
+
+# Audio/video files
+*.mp3
+*.wav
+*.ogg
+*.mp4
+*.avi
+*.mkv
+
+# macOS
+.DS_Store
+*.icns
+
+# Windows
+Thumbs.db
 
 # IDE / editor
 .vscode/
@@ -28,6 +39,3 @@ Thumbs.db
 *.swp
 *.swo
 *~
-
-# Local KoKoRoo data (identity, chats, settings)
-.kokoroo/
