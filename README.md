@@ -91,4 +91,5 @@ hostelD mic-test     # Audio loopback test
 
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — Protocol, threading, packet types, data layout, code structure
 - **[FEATURES.md](FEATURES.md)** — Complete feature list with details
+- **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)** — Known bugs, platform issues, and security weaknesses
 
