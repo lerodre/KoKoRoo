@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" width="120" alt="KoKoRoo">
+</p>
+
 # KoKoRoo
 
 > **Alpha software.** Built with [Claude Code](https://claude.ai/code). Functional but under active development. Expect bugs and breaking changes.
