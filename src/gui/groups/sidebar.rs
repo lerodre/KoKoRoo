@@ -537,8 +537,11 @@ impl HostelApp {
                 });
             }
 
-            // Show connected members indented under active voice channel
+            // Show connected members indented under voice channel
+            // When in the call: show roster (group_call_members)
+            // When not in the call: show presence signals (group_call_presence)
             if is_active {
+                // We're in this call — show roster members
                 let my_pubkey = self.identity.pubkey;
                 for member in &self.group_call_members {
                     let member_row_w = ui.available_width();
@@ -546,11 +549,8 @@ impl HostelApp {
                         egui::vec2(member_row_w, 24.0),
                         egui::Sense::hover(),
                     );
-
                     let mut x = member_rect.min.x + 20.0;
                     let cy = member_rect.center().y;
-
-                    // Small avatar (20px)
                     let av_size = 20.0;
                     let av_rect = egui::Rect::from_center_size(
                         egui::pos2(x + av_size / 2.0, cy),
@@ -575,8 +575,6 @@ impl HostelApp {
                         paint_initial_avatar(ui.painter(), av_rect, &member.nickname, &self.settings.theme);
                     }
                     x += av_size + 4.0;
-
-                    // Nickname
                     ui.painter().text(
                         egui::pos2(x, cy),
                         egui::Align2::LEFT_CENTER,
@@ -584,6 +582,49 @@ impl HostelApp {
                         egui::FontId::proportional(11.0),
                         self.settings.theme.text_muted(),
                     );
+                }
+            } else {
+                // Not in call — show presence from call signals
+                let presence = self.group_call_presence
+                    .get(&_group_id)
+                    .and_then(|channels| channels.get(&ch.channel_id));
+                if let Some(members_in_call) = presence {
+                    for (contact_id, _mode) in members_in_call {
+                        let nickname = self.contacts.iter()
+                            .find(|c| c.contact_id == *contact_id)
+                            .map(|c| c.nickname.as_str())
+                            .unwrap_or("?");
+                        let member_row_w = ui.available_width();
+                        let (member_rect, _) = ui.allocate_exact_size(
+                            egui::vec2(member_row_w, 24.0),
+                            egui::Sense::hover(),
+                        );
+                        let mut x = member_rect.min.x + 20.0;
+                        let cy = member_rect.center().y;
+                        let av_size = 20.0;
+                        let av_rect = egui::Rect::from_center_size(
+                            egui::pos2(x + av_size / 2.0, cy),
+                            egui::vec2(av_size, av_size),
+                        );
+                        let mut drew_av = false;
+                        let cid = contact_id.clone();
+                        if let Some(tex) = self.contact_avatar_textures.get(&cid) {
+                            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                            ui.painter().image(tex.id(), av_rect, uv, egui::Color32::WHITE);
+                            drew_av = true;
+                        }
+                        if !drew_av {
+                            paint_initial_avatar(ui.painter(), av_rect, nickname, &self.settings.theme);
+                        }
+                        x += av_size + 4.0;
+                        ui.painter().text(
+                            egui::pos2(x, cy),
+                            egui::Align2::LEFT_CENTER,
+                            nickname,
+                            egui::FontId::proportional(11.0),
+                            self.settings.theme.text_muted(),
+                        );
+                    }
                 }
             }
         }
