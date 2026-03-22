@@ -17,7 +17,7 @@ P2P encrypted voice, chat, groups, file transfer, and screen sharing over IPv6 U
 
 hostelD requires IPv6 between peers. If your ISP doesn't provide IPv6 or you want a private network, use an overlay like [ZeroTier](https://zerotier.com) or [Tailscale](https://tailscale.com). Both provide IPv6 addresses that work with hostelD out of the box and give you control over who can reach your node.
 
-Without an overlay, anyone with your IPv6 address and port can attempt to connect. Be careful who you add as a contact.
+Without an overlay, anyone with your IPv6 address and port can attempt to connect. **Be careful who you add as a contact.**
 
 ## Features
 
