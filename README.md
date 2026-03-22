@@ -101,3 +101,6 @@ hostelD mic-test     # Audio loopback test
 - **[FEATURES.md](FEATURES.md)** - Complete feature list with details
 - **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)** - Known bugs, platform issues, and security weaknesses
 
+## License
+
+[AGPL-3.0](LICENSE)
