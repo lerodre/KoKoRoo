@@ -67,7 +67,7 @@ P2P encrypted voice + chat + file transfer + screen sharing. No servers. No acco
 
 - **Drag & drop file send** — Drop a file onto a chat conversation to send it to the contact.
 - **Offer/Accept/Reject workflow** — Recipient chooses to accept or reject each file.
-- **Chunked UDP transfer** — Files split into 1200-byte encrypted chunks for UDP transmission.
+- **Chunked UDP transfer** — Files split into 4KB encrypted chunks with AIMD congestion control.
 - **SHA-256 integrity verification** — File hash verified on completion to ensure no corruption.
 - **Missing chunk retransmission (NACK)** — Receiver detects gaps and requests retransmission of specific chunks.
 - **Transfer cancel** — Either side can cancel mid-transfer.
@@ -138,7 +138,7 @@ P2P encrypted voice + chat + file transfer + screen sharing. No servers. No acco
 
 - **Desktop GUI** — eframe/egui. Works on Windows, macOS, Linux.
 - **Terminal UI (TUI)** — Crossterm-based. Arrow-key navigation, text input. For headless or terminal-only systems.
-- **Sidebar tabs** — Profile, Contacts, Requests, Messages, Call, Settings, Appearance.
+- **Sidebar tabs** — Profile, Messages (with Add Friend), Groups, Call, Settings, Colors, Logs.
 - **Unread badge bubbles** — Red circular badges with count on sidebar tabs and contact list entries.
 - **In-call UI** — Verification code, peer info, mute button, screen share controls, video preview, chat panel.
 - **Theme system** — 18 customizable color properties. Smart randomize generates harmonious palettes.
@@ -168,7 +168,7 @@ P2P encrypted voice + chat + file transfer + screen sharing. No servers. No acco
 
 ## Packet Protocol
 
-23 packet types across voice, messaging, and file transfer:
+50+ packet types across voice, messaging, file transfer, and groups:
 
 | Type | Name | Use |
 |------|------|-----|
@@ -204,11 +204,16 @@ P2P encrypted voice + chat + file transfer + screen sharing. No servers. No acco
 
 ```
 ~/.hostelD/
-  identity.key              # 64 bytes: 32 secret + 32 public (0600)
-  settings.json             # Nickname, devices, port, theme, banned IPs
-  contacts/{pubkey_hex}.json  # One file per contact
-  chats/{contact_id}.enc    # Encrypted chat history per contact
-  hostelD_log.txt           # Debug log
-  notification.mp3          # Notification sound (embedded on first run)
-  ringtone.mp3              # Ringtone sound
+  identity.key                      # 64 bytes: 32 secret + 32 public (0600)
+  settings.json                     # Nickname, devices, port, theme, banned IPs
+  contacts/{pubkey_hex}.json        # One file per contact
+  chats/{contact_id}.enc            # Encrypted 1:1 chat history
+  chats/grp_{group_id}_{ch}.enc     # Encrypted group chat history
+  groups/{group_id}.json            # Group metadata + members
+  avatars/own.png                   # Own avatar
+  avatars/{contact_id}.png          # Contact avatars
+  avatars/group_{group_id}.png      # Group avatars
+  files/{contact_id}/               # Received files
+  files_tmp/                        # In-progress transfers
+  hostelD_log.txt                   # Debug log
 ```
