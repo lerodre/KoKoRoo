@@ -151,6 +151,9 @@ impl HostelApp {
     }
 
     pub(crate) fn open_avatar_picker(&mut self) {
+        // macOS/Windows: use sync dialog on main thread (AppKit requires it).
+        // Linux: needs tokio runtime for xdg-desktop-portal via zbus.
+        #[cfg(target_os = "linux")]
         let picked = std::thread::spawn(|| {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -165,8 +168,18 @@ impl HostelApp {
             })
         }).join().ok().flatten();
 
-        if let Some(handle) = picked {
-            let path = handle.path().to_path_buf();
+        #[cfg(not(target_os = "linux"))]
+        let picked = rfd::FileDialog::new()
+            .set_title("Select avatar image")
+            .add_filter("Images", &["png", "jpg", "jpeg"])
+            .pick_file();
+
+        #[cfg(target_os = "linux")]
+        let path = picked.map(|h| h.path().to_path_buf());
+        #[cfg(not(target_os = "linux"))]
+        let path = picked;
+
+        if let Some(path) = path {
             if let Ok(bytes) = std::fs::read(&path) {
                 // Try to decode to get dimensions
                 if let Ok(img) = image::load_from_memory(&bytes) {

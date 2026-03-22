@@ -605,6 +605,8 @@ impl HostelApp {
         // rfd on Linux uses xdg-desktop-portal via zbus which needs a Tokio runtime.
         if pick_file {
             if let Some(contact) = self.contacts.iter().find(|c| c.contact_id == contact_id).cloned() {
+                // macOS/Windows: sync dialog on main thread. Linux: needs tokio for xdg-portal.
+                #[cfg(target_os = "linux")]
                 let picked = std::thread::spawn(|| {
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
@@ -618,9 +620,17 @@ impl HostelApp {
                     })
                 }).join().ok().flatten();
 
+                #[cfg(not(target_os = "linux"))]
+                let picked = rfd::FileDialog::new()
+                    .set_title("Send file")
+                    .pick_files();
+
                 if let Some(handles) = picked {
                     for handle in handles {
+                        #[cfg(target_os = "linux")]
                         let path: std::path::PathBuf = handle.path().to_path_buf();
+                        #[cfg(not(target_os = "linux"))]
+                        let path: std::path::PathBuf = handle;
                         if path.is_file() {
                             self.send_file_to_contact(&contact_id, &contact, &path);
                         }
