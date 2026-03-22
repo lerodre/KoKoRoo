@@ -140,7 +140,10 @@ impl HostelApp {
         ui.add_space(8.0);
         ui.separator();
         ui.add_space(4.0);
-        ui.label(egui::RichText::new("Blocked Contacts").strong());
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Blocked Contacts").strong());
+            help_circle(ui, &self.settings.theme, "Blocks by identity (public key). If this person changes IP, they stay blocked. Applied when you block someone from the contact list.");
+        });
 
         if self.settings.blocked.is_empty() {
             ui.colored_label(self.settings.theme.text_muted(), "No blocked contacts.");
@@ -180,7 +183,10 @@ impl HostelApp {
         ui.add_space(8.0);
         ui.separator();
         ui.add_space(4.0);
-        ui.label(egui::RichText::new("Banned IPs").strong());
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Banned IPs").strong());
+            help_circle(ui, &self.settings.theme, "Blocks by IP address. Any connection from this IP is rejected, regardless of identity. Added automatically when blocking a contact, by the rate-limit firewall, or manually below. OS-level firewall rule is also applied on Windows/Linux.");
+        });
 
         // Merge persisted bans with runtime auto-bans
         let mut all_ips = self.settings.banned_ips.clone();
@@ -196,6 +202,42 @@ impl HostelApp {
             }
         }
 
+        // Manual IP ban input
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label("IP:");
+            let ip_edit = egui::TextEdit::singleline(&mut self.ban_ip_input)
+                .hint_text("e.g. 2001:db8::1")
+                .desired_width(220.0);
+            egui::Frame::none()
+                .stroke(egui::Stroke::new(1.0, self.settings.theme.separator()))
+                .inner_margin(0.0)
+                .show(ui, |ui| { ui.add(ip_edit); });
+            if ui.button("Ban").clicked() {
+                let ip = self.ban_ip_input.trim().to_string();
+                if ip.is_empty() {
+                    self.ban_ip_status = "Error: IP is required".to_string();
+                } else if self.settings.is_ip_banned(&ip) {
+                    self.ban_ip_status = "Already banned".to_string();
+                } else {
+                    self.settings.ban_ip(&ip);
+                    self.ban_ip_status = format!("Banned {}", ip);
+                    self.ban_ip_input.clear();
+                    // Also apply OS-level firewall block
+                    apply_os_firewall_block(&ip);
+                }
+            }
+        });
+        if !self.ban_ip_status.is_empty() {
+            let color = if self.ban_ip_status.starts_with("Error") {
+                self.settings.theme.error()
+            } else {
+                self.settings.theme.accent()
+            };
+            ui.colored_label(color, &self.ban_ip_status);
+        }
+
+        ui.add_space(4.0);
         if all_ips.is_empty() {
             ui.colored_label(self.settings.theme.text_muted(), "No banned IPs.");
         } else {
@@ -211,6 +253,8 @@ impl HostelApp {
             }
             if let Some(ip) = unban_ip {
                 self.settings.unban_ip(&ip);
+                // Also remove OS-level firewall block
+                remove_os_firewall_block(&ip);
             }
         }
 
@@ -324,5 +368,122 @@ impl HostelApp {
         if !updates.is_empty() || reset || randomize {
             self.settings.save();
         }
+    }
+}
+
+/// Draw a small circle with "?" inside. Darkens on hover and shows tooltip.
+fn help_circle(ui: &mut egui::Ui, theme: &crate::theme::Theme, tooltip: &str) {
+    let radius = 8.0;
+    let size = egui::vec2(radius * 2.0 + 4.0, radius * 2.0);
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let center = rect.center();
+
+    let bg = if resp.hovered() {
+        theme.text_muted()
+    } else {
+        theme.text_muted().gamma_multiply(0.5)
+    };
+
+    let painter = ui.painter();
+    painter.circle_filled(center, radius, bg);
+
+    let font = egui::FontId::proportional(11.0);
+    let galley = painter.layout_no_wrap("?".to_string(), font, egui::Color32::WHITE);
+    painter.galley(
+        egui::pos2(center.x - galley.size().x / 2.0, center.y - galley.size().y / 2.0),
+        galley,
+        egui::Color32::WHITE,
+    );
+
+    resp.on_hover_text(tooltip);
+}
+
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+/// Apply an OS-level firewall block for an IP address (best-effort, no error on failure).
+fn apply_os_firewall_block(ip: &str) {
+    let rule_name = format!("hostelD-ban-{}", ip.replace(':', "-"));
+    log_fmt!("[settings] applying OS firewall block for {} (rule={})", ip, rule_name);
+
+    #[cfg(target_os = "windows")]
+    {
+        // Windows Firewall: add inbound block rule
+        std::thread::spawn({
+            let ip = ip.to_string();
+            let rule_name = rule_name.clone();
+            move || {
+                std::process::Command::new("netsh")
+                    .args(["advfirewall", "firewall", "add", "rule",
+                        &format!("name={}", rule_name),
+                        "dir=in", "action=block",
+                        &format!("remoteip={}", ip),
+                        "protocol=any"])
+                    .creation_flags(0x08000000) // CREATE_NO_WINDOW
+                    .output()
+                    .ok();
+            }
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        std::thread::spawn({
+            let ip = ip.to_string();
+            move || {
+                // ip6tables for IPv6, iptables for IPv4
+                let cmd = if ip.contains(':') { "ip6tables" } else { "iptables" };
+                std::process::Command::new(cmd)
+                    .args(["-A", "INPUT", "-s", &ip, "-j", "DROP"])
+                    .output()
+                    .ok();
+            }
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // macOS uses pf — adding rules requires root, skip silently
+        let _ = ip;
+    }
+}
+
+/// Remove an OS-level firewall block for an IP address.
+fn remove_os_firewall_block(ip: &str) {
+    let rule_name = format!("hostelD-ban-{}", ip.replace(':', "-"));
+    log_fmt!("[settings] removing OS firewall block for {} (rule={})", ip, rule_name);
+
+    #[cfg(target_os = "windows")]
+    {
+        std::thread::spawn({
+            let rule_name = rule_name.clone();
+            move || {
+                std::process::Command::new("netsh")
+                    .args(["advfirewall", "firewall", "delete", "rule",
+                        &format!("name={}", rule_name)])
+                    .creation_flags(0x08000000) // CREATE_NO_WINDOW
+                    .output()
+                    .ok();
+            }
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        std::thread::spawn({
+            let ip = ip.to_string();
+            move || {
+                let cmd = if ip.contains(':') { "ip6tables" } else { "iptables" };
+                std::process::Command::new(cmd)
+                    .args(["-D", "INPUT", "-s", &ip, "-j", "DROP"])
+                    .output()
+                    .ok();
+            }
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = ip;
     }
 }

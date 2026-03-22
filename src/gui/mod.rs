@@ -217,6 +217,9 @@ pub struct HostelApp {
 
     // IP privacy: censored by default
     pub(crate) show_ips: bool,
+    // Ban IP input field in Settings
+    pub(crate) ban_ip_input: String,
+    pub(crate) ban_ip_status: String,
 
     // Incoming call notification
     pub(crate) incoming_call: Option<IncomingCallInfo>,
@@ -474,6 +477,8 @@ impl HostelApp {
             show_add_friend: false,
             log_filter: LogFilter::All,
             show_ips: false,
+            ban_ip_input: String::new(),
+            ban_ip_status: String::new(),
             incoming_call: None,
             incoming_call_attention: false,
             incoming_group_invite: None,
