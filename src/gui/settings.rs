@@ -371,7 +371,7 @@ impl HostelApp {
     }
 }
 
-/// Draw a small circle with "?" inside. Darkens on hover, shows tooltip on click.
+/// Draw a small circle with "?" inside. Darkens on hover, shows tooltip on hover or click.
 fn help_circle(ui: &mut egui::Ui, theme: &crate::theme::Theme, tooltip: &str) {
     let radius = 8.0;
     let size = egui::vec2(radius * 2.0 + 4.0, radius * 2.0);
@@ -395,20 +395,10 @@ fn help_circle(ui: &mut egui::Ui, theme: &crate::theme::Theme, tooltip: &str) {
         egui::Color32::WHITE,
     );
 
-    if resp.clicked() {
-        // Toggle popup via egui memory
-        let popup_id = ui.id().with("help_popup").with(tooltip.as_ptr() as usize);
-        let is_open = ui.memory(|m| m.data.get_temp::<bool>(popup_id).unwrap_or(false));
-        ui.memory_mut(|m| m.data.insert_temp(popup_id, !is_open));
+    // Show tooltip on hover OR click
+    if resp.hovered() || resp.clicked() {
+        resp.show_tooltip_text(tooltip);
     }
-
-    let popup_id = ui.id().with("help_popup").with(tooltip.as_ptr() as usize);
-    let is_open = ui.memory(|m| m.data.get_temp::<bool>(popup_id).unwrap_or(false));
-    if is_open {
-        ui.colored_label(theme.text_muted(), tooltip);
-    }
-
-    resp.on_hover_text(tooltip);
 }
 
 #[cfg(target_os = "windows")]
