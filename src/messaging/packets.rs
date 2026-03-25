@@ -121,21 +121,62 @@ impl MsgDaemon {
                             log_fmt!("[daemon] MSG_HELLO from {} (state=AwaitingIdentity) — ignoring (session already established)", from);
                         }
                     } else {
-                        // Incoming connection from unknown peer
-                        // Check if IP is banned before accepting
-                        let ip_str = from.ip().to_string();
-                        if self.settings.is_ip_banned(&ip_str) {
-                            log_fmt!("[daemon] MSG_HELLO from {} — BLOCKED (IP banned)", from);
-                            continue;
-                        }
-                        log_fmt!("[daemon] MSG_HELLO from unknown {} — accepting incoming connection", from);
-                        if let Some(session) = protocol::handle_incoming_hello(
-                            data, from, socket, &self.identity, &self.nickname,
-                        ) {
-                            log_fmt!("[daemon]   incoming session created (AwaitingIdentity)");
-                            self.peers.insert(from, session);
+                        // Before treating as unknown incoming, check if this could be
+                        // a response to a pending outgoing_request from a different
+                        // IPv6 address (common: OS picks a different source address
+                        // due to IPv6 privacy extensions / multiple SLAAC addresses).
+                        let matching_req = self.outgoing_requests.keys()
+                            .find(|addr| matches!(
+                                self.outgoing_requests.get(addr).map(|p| &p.state),
+                                Some(super::session::PeerState::AwaitingHello { .. })
+                            ))
+                            .copied();
+
+                        if let Some(orig_addr) = matching_req {
+                            log_fmt!("[daemon] MSG_HELLO from {} — matched pending outgoing_request for {} (IPv6 address mismatch)", from, orig_addr);
+                            let mut peer = self.outgoing_requests.remove(&orig_addr).unwrap();
+                            let peer_ephemeral = match crate::crypto::parse_msg_hello(data) {
+                                Some(pk) => pk,
+                                None => continue,
+                            };
+                            let our_secret = match &mut peer.state {
+                                super::session::PeerState::AwaitingHello { our_secret, .. } => {
+                                    our_secret.take()
+                                }
+                                _ => continue,
+                            };
+                            let our_secret = match our_secret {
+                                Some(s) => s,
+                                None => continue,
+                            };
+                            let (session, ephemeral_shared) = crate::crypto::complete_handshake(our_secret, &peer_ephemeral);
+                            peer.session = Some(session);
+                            peer.ephemeral_shared = Some(ephemeral_shared);
+                            peer.upgraded_session = None;
+                            peer.identity_confirmed = false;
+                            peer.state = super::session::PeerState::AwaitingIdentity;
+                            peer.peer_addr = from;
+                            peer.touch();
+                            // Send REQUEST (not IDENTITY) — same as exact-match path
+                            protocol::send_request(&mut peer, socket, &self.identity, &self.nickname);
+                            self.outgoing_requests.insert(from, peer);
+                            log_fmt!("[daemon]   re-keyed outgoing_request from {} to {}", orig_addr, from);
                         } else {
-                            log_fmt!("[daemon]   incoming session FAILED to create");
+                            // Truly unknown incoming connection
+                            let ip_str = from.ip().to_string();
+                            if self.settings.is_ip_banned(&ip_str) {
+                                log_fmt!("[daemon] MSG_HELLO from {} — BLOCKED (IP banned)", from);
+                                continue;
+                            }
+                            log_fmt!("[daemon] MSG_HELLO from unknown {} — accepting incoming connection", from);
+                            if let Some(session) = protocol::handle_incoming_hello(
+                                data, from, socket, &self.identity, &self.nickname,
+                            ) {
+                                log_fmt!("[daemon]   incoming session created (AwaitingIdentity)");
+                                self.peers.insert(from, session);
+                            } else {
+                                log_fmt!("[daemon]   incoming session FAILED to create");
+                            }
                         }
                     }
                 }
