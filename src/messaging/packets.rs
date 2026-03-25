@@ -48,6 +48,8 @@ impl MsgDaemon {
 
             match pkt_type {
                 PKT_MSG_HELLO => {
+                    let req_keys: Vec<_> = self.outgoing_requests.keys().collect();
+                    log_fmt!("[daemon] HELLO from {} — outgoing_requests keys: {:?}", from, req_keys);
                     if let Some(peer) = self.outgoing_requests.get_mut(&from) {
                         // HELLO response for an outgoing contact request
                         // Complete handshake but send REQUEST instead of IDENTITY
