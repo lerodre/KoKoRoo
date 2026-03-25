@@ -88,19 +88,14 @@ impl MsgDaemon {
                                     super::session::PeerState::AwaitingIdentity => "AwaitingIdentity",
                                     super::session::PeerState::Connected => "Connected",
                                 });
-                        } else {
-                            // Connected or AwaitingIdentity — peer either restarted
-                            // or we completed our handshake but they never got our response
-                            // (simultaneous connection race). Reset and accept fresh.
+                        } else if peer.is_connected() {
+                            // Connected — peer restarted. Reset and accept fresh.
                             let old_cid = peer.contact_id.clone();
-                            let state_name = if peer.is_connected() { "Connected" } else { "AwaitingIdentity" };
-                            log_fmt!("[daemon] MSG_HELLO from {} (state={}) — resetting, accepting as incoming", from, state_name);
-                            if peer.is_connected() {
-                                self.event_tx.send(MsgEvent::PeerStatus {
-                                    contact_id: old_cid.clone(),
-                                    online: false,
-                                }).ok();
-                            }
+                            log_fmt!("[daemon] MSG_HELLO from {} (state=Connected) — resetting, accepting as incoming", from);
+                            self.event_tx.send(MsgEvent::PeerStatus {
+                                contact_id: old_cid.clone(),
+                                online: false,
+                            }).ok();
                             self.peers.remove(&from);
                             if !old_cid.is_empty() {
                                 self.contact_addrs.remove(&old_cid);
@@ -112,10 +107,16 @@ impl MsgDaemon {
                                 if let Some(session) = protocol::handle_incoming_hello(
                                     data, from, socket, &self.identity, &self.nickname,
                                 ) {
-                                    log_fmt!("[daemon]   re-handshake OK (AwaitingIdentity)");
+                                    log_fmt!("[daemon]   re-handshake OK");
                                     self.peers.insert(from, session);
                                 }
                             }
+                        } else {
+                            // AwaitingIdentity — we already have a valid session from a
+                            // completed handshake. Ignore duplicate/late HELLO to avoid
+                            // resetting our session key and causing an infinite
+                            // handshake-identity decrypt loop.
+                            log_fmt!("[daemon] MSG_HELLO from {} (state=AwaitingIdentity) — ignoring (session already established)", from);
                         }
                     } else {
                         // Incoming connection from unknown peer
