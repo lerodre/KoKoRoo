@@ -337,8 +337,20 @@ impl MsgDaemon {
                             peer.peer_nickname = contact.nickname.clone();
                             peer.state = super::session::PeerState::Connected;
                             peer.touch();
+
+                            // Notify GUI peer is online
+                            self.event_tx.send(MsgEvent::PeerStatus {
+                                contact_id: contact_id.clone(),
+                                online: true,
+                            }).ok();
+
+                            // Send our presence so the peer sees us online too
+                            if let Some(ref socket) = self.socket {
+                                protocol::send_presence(peer, socket, self.our_presence);
+                            }
                         }
                         self.contact_addrs.insert(contact_id.clone(), peer_addr);
+                        self.retry_state.insert(contact_id.clone(), (Instant::now(), 0));
 
                         self.event_tx.send(MsgEvent::RequestAccepted {
                             contact_id,
