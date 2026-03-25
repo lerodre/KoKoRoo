@@ -48,8 +48,6 @@ impl MsgDaemon {
 
             match pkt_type {
                 PKT_MSG_HELLO => {
-                    let req_keys: Vec<_> = self.outgoing_requests.keys().collect();
-                    log_fmt!("[daemon] HELLO from {} — outgoing_requests keys: {:?}", from, req_keys);
                     if let Some(peer) = self.outgoing_requests.get_mut(&from) {
                         // HELLO response for an outgoing contact request
                         // Complete handshake but send REQUEST instead of IDENTITY
@@ -121,19 +119,31 @@ impl MsgDaemon {
                             log_fmt!("[daemon] MSG_HELLO from {} (state=AwaitingIdentity) — ignoring (session already established)", from);
                         }
                     } else {
-                        // Before treating as unknown incoming, check if this could be
-                        // a response to a pending outgoing_request from a different
-                        // IPv6 address (common: OS picks a different source address
-                        // due to IPv6 privacy extensions / multiple SLAAC addresses).
-                        let matching_req = self.outgoing_requests.keys()
-                            .find(|addr| matches!(
-                                self.outgoing_requests.get(addr).map(|p| &p.state),
-                                Some(super::session::PeerState::AwaitingHello { .. })
-                            ))
-                            .copied();
+                        // Check if this is a response from a different SLAAC address
+                        // of the same peer (IPv6 privacy extensions). Match by /64
+                        // prefix so only devices on the same network segment qualify.
+                        let matching_req = if let std::net::IpAddr::V6(from_v6) = from.ip() {
+                            let from_prefix = u128::from(from_v6) >> 64;
+                            self.outgoing_requests.keys()
+                                .find(|addr| {
+                                    if let std::net::IpAddr::V6(req_v6) = addr.ip() {
+                                        let req_prefix = u128::from(req_v6) >> 64;
+                                        req_prefix == from_prefix
+                                            && matches!(
+                                                self.outgoing_requests.get(addr).map(|p| &p.state),
+                                                Some(super::session::PeerState::AwaitingHello { .. })
+                                            )
+                                    } else {
+                                        false
+                                    }
+                                })
+                                .copied()
+                        } else {
+                            None
+                        };
 
                         if let Some(orig_addr) = matching_req {
-                            log_fmt!("[daemon] MSG_HELLO from {} — matched pending outgoing_request for {} (IPv6 address mismatch)", from, orig_addr);
+                            log_fmt!("[daemon] MSG_HELLO from {} — matched outgoing_request {} (same /64 prefix)", from, orig_addr);
                             let mut peer = self.outgoing_requests.remove(&orig_addr).unwrap();
                             let peer_ephemeral = match crate::crypto::parse_msg_hello(data) {
                                 Some(pk) => pk,
@@ -157,12 +167,10 @@ impl MsgDaemon {
                             peer.state = super::session::PeerState::AwaitingIdentity;
                             peer.peer_addr = from;
                             peer.touch();
-                            // Send REQUEST (not IDENTITY) — same as exact-match path
                             protocol::send_request(&mut peer, socket, &self.identity, &self.nickname);
                             self.outgoing_requests.insert(from, peer);
-                            log_fmt!("[daemon]   re-keyed outgoing_request from {} to {}", orig_addr, from);
                         } else {
-                            // Truly unknown incoming connection
+                            // Unknown incoming connection
                             let ip_str = from.ip().to_string();
                             if self.settings.is_ip_banned(&ip_str) {
                                 log_fmt!("[daemon] MSG_HELLO from {} — BLOCKED (IP banned)", from);

@@ -265,7 +265,6 @@ impl MsgDaemon {
                     if let Some(ref socket) = self.socket {
                         let (our_secret, our_pubkey) = crate::crypto::generate_keypair();
                         let hello = crate::crypto::build_msg_hello(&our_pubkey);
-                        log_fmt!("[daemon] SendRequest: sending HELLO to {}", peer_addr);
                         if socket.send_to(&hello, peer_addr).is_ok() {
                             let session = PeerSession {
                                 contact_id: String::new(),
