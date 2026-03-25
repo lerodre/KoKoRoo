@@ -88,19 +88,14 @@ impl MsgDaemon {
                                     super::session::PeerState::AwaitingIdentity => "AwaitingIdentity",
                                     super::session::PeerState::Connected => "Connected",
                                 });
-                        } else {
-                            // Connected or AwaitingIdentity — peer either restarted
-                            // or we completed our handshake but they never got our response
-                            // (simultaneous connection race). Reset and accept fresh.
+                        } else if peer.is_connected() {
+                            // Connected — peer restarted. Reset and accept fresh.
                             let old_cid = peer.contact_id.clone();
-                            let state_name = if peer.is_connected() { "Connected" } else { "AwaitingIdentity" };
-                            log_fmt!("[daemon] MSG_HELLO from {} (state={}) — resetting, accepting as incoming", from, state_name);
-                            if peer.is_connected() {
-                                self.event_tx.send(MsgEvent::PeerStatus {
-                                    contact_id: old_cid.clone(),
-                                    online: false,
-                                }).ok();
-                            }
+                            log_fmt!("[daemon] MSG_HELLO from {} (state=Connected) — resetting, accepting as incoming", from);
+                            self.event_tx.send(MsgEvent::PeerStatus {
+                                contact_id: old_cid.clone(),
+                                online: false,
+                            }).ok();
                             self.peers.remove(&from);
                             if !old_cid.is_empty() {
                                 self.contact_addrs.remove(&old_cid);
@@ -112,27 +107,84 @@ impl MsgDaemon {
                                 if let Some(session) = protocol::handle_incoming_hello(
                                     data, from, socket, &self.identity, &self.nickname,
                                 ) {
-                                    log_fmt!("[daemon]   re-handshake OK (AwaitingIdentity)");
+                                    log_fmt!("[daemon]   re-handshake OK");
                                     self.peers.insert(from, session);
                                 }
                             }
+                        } else {
+                            // AwaitingIdentity — we already have a valid session from a
+                            // completed handshake. Ignore duplicate/late HELLO to avoid
+                            // resetting our session key and causing an infinite
+                            // handshake-identity decrypt loop.
+                            log_fmt!("[daemon] MSG_HELLO from {} (state=AwaitingIdentity) — ignoring (session already established)", from);
                         }
                     } else {
-                        // Incoming connection from unknown peer
-                        // Check if IP is banned before accepting
-                        let ip_str = from.ip().to_string();
-                        if self.settings.is_ip_banned(&ip_str) {
-                            log_fmt!("[daemon] MSG_HELLO from {} — BLOCKED (IP banned)", from);
-                            continue;
-                        }
-                        log_fmt!("[daemon] MSG_HELLO from unknown {} — accepting incoming connection", from);
-                        if let Some(session) = protocol::handle_incoming_hello(
-                            data, from, socket, &self.identity, &self.nickname,
-                        ) {
-                            log_fmt!("[daemon]   incoming session created (AwaitingIdentity)");
-                            self.peers.insert(from, session);
+                        // Check if this is a response from a different SLAAC address
+                        // of the same peer (IPv6 privacy extensions). Match by /64
+                        // prefix so only devices on the same network segment qualify.
+                        let matching_req = if let std::net::IpAddr::V6(from_v6) = from.ip() {
+                            let from_prefix = u128::from(from_v6) >> 64;
+                            self.outgoing_requests.keys()
+                                .find(|addr| {
+                                    if let std::net::IpAddr::V6(req_v6) = addr.ip() {
+                                        let req_prefix = u128::from(req_v6) >> 64;
+                                        req_prefix == from_prefix
+                                            && matches!(
+                                                self.outgoing_requests.get(addr).map(|p| &p.state),
+                                                Some(super::session::PeerState::AwaitingHello { .. })
+                                            )
+                                    } else {
+                                        false
+                                    }
+                                })
+                                .copied()
                         } else {
-                            log_fmt!("[daemon]   incoming session FAILED to create");
+                            None
+                        };
+
+                        if let Some(orig_addr) = matching_req {
+                            log_fmt!("[daemon] MSG_HELLO from {} — matched outgoing_request {} (same /64 prefix)", from, orig_addr);
+                            let mut peer = self.outgoing_requests.remove(&orig_addr).unwrap();
+                            let peer_ephemeral = match crate::crypto::parse_msg_hello(data) {
+                                Some(pk) => pk,
+                                None => continue,
+                            };
+                            let our_secret = match &mut peer.state {
+                                super::session::PeerState::AwaitingHello { our_secret, .. } => {
+                                    our_secret.take()
+                                }
+                                _ => continue,
+                            };
+                            let our_secret = match our_secret {
+                                Some(s) => s,
+                                None => continue,
+                            };
+                            let (session, ephemeral_shared) = crate::crypto::complete_handshake(our_secret, &peer_ephemeral);
+                            peer.session = Some(session);
+                            peer.ephemeral_shared = Some(ephemeral_shared);
+                            peer.upgraded_session = None;
+                            peer.identity_confirmed = false;
+                            peer.state = super::session::PeerState::AwaitingIdentity;
+                            peer.peer_addr = from;
+                            peer.touch();
+                            protocol::send_request(&mut peer, socket, &self.identity, &self.nickname);
+                            self.outgoing_requests.insert(from, peer);
+                        } else {
+                            // Unknown incoming connection
+                            let ip_str = from.ip().to_string();
+                            if self.settings.is_ip_banned(&ip_str) {
+                                log_fmt!("[daemon] MSG_HELLO from {} — BLOCKED (IP banned)", from);
+                                continue;
+                            }
+                            log_fmt!("[daemon] MSG_HELLO from unknown {} — accepting incoming connection", from);
+                            if let Some(session) = protocol::handle_incoming_hello(
+                                data, from, socket, &self.identity, &self.nickname,
+                            ) {
+                                log_fmt!("[daemon]   incoming session created (AwaitingIdentity)");
+                                self.peers.insert(from, session);
+                            } else {
+                                log_fmt!("[daemon]   incoming session FAILED to create");
+                            }
                         }
                     }
                 }
