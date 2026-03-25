@@ -12,6 +12,7 @@ use crate::crypto::{
     PKT_GRP_UPDATE, PKT_GRP_AVATAR_OFFER, PKT_GRP_AVATAR_DATA, PKT_GRP_AVATAR_ACK,
     PKT_GRP_MEMBER_SYNC,
     PKT_GRP_CALL_SIGNAL,
+    PKT_MSG_DELETE_CONTACT, PKT_MSG_DELETE_ACK,
 };
 use crate::identity::Identity;
 
@@ -863,4 +864,18 @@ pub fn handle_call_signal(data: &[u8], peer: &mut PeerSession) -> Option<(String
     let active = plain[plain.len() - 2] == 1;
     let call_mode = plain[plain.len() - 1];
     Some((parts[0].to_string(), parts[1].to_string(), active, call_mode))
+}
+
+/// Send a contact deletion signal to a peer.
+pub fn send_delete_contact(peer: &PeerSession, socket: &UdpSocket) {
+    if let Some(pkt) = peer.encrypt_packet(PKT_MSG_DELETE_CONTACT, &[]) {
+        socket.send_to(&pkt, peer.peer_addr).ok();
+    }
+}
+
+/// Send a deletion acknowledgement to a peer.
+pub fn send_delete_ack(peer: &PeerSession, socket: &UdpSocket) {
+    if let Some(pkt) = peer.encrypt_packet(PKT_MSG_DELETE_ACK, &[]) {
+        socket.send_to(&pkt, peer.peer_addr).ok();
+    }
 }

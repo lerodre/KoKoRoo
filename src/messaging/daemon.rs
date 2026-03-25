@@ -203,6 +203,8 @@ pub struct MsgDaemon {
     pub(super) pending_member_syncs: HashMap<(String, String), Vec<crate::group::GroupMember>>,
     /// Contacts that failed to connect (max HELLO retries). Cooldown before retrying.
     pub(super) failed_contacts: HashMap<String, Instant>,
+    /// Pending contact deletions (queued when peer is offline).
+    pub(super) pending_deletes: super::pending_deletes::PendingDeleteStore,
     pub(super) hash_results_tx: mpsc::Sender<HashResult>,
     pub(super) hash_results_rx: mpsc::Receiver<HashResult>,
     pub(super) verify_results_tx: mpsc::Sender<VerifyResult>,
@@ -221,6 +223,7 @@ impl MsgDaemon {
     ) -> Self {
         let settings = Settings::load();
         let initial_ip = crate::gui::get_best_ipv6(&settings.network_adapter);
+        let pending_deletes = super::pending_deletes::PendingDeleteStore::load(&identity.secret);
         let (hash_results_tx, hash_results_rx) = mpsc::channel();
         let (verify_results_tx, verify_results_rx) = mpsc::channel();
         let (sender_events_tx, sender_events_rx) = mpsc::channel();
@@ -263,6 +266,7 @@ impl MsgDaemon {
             group_avatar_sends: HashMap::new(),
             pending_member_syncs: HashMap::new(),
             failed_contacts: HashMap::new(),
+            pending_deletes,
             hash_results_tx,
             hash_results_rx,
             verify_results_tx,

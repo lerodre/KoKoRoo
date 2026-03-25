@@ -687,8 +687,112 @@ impl MsgDaemon {
                         }
                     }
                 }
+
+                MsgCommand::DeleteContact { contact_id, peer_pubkey } => {
+                    log_fmt!("[daemon] DeleteContact contact_id={}", contact_id);
+                    let peer_pubkey_hex = crate::identity::pubkey_hex(&peer_pubkey);
+
+                    // Try to send DELETE signal if peer is online
+                    let mut sent = false;
+                    if let Some(ref socket) = self.socket {
+                        if let Some(addr) = self.contact_addrs.get(&contact_id) {
+                            if let Some(peer) = self.peers.get(addr) {
+                                if peer.is_connected() {
+                                    protocol::send_delete_contact(peer, socket);
+                                    sent = true;
+                                    log_fmt!("[daemon]   DELETE signal sent to {}", addr);
+                                }
+                            }
+                        }
+                    }
+
+                    // If peer is offline, queue for later delivery
+                    if !sent {
+                        let last_addr = crate::identity::load_contact(&peer_pubkey)
+                            .map(|c| format!("[{}]:{}", c.last_address, c.last_port))
+                            .unwrap_or_default();
+                        self.pending_deletes.enqueue(
+                            contact_id.clone(),
+                            peer_pubkey_hex,
+                            last_addr,
+                        );
+                        log_fmt!("[daemon]   peer offline, queued pending delete");
+                    }
+
+                    // Local cleanup
+                    self.cleanup_deleted_contact(&contact_id, &peer_pubkey);
+                }
             }
         }
+    }
+
+    /// Clean up all local data for a deleted contact.
+    pub(super) fn cleanup_deleted_contact(&mut self, contact_id: &str, peer_pubkey: &[u8; 32]) {
+        // 1. Delete contact file from disk
+        identity::delete_contact(peer_pubkey);
+
+        // 2. Delete chat history
+        crate::chat::delete_chat_history(contact_id);
+
+        // 3. Delete outbox
+        self.outboxes.remove(contact_id);
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        let base = std::path::PathBuf::from(&home).join(".kokoroo");
+        let outbox_path = base.join("outbox").join(format!("{contact_id}.enc"));
+        std::fs::remove_file(outbox_path).ok();
+
+        // 4. Delete pending invites
+        self.pending_invites.remove(contact_id);
+        let invites_path = base.join("pending_invites").join(format!("{contact_id}.enc"));
+        std::fs::remove_file(invites_path).ok();
+
+        // 5. Remove from in-memory tracking
+        if let Some(addr) = self.contact_addrs.remove(contact_id) {
+            self.peers.remove(&addr);
+            self.hello_retries.remove(&addr);
+        }
+        self.retry_state.remove(contact_id);
+        self.failed_contacts.remove(contact_id);
+        self.avatar_sends.remove(contact_id);
+
+        // 6. Cancel active file transfers for this contact
+        let keys_to_remove: Vec<_> = self.file_transfers.keys()
+            .filter(|(cid, _)| cid == contact_id)
+            .cloned().collect();
+        for key in keys_to_remove {
+            if let Some(mut ft) = self.file_transfers.remove(&key) {
+                match ft {
+                    FileTransfer::Receiving(ref mut recv) => recv.cleanup(),
+                    FileTransfer::SendingThreaded { ref cmd_tx, .. } => {
+                        cmd_tx.send(crate::filetransfer::sender::SenderThreadCmd::Cancel).ok();
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // 7. Remove from contact lists
+        self.all_contacts.retain(|(cid, _, _)| cid != contact_id);
+        self.connect_queue.retain(|(cid, _, _)| cid != contact_id);
+
+        // 8. Auto-delete two-person groups
+        let our_pubkey = self.identity.pubkey;
+        let groups = crate::group::load_all_groups();
+        for g in &groups {
+            if g.members.len() == 2
+                && g.members.iter().any(|m| m.pubkey == *peer_pubkey)
+                && g.members.iter().any(|m| m.pubkey == our_pubkey)
+            {
+                log_fmt!("[daemon]   auto-deleting 2-person group {}", g.group_id);
+                crate::group::delete_group(&g.group_id);
+            }
+        }
+
+        // 9. Delete contact avatar
+        let avatar_path = base.join("avatars").join(format!("{contact_id}.png"));
+        std::fs::remove_file(avatar_path).ok();
+
+        log_fmt!("[daemon]   local cleanup done for contact {}", contact_id);
     }
 }
 

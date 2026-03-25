@@ -211,6 +211,8 @@ pub struct HostelApp {
     pub(crate) friends_sub_tab: FriendsSubTab,
     /// Whether the "Add Friend" panel is expanded inside Messages tab.
     pub(crate) show_add_friend: bool,
+    /// Index into self.contacts for pending delete confirmation dialog.
+    pub(crate) msg_confirm_delete_contact: Option<usize>,
 
     // Logs tab filter
     pub(crate) log_filter: LogFilter,
@@ -475,6 +477,7 @@ impl HostelApp {
             req_status: String::new(),
             friends_sub_tab: FriendsSubTab::List,
             show_add_friend: false,
+            msg_confirm_delete_contact: None,
             log_filter: LogFilter::All,
             show_ips: false,
             ban_ip_input: String::new(),
@@ -1520,6 +1523,23 @@ impl eframe::App for HostelApp {
                         }
                         // Clean up empty entries
                         channels.retain(|_, v| !v.is_empty());
+                    }
+                    MsgEvent::ContactDeletedByPeer { contact_id, nickname } => {
+                        log_fmt!("[gui] Contact deleted by peer: {} ({})", nickname, &contact_id[..8.min(contact_id.len())]);
+                        // Close chat if viewing this contact
+                        if self.msg_active_chat.as_deref() == Some(&contact_id) {
+                            self.msg_active_chat = None;
+                        }
+                        // Clean up GUI state
+                        self.msg_chat_histories.remove(&contact_id);
+                        self.msg_peer_online.remove(&contact_id);
+                        self.msg_peer_presence.remove(&contact_id);
+                        self.msg_unread.remove(&contact_id);
+                        self.contact_avatar_textures.remove(&contact_id);
+                        // Reload contacts
+                        self.contacts = identity::load_all_contacts();
+                        // Also reload groups in case two-person groups were deleted
+                        self.groups = crate::group::load_all_groups();
                     }
                 }
             }
