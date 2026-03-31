@@ -115,12 +115,19 @@ impl MsgDaemon {
                             }
                         } else {
                             // AwaitingIdentity — check how long we've been waiting.
-                            // If recent (<5s), ignore to avoid the infinite handshake loop.
-                            // If stale (>5s), the peer likely restarted (e.g. post-call
-                            // reconnect) and we should accept the fresh HELLO.
-                            let stale = peer.last_activity.elapsed() > Duration::from_secs(5);
+                            // Use a randomized timeout (5-10s) to prevent both peers
+                            // from resetting simultaneously in a crossed-handshake loop.
+                            // When both peers ConnectAll at startup, they can end up in
+                            // AwaitingIdentity at the same time. If both reset at 5s, they
+                            // generate new keys simultaneously, causing perpetual decrypt failures.
+                            let peer_addr_hash = {
+                                let bytes = from.ip().to_string();
+                                bytes.as_bytes().iter().fold(0u64, |acc, &b| acc.wrapping_add(b as u64))
+                            };
+                            let jitter = 5 + (peer_addr_hash % 6); // 5-10 seconds
+                            let stale = peer.last_activity.elapsed() > Duration::from_secs(jitter);
                             if stale {
-                                log_fmt!("[daemon] MSG_HELLO from {} (state=AwaitingIdentity, stale) — resetting, accepting as incoming", from);
+                                log_fmt!("[daemon] MSG_HELLO from {} (state=AwaitingIdentity, stale {}s) — resetting, accepting as incoming", from, jitter);
                                 self.peers.remove(&from);
                                 let ip_str = from.ip().to_string();
                                 if !self.settings.is_ip_banned(&ip_str) {
