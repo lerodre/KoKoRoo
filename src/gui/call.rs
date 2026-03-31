@@ -699,14 +699,14 @@ impl HostelApp {
                             ui.horizontal_wrapped(|ui| {
                                 ui.colored_label(self.settings.theme.text_muted(), &time);
                                 ui.colored_label(self.settings.theme.chat_self(), "You:");
-                                ui.label(&msg.text);
                             });
+                            ui.label(egui::RichText::new(&msg.text).size(14.0));
                         } else {
                             ui.horizontal_wrapped(|ui| {
                                 ui.colored_label(self.settings.theme.text_muted(), &time);
                                 ui.colored_label(self.settings.theme.chat_peer(), &peer_label);
-                                ui.label(&msg.text);
                             });
+                            ui.label(egui::RichText::new(&msg.text).size(14.0));
                         }
                     }
                 }
