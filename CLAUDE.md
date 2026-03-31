@@ -141,3 +141,13 @@ Opus codec: 48kHz mono, 960-sample frames (20ms), 64kbps bitrate, VOIP applicati
 
 - **No credits/co-author lines** in commit messages. Never add `Co-Authored-By` or similar attribution tags.
 - Commit messages should be concise and describe what changed and why.
+
+## Branch & release workflow
+
+- **`master`** is the only permanent branch. All work merges back to it.
+- **Fixes**: `fix/<short-description>` (e.g. `fix/handshake-loop`). For bug fixes.
+- **Features**: `feat/<short-description>` (e.g. `feat/delete-contact`). For new functionality.
+- Branches are deleted after merging. No long-lived branches.
+- **Don't release per-fix.** Accumulate fixes and features, then cut a single release.
+- Track pending changes in `CHANGELOG.unreleased.md`. When releasing, move its contents to the GitHub release notes and clear the file.
+- **Versioning**: semver. `v0.1.1` for patches/small features, `v0.2.0` for major features.
