@@ -32,7 +32,7 @@ The file `~/.kokoroo/identity.key` (64 bytes: 32 secret + 32 public) controls ev
 - Windows: depends on NTFS folder permissions
 - Full disk encryption (BitLocker/LUKS) protects against physical access
 
-**Limitation:** Desktop OSes (Windows/Linux/macOS) cannot restrict per-app file access. Any process running as the user can read the file. Only iOS/Android provide real app isolation.
+**Limitation:** Desktop OSes (Windows/Linux/macOS) cannot restrict per-app file access. Any process running as the user can read the file.
 
 ---
 
