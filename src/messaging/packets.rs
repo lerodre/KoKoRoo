@@ -16,6 +16,7 @@ use crate::crypto::{
     PKT_GRP_UPDATE, PKT_GRP_AVATAR_OFFER, PKT_GRP_AVATAR_DATA, PKT_GRP_AVATAR_ACK,
     PKT_GRP_MEMBER_SYNC,
     PKT_GRP_CALL_SIGNAL,
+    PKT_MSG_DELETE_CONTACT, PKT_MSG_DELETE_ACK,
 };
 use crate::identity::{self};
 use crate::filetransfer;
@@ -34,6 +35,7 @@ impl MsgDaemon {
 
         let mut buf = [0u8; 8192];
         let mut packets_processed = 0u32;
+        let mut deferred_delete: Option<(String, [u8; 32], String)> = None;
         while let Ok((len, from)) = socket.recv_from(&mut buf) {
             if len == 0 {
                 continue;
@@ -251,6 +253,14 @@ impl MsgDaemon {
                                     contact.last_seen = identity::now_timestamp();
                                     identity::save_contact(&contact);
                                 }
+                            }
+
+                            // Check if we have a pending delete for this contact
+                            if self.pending_deletes.has_pending(&contact_id) {
+                                log_fmt!("[daemon]   pending delete found for {} — sending DELETE", &contact_id[..8.min(contact_id.len())]);
+                                protocol::send_delete_contact(peer, socket);
+                                // Don't notify online or flush outbox — we're deleting
+                                continue;
                             }
 
                             // Notify GUI peer is online
@@ -1278,6 +1288,41 @@ impl MsgDaemon {
                     }
                 }
 
+                PKT_MSG_DELETE_CONTACT => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if peer.is_connected() {
+                            if peer.decrypt_packet(data).is_some() {
+                                let contact_id = peer.contact_id.clone();
+                                let peer_pubkey = peer.peer_pubkey;
+                                let nickname = peer.peer_nickname.clone();
+                                log_fmt!("[daemon] PKT_MSG_DELETE_CONTACT from {} (contact={})", from, &contact_id[..8.min(contact_id.len())]);
+                                // Send ACK while we still have the session
+                                protocol::send_delete_ack(peer, socket);
+                                // Defer cleanup to after the recv loop
+                                deferred_delete = Some((contact_id, peer_pubkey, nickname));
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                PKT_MSG_DELETE_ACK => {
+                    let ack_info = if let Some(peer) = self.peers.get_mut(&from) {
+                        if peer.is_connected() {
+                            if peer.decrypt_packet(data).is_some() {
+                                Some(peer.contact_id.clone())
+                            } else { None }
+                        } else { None }
+                    } else { None };
+
+                    if let Some(contact_id) = ack_info {
+                        log_fmt!("[daemon] PKT_MSG_DELETE_ACK from {} (contact={})", from, &contact_id[..8.min(contact_id.len())]);
+                        self.pending_deletes.remove(&contact_id);
+                        self.peers.remove(&from);
+                        self.contact_addrs.remove(&contact_id);
+                    }
+                }
+
                 _ => {} // Ignore unknown packet types
             }
 
@@ -1288,6 +1333,15 @@ impl MsgDaemon {
             if packets_processed >= 5000 {
                 break;
             }
+        }
+
+        // Process deferred delete outside the recv loop (needs &mut self)
+        if let Some((contact_id, peer_pubkey, nickname)) = deferred_delete {
+            self.cleanup_deleted_contact(&contact_id, &peer_pubkey);
+            self.event_tx.send(MsgEvent::ContactDeletedByPeer {
+                contact_id,
+                nickname,
+            }).ok();
         }
     }
 }

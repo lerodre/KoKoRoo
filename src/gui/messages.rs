@@ -60,6 +60,72 @@ impl HostelApp {
         if let Some(cid) = open_chat {
             self.open_msg_chat(&cid);
         }
+
+        // Delete contact confirmation dialog
+        let mut confirm_action = None;
+        if let Some(idx) = self.msg_confirm_delete_contact {
+            if idx < self.contacts.len() {
+                let contact = &self.contacts[idx];
+                let name = if contact.nickname.is_empty() {
+                    &contact.fingerprint
+                } else {
+                    &contact.nickname
+                };
+                egui::Window::new("Delete contact")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ui.ctx(), |ui| {
+                        ui.label(format!("Delete {} and all messages?", name));
+                        ui.label("This will notify the peer and remove you from each other's contacts.");
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Delete").clicked() {
+                                confirm_action = Some(true);
+                            }
+                            if ui.button("Cancel").clicked() {
+                                confirm_action = Some(false);
+                            }
+                        });
+                    });
+            } else {
+                self.msg_confirm_delete_contact = None;
+            }
+        }
+        if let Some(confirmed) = confirm_action {
+            if confirmed {
+                if let Some(idx) = self.msg_confirm_delete_contact {
+                    if idx < self.contacts.len() {
+                        let contact = &self.contacts[idx];
+                        let contact_id = contact.contact_id.clone();
+                        let peer_pubkey = contact.pubkey;
+
+                        // Close chat if viewing this contact
+                        if self.msg_active_chat.as_deref() == Some(&contact_id) {
+                            self.msg_active_chat = None;
+                        }
+
+                        // Send delete command to daemon
+                        if let Some(ref tx) = self.msg_cmd_tx {
+                            tx.send(crate::messaging::MsgCommand::DeleteContact {
+                                contact_id: contact_id.clone(),
+                                peer_pubkey,
+                            }).ok();
+                        }
+
+                        // Local GUI cleanup — remove immediately from memory
+                        // (don't reload from disk; daemon may not have deleted yet)
+                        self.msg_chat_histories.remove(&contact_id);
+                        self.msg_peer_online.remove(&contact_id);
+                        self.msg_peer_presence.remove(&contact_id);
+                        self.msg_unread.remove(&contact_id);
+                        self.contact_avatar_textures.remove(&contact_id);
+                        self.contacts.retain(|c| c.contact_id != contact_id);
+                    }
+                }
+            }
+            self.msg_confirm_delete_contact = None;
+        }
     }
 
     fn draw_message_list(&mut self, ui: &mut egui::Ui, open_chat: &mut Option<String>) {
@@ -317,6 +383,20 @@ impl HostelApp {
                         *open_chat = Some(contact_id.clone());
                         self.show_add_friend = false;
                     }
+
+                    // Right-click context menu
+                    if !is_self {
+                        row_resp.context_menu(|ui| {
+                            if ui.button("Delete contact").clicked() {
+                                // Find index in self.contacts by contact_id
+                                if let Some(idx) = self.contacts.iter().position(|c| c.contact_id == *contact_id) {
+                                    self.msg_confirm_delete_contact = Some(idx);
+                                }
+                                ui.close_menu();
+                            }
+                        });
+                    }
+
                     ui.separator();
                 }
             });
@@ -1047,10 +1127,7 @@ impl HostelApp {
             }
         }
         if let Some(i) = delete_contact {
-            let contact = &self.contacts[i];
-            crate::chat::delete_chat_history(&contact.contact_id);
-            identity::delete_contact(&contact.pubkey);
-            self.contacts = identity::load_all_contacts();
+            self.msg_confirm_delete_contact = Some(i);
         }
     }
 

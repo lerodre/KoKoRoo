@@ -3,6 +3,7 @@ pub mod session;
 pub mod protocol;
 pub mod outbox;
 pub mod pending_invites;
+pub mod pending_deletes;
 mod commands;
 mod packets;
 mod housekeep;
@@ -71,6 +72,8 @@ pub enum MsgCommand {
     SendCallSignal { group_id: String, channel_id: String, active: bool, call_mode: u8, member_contacts: Vec<(String, std::net::SocketAddr, [u8; 32])> },
     /// Broadcast updated nickname to all connected peers.
     UpdateNickname { nickname: String },
+    /// Delete a contact and notify the peer.
+    DeleteContact { contact_id: String, peer_pubkey: [u8; 32] },
     /// Voice call starting — daemon must release the UDP socket.
     YieldSocket,
     /// Voice call ended — daemon can reclaim the UDP socket.
@@ -124,4 +127,6 @@ pub enum MsgEvent {
     GroupAvatarReceived { group_id: String },
     /// A group call presence signal from a peer.
     GroupCallSignal { contact_id: String, group_id: String, channel_id: String, active: bool, call_mode: u8 },
+    /// A peer has deleted us from their contacts.
+    ContactDeletedByPeer { contact_id: String, nickname: String },
 }
