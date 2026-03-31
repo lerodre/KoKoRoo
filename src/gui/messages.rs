@@ -382,6 +382,20 @@ impl HostelApp {
                         *open_chat = Some(contact_id.clone());
                         self.show_add_friend = false;
                     }
+
+                    // Right-click context menu
+                    if !is_self {
+                        row_resp.context_menu(|ui| {
+                            if ui.button("Delete contact").clicked() {
+                                // Find index in self.contacts by contact_id
+                                if let Some(idx) = self.contacts.iter().position(|c| c.contact_id == *contact_id) {
+                                    self.msg_confirm_delete_contact = Some(idx);
+                                }
+                                ui.close_menu();
+                            }
+                        });
+                    }
+
                     ui.separator();
                 }
             });
