@@ -206,6 +206,20 @@ The `previous_key` is kept indefinitely as fallback for outdated peers. A kicked
 
 ---
 
+### 14. Call button uses default port on first click
+
+**Risk: UX bug**
+
+When clicking the call button from the sidebar, the first click sometimes dials `[::]:9000` (default) instead of the contact's actual IPv6 address. Clicking the contact a second time loads the correct address and the call works.
+
+**Likely cause:** The call screen reads the peer address before the GUI has resolved/loaded it from the contact data.
+
+**Workaround:** Click the contact once to open the chat, then click the call button.
+
+**Status:** Open
+
+---
+
 ## Priority Summary
 
 | # | Issue | Risk | User mitigation |
@@ -223,3 +237,4 @@ The `previous_key` is kept indefinitely as fallback for outdated peers. A kicked
 | 10 | Rate limit bypass | LOW | Session key required |
 | 11 | No rotation on voluntary leave | LOW | Future improvement |
 | 13 | previous_key no expiration | LOW | Future improvement |
+| 14 | Call button uses default port on first click | UX | Click contact twice |
