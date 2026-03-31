@@ -113,13 +113,14 @@ impl HostelApp {
                             }).ok();
                         }
 
-                        // Local GUI cleanup
+                        // Local GUI cleanup — remove immediately from memory
+                        // (don't reload from disk; daemon may not have deleted yet)
                         self.msg_chat_histories.remove(&contact_id);
                         self.msg_peer_online.remove(&contact_id);
                         self.msg_peer_presence.remove(&contact_id);
                         self.msg_unread.remove(&contact_id);
                         self.contact_avatar_textures.remove(&contact_id);
-                        self.contacts = identity::load_all_contacts();
+                        self.contacts.retain(|c| c.contact_id != contact_id);
                     }
                 }
             }
