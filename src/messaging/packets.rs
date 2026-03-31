@@ -114,11 +114,25 @@ impl MsgDaemon {
                                 }
                             }
                         } else {
-                            // AwaitingIdentity — we already have a valid session from a
-                            // completed handshake. Ignore duplicate/late HELLO to avoid
-                            // resetting our session key and causing an infinite
-                            // handshake-identity decrypt loop.
-                            log_fmt!("[daemon] MSG_HELLO from {} (state=AwaitingIdentity) — ignoring (session already established)", from);
+                            // AwaitingIdentity — check how long we've been waiting.
+                            // If recent (<5s), ignore to avoid the infinite handshake loop.
+                            // If stale (>5s), the peer likely restarted (e.g. post-call
+                            // reconnect) and we should accept the fresh HELLO.
+                            let stale = peer.last_activity.elapsed() > Duration::from_secs(5);
+                            if stale {
+                                log_fmt!("[daemon] MSG_HELLO from {} (state=AwaitingIdentity, stale) — resetting, accepting as incoming", from);
+                                self.peers.remove(&from);
+                                let ip_str = from.ip().to_string();
+                                if !self.settings.is_ip_banned(&ip_str) {
+                                    if let Some(session) = protocol::handle_incoming_hello(
+                                        data, from, socket, &self.identity, &self.nickname,
+                                    ) {
+                                        self.peers.insert(from, session);
+                                    }
+                                }
+                            } else {
+                                log_fmt!("[daemon] MSG_HELLO from {} (state=AwaitingIdentity) — ignoring (session already established)", from);
+                            }
                         }
                     } else {
                         // Check if this is a response from a different SLAAC address
