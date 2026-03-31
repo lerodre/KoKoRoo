@@ -392,25 +392,15 @@ impl HostelApp {
         let color_even = self.settings.theme.panel_bg();
         let color_odd = self.settings.theme.sidebar_bg();
 
+        // Right panel: full group member list (same as detail view)
+        let all_members: Vec<crate::group::GroupMember> = self.groups[idx].members.clone();
+        let all_member_count = all_members.len();
+        let online_count = all_members.iter().filter(|m| {
+            let cid = crate::identity::derive_contact_id(&my_pubkey, &m.pubkey);
+            m.pubkey == my_pubkey || self.msg_peer_online.get(&cid).copied().unwrap_or(false)
+        }).count();
+
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(members_rect), |ui| {
-            // Mode selector header (disabled during active call)
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("Mode:").size(11.0).color(self.settings.theme.text_muted()),
-                );
-                let relay_label = egui::SelectableLabel::new(
-                    call_mode == group::CallMode::Relay, "Relay",
-                );
-                let p2p_label = egui::SelectableLabel::new(
-                    call_mode == group::CallMode::P2P, "P2P",
-                );
-                // Disabled during call
-                ui.add_enabled(false, relay_label);
-                ui.add_enabled(false, p2p_label);
-            });
-
-            ui.separator();
-
             // Header bar
             let header_w = ui.available_width();
             let header_rect = ui.allocate_space(egui::vec2(header_w, 28.0)).1;
@@ -418,26 +408,19 @@ impl HostelApp {
             ui.painter().text(
                 egui::pos2(header_rect.min.x + 8.0, header_rect.center().y),
                 egui::Align2::LEFT_CENTER,
-                format!("Members ({})", member_count),
+                format!("Members ({}) — {} online", all_member_count, online_count),
                 egui::FontId::proportional(13.0),
                 self.settings.theme.text_primary(),
             );
             let hline_stroke = egui::Stroke::new(1.0, self.settings.theme.text_muted());
             ui.painter().hline(header_rect.x_range(), header_rect.max.y, hline_stroke);
 
-            // Snapshot voice levels for this frame
-            let voice_levels_snapshot: std::collections::HashMap<u16, f32> = self.group_voice_levels
-                .as_ref()
-                .and_then(|vl| vl.lock().ok().map(|m| m.clone()))
-                .unwrap_or_default();
-            let speaking_threshold = 0.01;
-
-            // Member rows with avatars
+            // Member rows
             egui::ScrollArea::vertical()
                 .id_salt("voice_call_members")
                 .show(ui, |ui| {
                     let row_w = ui.available_width();
-                    for (i, member) in self.group_call_members.iter().enumerate() {
+                    for (i, member) in all_members.iter().enumerate() {
                         let bg = if i % 2 == 0 { color_even } else { color_odd };
                         let row_rect = ui.allocate_space(egui::vec2(row_w, 32.0)).1;
                         ui.painter().rect_filled(row_rect, 0.0, bg);
@@ -445,10 +428,17 @@ impl HostelApp {
                         let mut x = row_rect.min.x + 8.0;
                         let cy = row_rect.center().y;
 
-                        // Check if this member is speaking
-                        let is_speaking = voice_levels_snapshot.get(&member.sender_index)
-                            .map(|&level| level > speaking_threshold)
-                            .unwrap_or(false);
+                        // Online indicator dot
+                        let cid = crate::identity::derive_contact_id(&my_pubkey, &member.pubkey);
+                        let is_online = member.pubkey == my_pubkey
+                            || self.msg_peer_online.get(&cid).copied().unwrap_or(false);
+                        let dot_color = if is_online {
+                            egui::Color32::from_rgb(0x4C, 0xAF, 0x50)
+                        } else {
+                            self.settings.theme.text_muted()
+                        };
+                        ui.painter().circle_filled(egui::pos2(x + 4.0, cy), 4.0, dot_color);
+                        x += 12.0;
 
                         // Avatar (22px)
                         let av_size = 22.0;
@@ -456,16 +446,6 @@ impl HostelApp {
                             egui::pos2(x + av_size / 2.0, cy),
                             egui::vec2(av_size, av_size),
                         );
-
-                        // Green border when speaking
-                        if is_speaking {
-                            let border_rect = av_rect.expand(2.0);
-                            ui.painter().rect_stroke(
-                                border_rect,
-                                egui::Rounding::same(3.0),
-                                egui::Stroke::new(2.0, egui::Color32::from_rgb(67, 181, 129)),
-                            );
-                        }
 
                         let mut drew_av = false;
                         if member.pubkey == my_pubkey {
@@ -475,7 +455,6 @@ impl HostelApp {
                                 drew_av = true;
                             }
                         } else {
-                            let cid = crate::identity::derive_contact_id(&my_pubkey, &member.pubkey);
                             if let Some(tex) = self.contact_avatar_textures.get(&cid) {
                                 let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
                                 ui.painter().image(tex.id(), av_rect, uv, egui::Color32::WHITE);

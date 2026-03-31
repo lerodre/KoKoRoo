@@ -541,8 +541,14 @@ impl HostelApp {
             // When in the call: show roster (group_call_members)
             // When not in the call: show presence signals (group_call_presence)
             if is_active {
-                // We're in this call — show roster members
+                // We're in this call — show roster members with speaking indicator
                 let my_pubkey = self.identity.pubkey;
+                let voice_levels_snapshot: std::collections::HashMap<u16, f32> = self.group_voice_levels
+                    .as_ref()
+                    .and_then(|vl| vl.lock().ok().map(|m| m.clone()))
+                    .unwrap_or_default();
+                let speaking_threshold = 0.01;
+
                 for member in &self.group_call_members {
                     let member_row_w = ui.available_width();
                     let (member_rect, _) = ui.allocate_exact_size(
@@ -556,6 +562,20 @@ impl HostelApp {
                         egui::pos2(x + av_size / 2.0, cy),
                         egui::vec2(av_size, av_size),
                     );
+
+                    // Speaking indicator (green border)
+                    let is_speaking = voice_levels_snapshot.get(&member.sender_index)
+                        .map(|&level| level > speaking_threshold)
+                        .unwrap_or(false);
+                    if is_speaking {
+                        let border_rect = av_rect.expand(2.0);
+                        ui.painter().rect_stroke(
+                            border_rect,
+                            egui::Rounding::same(3.0),
+                            egui::Stroke::new(2.0, egui::Color32::from_rgb(67, 181, 129)),
+                        );
+                    }
+
                     let mut drew_av = false;
                     if member.pubkey == my_pubkey {
                         if let Some(tex) = &self.own_avatar_texture {
