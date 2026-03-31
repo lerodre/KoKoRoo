@@ -352,6 +352,22 @@ impl MsgDaemon {
                         self.contact_addrs.insert(contact_id.clone(), peer_addr);
                         self.retry_state.insert(contact_id.clone(), (Instant::now(), 0));
 
+                        // Queue avatar send for new contact
+                        if !self.avatar_sends.contains_key(&contact_id) {
+                            if let Some(avatar_data) = crate::avatar::load_own_avatar() {
+                                let sha256 = crate::avatar::avatar_sha256(&avatar_data);
+                                self.avatar_sends.insert(contact_id.clone(), super::daemon::AvatarSendState {
+                                    avatar_data,
+                                    sha256,
+                                    sent: false,
+                                    sent_at: std::time::Instant::now(),
+                                    retries: 0,
+                                    offer_sent: false,
+                                    needs_send: false,
+                                });
+                            }
+                        }
+
                         self.event_tx.send(MsgEvent::RequestAccepted {
                             contact_id,
                         }).ok();

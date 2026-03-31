@@ -300,6 +300,13 @@ impl MsgDaemon {
                                 log_fmt!("[daemon]   identity FAILED: {}", e);
                             }
                         }
+                    } else if self.outgoing_requests.contains_key(&from) {
+                        // IDENTITY arrived for a session in outgoing_requests (e.g. receiver
+                        // sent HELLO+IDENTITY together). Move to peers so the normal flow
+                        // processes it. The REQUEST will be sent after this, and the IDENTITY
+                        // is just the receiver's auto-response — we can safely ignore it since
+                        // we'll get their identity via REQUEST_ACK after they accept.
+                        log_fmt!("[daemon]   IDENTITY from {} is in outgoing_requests — ignoring (will get identity via REQUEST_ACK)", from);
                     } else {
                         log_fmt!("[daemon]   no peer session for {} — ignoring IDENTITY", from);
                     }
@@ -470,6 +477,22 @@ impl MsgDaemon {
                                 }
 
                                 self.peers.insert(from, peer_session);
+
+                                // Queue avatar send for new contact
+                                if !self.avatar_sends.contains_key(&contact_id) {
+                                    if let Some(avatar_data) = crate::avatar::load_own_avatar() {
+                                        let sha256 = crate::avatar::avatar_sha256(&avatar_data);
+                                        self.avatar_sends.insert(contact_id.clone(), super::daemon::AvatarSendState {
+                                            avatar_data,
+                                            sha256,
+                                            sent: false,
+                                            sent_at: Instant::now(),
+                                            retries: 0,
+                                            offer_sent: false,
+                                            needs_send: false,
+                                        });
+                                    }
+                                }
                             }
                             self.retry_state.insert(contact_id.clone(), (Instant::now(), 0));
 
