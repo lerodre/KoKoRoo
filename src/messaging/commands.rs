@@ -316,6 +316,13 @@ impl MsgDaemon {
                         let contact_id = identity::derive_contact_id(
                             &self.identity.pubkey, &peer_id_pubkey,
                         );
+
+                        // Clear any stale pending delete for this contact (re-added after delete)
+                        if self.pending_deletes.has_pending(&contact_id) {
+                            log_fmt!("[daemon]   clearing stale pending delete for {}", &contact_id[..8.min(contact_id.len())]);
+                            self.pending_deletes.remove(&contact_id);
+                        }
+
                         let fingerprint = crate::crypto::fingerprint(&peer_id_pubkey);
                         let contact = identity::Contact {
                             fingerprint,
