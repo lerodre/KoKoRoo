@@ -1524,6 +1524,20 @@ impl eframe::App for HostelApp {
                         // Clean up empty entries
                         channels.retain(|_, v| !v.is_empty());
                     }
+                    MsgEvent::GroupSyncComplete { group_id, channel_id, new_messages } => {
+                        log_fmt!("[gui] group sync complete: {} new messages in grp={} ch={}", new_messages, &group_id[..8.min(group_id.len())], channel_id);
+                        // Reload group chat history if we're viewing this group+channel
+                        if let Some(idx) = self.group_detail_idx {
+                            if idx < self.groups.len() && self.groups[idx].group_id == group_id {
+                                if self.group_selected_channel == channel_id {
+                                    // Reload the chat history to show synced messages
+                                    self.group_chat_history = Some(crate::chat::GroupChatHistory::load(
+                                        &group_id, &channel_id, &self.identity.secret,
+                                    ));
+                                }
+                            }
+                        }
+                    }
                     MsgEvent::ContactDeletedByPeer { contact_id, nickname } => {
                         log_fmt!("[gui] Contact deleted by peer: {} ({})", nickname, &contact_id[..8.min(contact_id.len())]);
                         // Close chat if viewing this contact

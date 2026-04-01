@@ -45,6 +45,15 @@ pub struct GroupAvatarSendState {
     pub retries: u8,
 }
 
+/// Outgoing group chat sync: pre-chunked messages waiting to be sent.
+pub struct GroupSyncOut {
+    pub chunks: Vec<Vec<u8>>,  // pre-serialized JSON chunks
+    pub next_chunk: u16,
+    pub total_chunks: u16,
+    pub last_sent_at: Instant,
+    pub retries: u32,
+}
+
 /// Result of async SHA-256 hashing (pre-send or post-receive verification).
 pub struct HashResult {
     pub contact_id: String,
@@ -205,6 +214,8 @@ pub struct MsgDaemon {
     pub(super) failed_contacts: HashMap<String, Instant>,
     /// Pending contact deletions (queued when peer is offline).
     pub(super) pending_deletes: super::pending_deletes::PendingDeleteStore,
+    /// Active group chat sync sessions: (peer_addr, group_id, channel_id) -> outgoing chunks.
+    pub(super) group_sync_out: HashMap<(SocketAddr, String, String), GroupSyncOut>,
     pub(super) hash_results_tx: mpsc::Sender<HashResult>,
     pub(super) hash_results_rx: mpsc::Receiver<HashResult>,
     pub(super) verify_results_tx: mpsc::Sender<VerifyResult>,
@@ -267,6 +278,7 @@ impl MsgDaemon {
             pending_member_syncs: HashMap::new(),
             failed_contacts: HashMap::new(),
             pending_deletes,
+            group_sync_out: HashMap::new(),
             hash_results_tx,
             hash_results_rx,
             verify_results_tx,

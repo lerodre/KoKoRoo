@@ -129,4 +129,6 @@ pub enum MsgEvent {
     GroupCallSignal { contact_id: String, group_id: String, channel_id: String, active: bool, call_mode: u8 },
     /// A peer has deleted us from their contacts.
     ContactDeletedByPeer { contact_id: String, nickname: String },
+    /// Group chat sync completed for a channel — new messages were added.
+    GroupSyncComplete { group_id: String, channel_id: String, new_messages: u32 },
 }
