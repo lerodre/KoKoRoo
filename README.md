@@ -32,7 +32,8 @@ Without an overlay, anyone with your IPv6 address and port can attempt to connec
 - **File transfer** - Drag & drop, chunked UDP with AIMD congestion control
 - **Screen & webcam sharing** - VP8 encoded, multi-monitor, system audio capture
 - **Avatars** - Profile and group avatars with offer-wait protocol
-- **Contact system** - Friend requests, TOFU trust, presence (online/away/offline)
+- **Contact system** - Friend requests, TOFU trust, presence, contact deletion with P2P notification
+- **Group sync** - Missed messages sync automatically when peers reconnect
 - **Anti-spam** - Per-IP rate limiting, auto-blacklist, OS firewall integration
 - **Themes** - 18 customizable colors with smart randomize
 - **Cross-platform** - Windows, macOS, Linux (GUI + TUI)

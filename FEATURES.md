@@ -62,6 +62,7 @@ P2P encrypted voice + chat + file transfer + screen sharing. No servers. No acco
 - **Outbox with retry** — Failed messages queued and retried with exponential backoff (10s, 30s, 1m, 5m, 15m cap).
 - **In-call chat** — Send and receive text during active voice calls.
 - **Address auto-update** — When a contact connects from a new IP, `last_address` is updated on disk so reconnection always uses the latest known address.
+- **Group chat sync** — Pull-based bidirectional sync. When a peer reconnects, both sides exchange missed messages. Deduplication via deterministic msg_id hashes. Chunked transfer with ACK flow control. New members only receive messages from their join time. Kicked members cannot request sync.
 
 ## File Transfer
 
@@ -120,7 +121,7 @@ P2P encrypted voice + chat + file transfer + screen sharing. No servers. No acco
 - **Contact info** — Stores fingerprint, nickname, pubkey, last IP, last port, first seen, last seen, call count.
 - **Contact search/filter** — Search by nickname or fingerprint in contact list.
 - **Contact blocking** — Block a contact's pubkey + IP. Appears with strikethrough in list.
-- **Contact deletion** — Remove contact and their chat history.
+- **Contact deletion with P2P notification** — Remove contact, chat history, outbox, pending invites, and avatar. Sends encrypted DELETE signal to peer (queued if offline). Auto-deletes two-person groups. Right-click context menu in sidebar.
 - **Quick dial** — Click a contact to auto-fill their IP/port and start a call.
 - **Contact detail view** — Full info panel with Call, Message, Find Peer buttons.
 - **Call counter** — Tracks how many times you've called a contact. Gauge of trust.
@@ -199,6 +200,13 @@ P2P encrypted voice + chat + file transfer + screen sharing. No servers. No acco
 | `0x21` | FILE_CANCEL | Cancel transfer |
 | `0x22` | FILE_NACK | Request missing chunks |
 | `0x23` | MSG_CONFIRM | Identity-bound key upgrade confirmation |
+| `0x24`-`0x27` | AVATAR_* | Avatar offer/data/ack/nack |
+| `0x28` | DELETE_CONTACT | Contact deletion signal |
+| `0x29` | DELETE_ACK | Contact deletion acknowledgement |
+| `0x38`-`0x47` | GRP_* | Group invite/chat/update/avatar/call signal |
+| `0x48` | GRP_SYNC_REQUEST | Group chat sync request |
+| `0x49` | GRP_SYNC_DATA | Group chat sync data chunk |
+| `0x4A` | GRP_SYNC_ACK | Group chat sync chunk ack |
 
 ## Data Layout
 
@@ -215,5 +223,6 @@ P2P encrypted voice + chat + file transfer + screen sharing. No servers. No acco
   avatars/group_{group_id}.png      # Group avatars
   files/{contact_id}/               # Received files
   files_tmp/                        # In-progress transfers
+  pending_deletes.enc               # Queued contact deletion signals
   kokoroo_log.txt                   # Debug log
 ```
