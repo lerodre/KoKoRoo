@@ -270,6 +270,21 @@ pub struct GroupChatMessage {
     pub sender_nickname: String,
     pub text: String,
     pub timestamp: u64,
+    /// Deterministic content hash for deduplication during sync.
+    /// hex(sha256(sender_fingerprint || timestamp_le || text))[..32]
+    #[serde(default)]
+    pub msg_id: String,
+}
+
+/// Compute a deterministic message ID from content.
+pub fn compute_msg_id(sender_fingerprint: &str, timestamp: u64, text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(sender_fingerprint.as_bytes());
+    hasher.update(timestamp.to_le_bytes());
+    hasher.update(text.as_bytes());
+    let hash = hasher.finalize();
+    hash.iter().take(16).map(|b| format!("{:02x}", b)).collect()
 }
 
 /// Persistent group chat history, encrypted at rest with local identity key.
@@ -297,7 +312,7 @@ impl GroupChatHistory {
             fs::rename(&old_path, &new_path).ok();
         }
 
-        let messages = if new_path.exists() {
+        let mut messages: Vec<GroupChatMessage> = if new_path.exists() {
             match fs::read(&new_path) {
                 Ok(encrypted) => {
                     match crypto::decrypt_local(&storage_cipher, &encrypted) {
@@ -313,12 +328,27 @@ impl GroupChatHistory {
             Vec::new()
         };
 
-        GroupChatHistory {
+        // Backfill msg_id for legacy messages that don't have one
+        let mut needs_save = false;
+        for msg in &mut messages {
+            if msg.msg_id.is_empty() {
+                msg.msg_id = compute_msg_id(&msg.sender_fingerprint, msg.timestamp, &msg.text);
+                needs_save = true;
+            }
+        }
+
+        let hist = GroupChatHistory {
             group_id: group_id.to_string(),
             channel_id: channel_id.to_string(),
             messages,
             storage_cipher,
+        };
+
+        if needs_save {
+            hist.save();
         }
+
+        hist
     }
 
     /// Add a message and save to disk.
@@ -328,14 +358,56 @@ impl GroupChatHistory {
             .unwrap()
             .as_secs();
 
+        let msg_id = compute_msg_id(&sender_fingerprint, timestamp, &text);
         self.messages.push(GroupChatMessage {
             sender_fingerprint,
             sender_nickname,
             text,
             timestamp,
+            msg_id,
         });
 
         self.save();
+    }
+
+    /// Get the latest message timestamp, or 0 if empty.
+    pub fn latest_timestamp(&self) -> u64 {
+        self.messages.iter().map(|m| m.timestamp).max().unwrap_or(0)
+    }
+
+    /// Return messages after the given timestamp.
+    pub fn messages_after(&self, timestamp: u64) -> Vec<&GroupChatMessage> {
+        self.messages.iter().filter(|m| m.timestamp > timestamp).collect()
+    }
+
+    /// Merge incoming messages, deduplicating by msg_id. Returns count of new messages added.
+    pub fn merge_messages(&mut self, incoming: Vec<GroupChatMessage>) -> usize {
+        let existing_ids: std::collections::HashSet<String> = self.messages.iter()
+            .filter(|m| !m.msg_id.is_empty())
+            .map(|m| m.msg_id.clone())
+            .collect();
+
+        let mut added = 0;
+        for msg in incoming {
+            let id = if msg.msg_id.is_empty() {
+                compute_msg_id(&msg.sender_fingerprint, msg.timestamp, &msg.text)
+            } else {
+                msg.msg_id.clone()
+            };
+            if !existing_ids.contains(&id) {
+                self.messages.push(GroupChatMessage {
+                    msg_id: id,
+                    ..msg
+                });
+                added += 1;
+            }
+        }
+
+        if added > 0 {
+            self.messages.sort_by_key(|m| m.timestamp);
+            self.save();
+        }
+        added
     }
 
     /// Save all messages to encrypted file.
@@ -365,11 +437,14 @@ pub fn migrate_messages_to_fallback(
     }
     let mut fallback = GroupChatHistory::load(group_id, "fallback", identity_secret);
     for msg in &source.messages {
+        let text = format!("[from #{}] {}", source_channel_name, msg.text);
+        let msg_id = compute_msg_id(&msg.sender_fingerprint, msg.timestamp, &text);
         fallback.messages.push(GroupChatMessage {
             sender_fingerprint: msg.sender_fingerprint.clone(),
             sender_nickname: msg.sender_nickname.clone(),
-            text: format!("[from #{}] {}", source_channel_name, msg.text),
+            text,
             timestamp: msg.timestamp,
+            msg_id,
         });
     }
     fallback.save();

@@ -546,5 +546,41 @@ impl MsgDaemon {
                 }
             }
         }
+
+        // Clean up stale group sync sessions (no ACK received within 30s)
+        self.group_sync_out.retain(|key, sync| {
+            if sync.last_sent_at.elapsed() > Duration::from_secs(30) {
+                log_fmt!("[sync] timeout: giving up sync for grp={} ch={}", &key.1[..8.min(key.1.len())], key.2);
+                false
+            } else {
+                true
+            }
+        });
+
+        // Retry unacked sync chunks after 5 seconds
+        if let Some(ref socket) = self.socket {
+            let keys: Vec<_> = self.group_sync_out.keys().cloned().collect();
+            for key in keys {
+                let should_retry = self.group_sync_out.get(&key)
+                    .map(|s| s.last_sent_at.elapsed() > Duration::from_secs(5) && s.retries < 3)
+                    .unwrap_or(false);
+                if should_retry {
+                    let (peer_addr, ref group_id, ref channel_id) = key;
+                    if let Some(peer) = self.peers.get(&peer_addr) {
+                        if let Some(sync) = self.group_sync_out.get_mut(&key) {
+                            if let Some(chunk_data) = sync.chunks.get(sync.next_chunk as usize) {
+                                let chunk_data = chunk_data.clone();
+                                super::protocol::send_group_sync_data(
+                                    peer, socket, group_id, channel_id,
+                                    sync.next_chunk, sync.total_chunks, &chunk_data,
+                                );
+                                sync.last_sent_at = Instant::now();
+                                sync.retries += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

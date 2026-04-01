@@ -31,6 +31,9 @@ pub struct GroupMember {
     pub address: String,
     pub port: String,
     pub is_admin: bool,
+    /// Unix timestamp when this member joined. 0 = founding member or legacy.
+    #[serde(default)]
+    pub joined_at: u64,
 }
 
 /// A text channel inside a group.
@@ -88,6 +91,8 @@ pub struct GroupMemberWire {
     pub address: String,
     pub port: String,
     pub is_admin: bool,
+    #[serde(default)]
+    pub joined_at: u64,
 }
 
 /// Hex-encode a 32-byte array to a 64-char string.
@@ -135,6 +140,10 @@ impl GroupInviteLite {
     pub fn to_skeleton_group(&self, my_pubkey: &[u8; 32], my_nickname: &str, my_fingerprint: &str, my_address: &str, my_port: &str) -> Option<Group> {
         let group_key = self.group_key()?;
         let created_by = self.created_by()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let me = GroupMember {
             pubkey: *my_pubkey,
             nickname: my_nickname.to_string(),
@@ -143,6 +152,7 @@ impl GroupInviteLite {
             address: my_address.to_string(),
             port: my_port.to_string(),
             is_admin: false,
+            joined_at: now,
         };
         Some(Group {
             group_id: self.group_id.clone(),
@@ -173,6 +183,7 @@ impl GroupMemberWire {
             address: m.address.clone(),
             port: m.port.clone(),
             is_admin: m.is_admin,
+            joined_at: m.joined_at,
         }
     }
 
@@ -187,6 +198,7 @@ impl GroupMemberWire {
             address: self.address.clone(),
             port: self.port.clone(),
             is_admin: self.is_admin,
+            joined_at: self.joined_at,
         })
     }
 }

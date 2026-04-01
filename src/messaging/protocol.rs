@@ -13,6 +13,7 @@ use crate::crypto::{
     PKT_GRP_MEMBER_SYNC,
     PKT_GRP_CALL_SIGNAL,
     PKT_MSG_DELETE_CONTACT, PKT_MSG_DELETE_ACK,
+    PKT_GRP_SYNC_REQUEST, PKT_GRP_SYNC_DATA, PKT_GRP_SYNC_ACK,
 };
 use crate::identity::Identity;
 
@@ -878,4 +879,126 @@ pub fn send_delete_ack(peer: &PeerSession, socket: &UdpSocket) {
     if let Some(pkt) = peer.encrypt_packet(PKT_MSG_DELETE_ACK, &[]) {
         socket.send_to(&pkt, peer.peer_addr).ok();
     }
+}
+
+// ── Group Chat Sync ──
+
+/// Send a sync request for a group channel.
+/// Tells the peer: "my latest message is at timestamp T, I have N messages."
+pub fn send_group_sync_request(
+    peer: &PeerSession,
+    socket: &UdpSocket,
+    group_id: &str,
+    channel_id: &str,
+    latest_ts: u64,
+    msg_count: u32,
+) {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(group_id.as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(channel_id.as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(&latest_ts.to_le_bytes());
+    payload.extend_from_slice(&msg_count.to_le_bytes());
+    if let Some(pkt) = peer.encrypt_packet(PKT_GRP_SYNC_REQUEST, &payload) {
+        socket.send_to(&pkt, peer.peer_addr).ok();
+    }
+}
+
+/// Parse an incoming sync request. Returns (group_id, channel_id, latest_ts, msg_count).
+pub fn handle_group_sync_request(data: &[u8], peer: &mut PeerSession) -> Option<(String, String, u64, u32)> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
+    if pkt_type != PKT_GRP_SYNC_REQUEST { return None; }
+    // Parse: group_id\nchannel_id\n[8B ts][4B count]
+    let trailer_len = 8 + 4; // ts + count
+    if plain.len() < trailer_len + 3 { return None; } // at least "x\ny\n" + trailer
+    let text_part = &plain[..plain.len() - trailer_len];
+    let s = std::str::from_utf8(text_part).ok()?;
+    let mut parts = s.splitn(3, '\n');
+    let group_id = parts.next()?.to_string();
+    let channel_id = parts.next()?.to_string();
+    let ts_start = plain.len() - trailer_len;
+    let latest_ts = u64::from_le_bytes(plain[ts_start..ts_start + 8].try_into().ok()?);
+    let msg_count = u32::from_le_bytes(plain[ts_start + 8..ts_start + 12].try_into().ok()?);
+    Some((group_id, channel_id, latest_ts, msg_count))
+}
+
+/// Send a chunk of sync data (serialized messages).
+pub fn send_group_sync_data(
+    peer: &PeerSession,
+    socket: &UdpSocket,
+    group_id: &str,
+    channel_id: &str,
+    chunk_idx: u16,
+    total_chunks: u16,
+    messages_json: &[u8],
+) {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(group_id.as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(channel_id.as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(&chunk_idx.to_le_bytes());
+    payload.extend_from_slice(&total_chunks.to_le_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(messages_json);
+    if let Some(pkt) = peer.encrypt_packet(PKT_GRP_SYNC_DATA, &payload) {
+        socket.send_to(&pkt, peer.peer_addr).ok();
+    }
+}
+
+/// Parse an incoming sync data chunk. Returns (group_id, channel_id, chunk_idx, total_chunks, messages_json).
+pub fn handle_group_sync_data(data: &[u8], peer: &mut PeerSession) -> Option<(String, String, u16, u16, Vec<u8>)> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
+    if pkt_type != PKT_GRP_SYNC_DATA { return None; }
+    // Parse: group_id\nchannel_id\n[2B idx][2B total]\nJSON
+    // Find the first two newlines for group_id and channel_id
+    let first_nl = plain.iter().position(|&b| b == b'\n')?;
+    let second_nl = plain[first_nl + 1..].iter().position(|&b| b == b'\n')? + first_nl + 1;
+    let group_id = std::str::from_utf8(&plain[..first_nl]).ok()?.to_string();
+    let channel_id = std::str::from_utf8(&plain[first_nl + 1..second_nl]).ok()?.to_string();
+    // After second newline: [2B idx][2B total]\nJSON
+    let rest = &plain[second_nl + 1..];
+    if rest.len() < 5 { return None; } // 2 + 2 + 1 (newline)
+    let chunk_idx = u16::from_le_bytes(rest[0..2].try_into().ok()?);
+    let total_chunks = u16::from_le_bytes(rest[2..4].try_into().ok()?);
+    if rest[4] != b'\n' { return None; }
+    let json_data = rest[5..].to_vec();
+    Some((group_id, channel_id, chunk_idx, total_chunks, json_data))
+}
+
+/// Send a sync ACK for a received chunk.
+pub fn send_group_sync_ack(
+    peer: &PeerSession,
+    socket: &UdpSocket,
+    group_id: &str,
+    channel_id: &str,
+    chunk_idx: u16,
+) {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(group_id.as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(channel_id.as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(&chunk_idx.to_le_bytes());
+    if let Some(pkt) = peer.encrypt_packet(PKT_GRP_SYNC_ACK, &payload) {
+        socket.send_to(&pkt, peer.peer_addr).ok();
+    }
+}
+
+/// Parse an incoming sync ACK. Returns (group_id, channel_id, chunk_idx).
+pub fn handle_group_sync_ack(data: &[u8], peer: &mut PeerSession) -> Option<(String, String, u16)> {
+    let (pkt_type, plain) = peer.decrypt_packet(data)?;
+    if pkt_type != PKT_GRP_SYNC_ACK { return None; }
+    // Parse: group_id\nchannel_id\n[2B idx]
+    if plain.len() < 5 { return None; }
+    let trailer_len = 2;
+    let text_part = &plain[..plain.len() - trailer_len];
+    let s = std::str::from_utf8(text_part).ok()?;
+    let mut parts = s.splitn(3, '\n');
+    let group_id = parts.next()?.to_string();
+    let channel_id = parts.next()?.to_string();
+    let idx_start = plain.len() - trailer_len;
+    let chunk_idx = u16::from_le_bytes(plain[idx_start..idx_start + 2].try_into().ok()?);
+    Some((group_id, channel_id, chunk_idx))
 }

@@ -17,6 +17,7 @@ use crate::crypto::{
     PKT_GRP_MEMBER_SYNC,
     PKT_GRP_CALL_SIGNAL,
     PKT_MSG_DELETE_CONTACT, PKT_MSG_DELETE_ACK,
+    PKT_GRP_SYNC_REQUEST, PKT_GRP_SYNC_DATA, PKT_GRP_SYNC_ACK,
 };
 use crate::identity::{self};
 use crate::filetransfer;
@@ -313,9 +314,29 @@ impl MsgDaemon {
                                 store.save();
                             }
                             // Reset retry state
-                            self.retry_state.insert(contact_id, (Instant::now(), 0));
+                            self.retry_state.insert(contact_id.clone(), (Instant::now(), 0));
                             // Send our presence to the newly connected peer
                             protocol::send_presence(peer, socket, self.our_presence);
+
+                            // Initiate group chat sync for shared groups
+                            let peer_pubkey = peer.peer_pubkey;
+                            let groups = crate::group::load_all_groups();
+                            for grp in &groups {
+                                if grp.members.iter().any(|m| m.pubkey == peer_pubkey) {
+                                    for ch in &grp.text_channels {
+                                        if ch.deleted { continue; }
+                                        let hist = crate::chat::GroupChatHistory::load(
+                                            &grp.group_id, &ch.channel_id, &self.identity.secret,
+                                        );
+                                        protocol::send_group_sync_request(
+                                            peer, socket,
+                                            &grp.group_id, &ch.channel_id,
+                                            hist.latest_timestamp(),
+                                            hist.messages.len() as u32,
+                                        );
+                                    }
+                                }
+                            }
                             }
                             Err(e) => {
                                 log_fmt!("[daemon]   identity FAILED: {}", e);
@@ -1371,6 +1392,133 @@ impl MsgDaemon {
                         self.pending_deletes.remove(&contact_id);
                         self.peers.remove(&from);
                         self.contact_addrs.remove(&contact_id);
+                    }
+                }
+
+                PKT_GRP_SYNC_REQUEST => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((group_id, channel_id, peer_latest_ts, _peer_count)) =
+                            protocol::handle_group_sync_request(data, peer)
+                        {
+                            peer.touch();
+                            let peer_pubkey = peer.peer_pubkey;
+                            // Verify peer is still a member of this group
+                            if let Some(grp) = crate::group::load_group(&group_id) {
+                                let peer_member = grp.members.iter().find(|m| m.pubkey == peer_pubkey);
+                                if let Some(member) = peer_member {
+                                    // Filter: only messages after peer's latest AND after their joined_at
+                                    let floor_ts = peer_latest_ts.max(member.joined_at);
+                                    let hist = crate::chat::GroupChatHistory::load(
+                                        &group_id, &channel_id, &self.identity.secret,
+                                    );
+                                    let to_send: Vec<&crate::chat::GroupChatMessage> = hist.messages_after(floor_ts);
+                                    if !to_send.is_empty() {
+                                        // Chunk messages into ~6KB JSON batches
+                                        let mut chunks: Vec<Vec<u8>> = Vec::new();
+                                        let mut batch: Vec<&crate::chat::GroupChatMessage> = Vec::new();
+                                        let mut batch_size = 0usize;
+                                        for msg in &to_send {
+                                            let est = msg.text.len() + msg.sender_fingerprint.len() + msg.sender_nickname.len() + 80;
+                                            if batch_size + est > 6000 && !batch.is_empty() {
+                                                chunks.push(serde_json::to_vec(&batch).unwrap_or_default());
+                                                batch.clear();
+                                                batch_size = 0;
+                                            }
+                                            batch.push(msg);
+                                            batch_size += est;
+                                        }
+                                        if !batch.is_empty() {
+                                            chunks.push(serde_json::to_vec(&batch).unwrap_or_default());
+                                        }
+
+                                        let total = chunks.len() as u16;
+                                        log_fmt!("[sync] sending {} messages in {} chunks to {} for grp={} ch={}",
+                                            to_send.len(), total, &peer.contact_id[..8.min(peer.contact_id.len())], &group_id[..8.min(group_id.len())], channel_id);
+
+                                        // Send first chunk immediately, queue rest
+                                        if let Some(first) = chunks.first() {
+                                            protocol::send_group_sync_data(peer, socket, &group_id, &channel_id, 0, total, first);
+                                        }
+                                        if chunks.len() > 1 {
+                                            self.group_sync_out.insert(
+                                                (from, group_id, channel_id),
+                                                super::daemon::GroupSyncOut {
+                                                    chunks,
+                                                    next_chunk: 1,
+                                                    total_chunks: total,
+                                                    last_sent_at: Instant::now(),
+                                                    retries: 0,
+                                                },
+                                            );
+                                        }
+                                    } else {
+                                        log_fmt!("[sync] no new messages for {} grp={} ch={}", &peer.contact_id[..8.min(peer.contact_id.len())], &group_id[..8.min(group_id.len())], channel_id);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                PKT_GRP_SYNC_DATA => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((group_id, channel_id, chunk_idx, total_chunks, json_data)) =
+                            protocol::handle_group_sync_data(data, peer)
+                        {
+                            peer.touch();
+                            // Send ACK
+                            protocol::send_group_sync_ack(peer, socket, &group_id, &channel_id, chunk_idx);
+
+                            // Parse and merge messages
+                            if let Ok(messages) = serde_json::from_slice::<Vec<crate::chat::GroupChatMessage>>(&json_data) {
+                                let mut hist = crate::chat::GroupChatHistory::load(
+                                    &group_id, &channel_id, &self.identity.secret,
+                                );
+                                let added = hist.merge_messages(messages);
+                                log_fmt!("[sync] received chunk {}/{} for grp={} ch={}, merged {} new messages",
+                                    chunk_idx + 1, total_chunks, &group_id[..8.min(group_id.len())], channel_id, added);
+
+                                // If last chunk, notify GUI
+                                if chunk_idx + 1 >= total_chunks && added > 0 {
+                                    self.event_tx.send(MsgEvent::GroupSyncComplete {
+                                        group_id,
+                                        channel_id,
+                                        new_messages: added as u32,
+                                    }).ok();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                PKT_GRP_SYNC_ACK => {
+                    if let Some(peer) = self.peers.get_mut(&from) {
+                        if let Some((group_id, channel_id, chunk_idx)) =
+                            protocol::handle_group_sync_ack(data, peer)
+                        {
+                            peer.touch();
+                            let key = (from, group_id.clone(), channel_id.clone());
+                            if let Some(sync) = self.group_sync_out.get_mut(&key) {
+                                // Advance to next chunk
+                                let next = (chunk_idx + 1) as u16;
+                                if next < sync.total_chunks {
+                                    sync.next_chunk = next;
+                                    sync.retries = 0;
+                                    sync.last_sent_at = Instant::now();
+                                    if let Some(chunk_data) = sync.chunks.get(next as usize) {
+                                        let chunk_data = chunk_data.clone();
+                                        protocol::send_group_sync_data(
+                                            peer, socket, &group_id, &channel_id,
+                                            next, sync.total_chunks, &chunk_data,
+                                        );
+                                    }
+                                } else {
+                                    // All chunks acked, done
+                                    log_fmt!("[sync] sync complete for grp={} ch={}", &group_id[..8.min(group_id.len())], channel_id);
+                                    self.group_sync_out.remove(&key);
+                                }
+                            }
+                        }
                     }
                 }
 

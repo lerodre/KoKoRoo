@@ -78,6 +78,10 @@ impl HostelApp {
                 && !existing_pubkeys.contains(&contact.pubkey)
             {
                 let next_idx = self.groups[group_idx].next_sender_index;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
                 new_members.push((ci, GroupMember {
                     pubkey: contact.pubkey,
                     nickname: contact.nickname.clone(),
@@ -86,6 +90,7 @@ impl HostelApp {
                     address: contact.last_address.clone(),
                     port: contact.last_port.clone(),
                     is_admin: false,
+                    joined_at: now,
                 }));
                 self.groups[group_idx].next_sender_index += 1;
             }
