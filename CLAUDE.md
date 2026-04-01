@@ -141,6 +141,7 @@ Opus codec: 48kHz mono, 960-sample frames (20ms), 64kbps bitrate, VOIP applicati
 
 - **No credits/co-author lines** in commit messages. Never add `Co-Authored-By` or similar attribution tags.
 - Commit messages should be concise and describe what changed and why.
+- **Zero warnings policy**: builds must compile with no warnings. Fix all warnings before committing.
 
 ## Branch & release workflow
 
