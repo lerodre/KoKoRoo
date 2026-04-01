@@ -337,7 +337,7 @@ impl GroupChatHistory {
             }
         }
 
-        let mut hist = GroupChatHistory {
+        let hist = GroupChatHistory {
             group_id: group_id.to_string(),
             channel_id: channel_id.to_string(),
             messages,
