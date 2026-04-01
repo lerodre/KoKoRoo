@@ -78,7 +78,12 @@ impl HostelApp {
         let group_id = group::generate_group_id();
         let now = identity::now_timestamp();
 
-        // Add ourselves as member 0 (admin)
+        let now_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Add ourselves as member 0 (admin, founding member)
         let mut members = vec![GroupMember {
             pubkey: self.identity.pubkey,
             nickname: self.settings.nickname.clone(),
@@ -87,6 +92,7 @@ impl HostelApp {
             address: self.best_ipv6.clone(),
             port: self.local_port.clone(),
             is_admin: true,
+            joined_at: 0, // founding member
         }];
 
         // Add selected contacts
@@ -101,6 +107,7 @@ impl HostelApp {
                     address: contact.last_address.clone(),
                     port: contact.last_port.clone(),
                     is_admin: false,
+                    joined_at: now_ts,
                 });
                 next_index += 1;
             }
