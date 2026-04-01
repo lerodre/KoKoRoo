@@ -220,6 +220,26 @@ When clicking the call button from the sidebar, the first click sometimes dials 
 
 ---
 
+### 15. Daemon blocked during 1:1 voice calls
+
+**Risk: UX limitation**
+
+During a 1:1 voice call, the daemon releases its UDP socket (`YieldSocket`) so the voice engine can use port 9000. While in a call:
+- No messages are received or sent
+- No incoming call notifications
+- No group chat, sync, or presence updates
+- All messaging resumes after hanging up (`ReclaimSocket`)
+
+**Root cause:** Voice engine and daemon share the same UDP port (9000).
+
+**Future fix:** Use separate ports (9000 for daemon, 9001 for voice) so the daemon never stops. This is a significant architectural refactor.
+
+**Workaround:** None. Messages queue on the sender side and arrive after the call ends.
+
+**Status:** Open (architecture limitation)
+
+---
+
 ## Priority Summary
 
 | # | Issue | Risk | User mitigation |
@@ -238,3 +258,4 @@ When clicking the call button from the sidebar, the first click sometimes dials 
 | 11 | No rotation on voluntary leave | LOW | Future improvement |
 | 13 | previous_key no expiration | LOW | Future improvement |
 | 14 | Call button uses default port on first click | UX | Click contact twice |
+| 15 | Daemon blocked during 1:1 calls | UX | Messages arrive after call |
